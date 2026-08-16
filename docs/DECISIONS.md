@@ -445,3 +445,140 @@ path — latency-sensitive, and already the most dangerous code in the project �
 because a provisioning failure would then surface as a mysterious mount failure
 rather than a startup condition the user can see and fix.
 
+
+---
+
+## ADR-013 — The Terminal profile contract: the config key is the identity
+
+**Status:** Accepted (2026-08-16). Resolves `bs-z0q` and `bs-08g`. Amends ADR-006's
+implementation note.
+
+**Context.** `docs/ARCHITECTURE.md` §3 said a host's profile commandline is
+`ssh <host>` without ever saying what `<host>` expands to, and ADR-006 described
+profile GUIDs loosely. E7 and E8 were built independently against that same
+sentence, which is not a safe way to build a contract between two components.
+
+Verified research into Terminal's fragment mechanism (recorded on `bs-3ir`)
+established that Terminal derives a fragment profile's GUID as
+`UUIDv5(UUIDv5(TERMINAL_FRAGMENT_NS, app-name), profile-name)` — the GUID is a
+hash of the **name**.
+
+**Decision.**
+
+1. The emitted commandline uses the host's **config key**:
+   `ssh example-nas`, or `ssh -t example-nas tmux new -A -s <session>`.
+2. Bosun emits an **explicit `guid`**, derived by the documented UUIDv5 algorithm
+   from the host's **config key** rather than letting Terminal derive one from
+   `display_name`.
+3. Using key-based profiles means Bosun's Terminal profiles depend on the user's
+   own `~/.ssh/config`. That is a **documented prerequisite**, stated in README's
+   Requirements and given a triage row in `docs/OPERATIONS.md`.
+
+**Reasoning.**
+
+*Why the config key and not a fully-specified `ssh -i <key> -p <port> <user>@<host>`.*
+The fully-specified form looks more self-contained and is worse. It targets
+`user@hostname` directly, so it does **not** match a `Host <alias>` block in the
+user's `ssh_config` — which silently discards `ProxyJump`, custom ciphers, agent
+forwarding, and everything else configured there. ADR-010 explicitly courts users
+with bastion hosts, and `ProxyJump` is exactly how those are reached. `hosts.toml`
+does not model any of it and should not; `ssh_config` already does that job well.
+
+The tempting counter-argument — that `hostname`, `port`, `user` and
+`identity_file` become dead weight if the terminal profile ignores them — is
+wrong. Those four fields are what `config/create` writes into the rclone sftp
+remote. They earn their place serving rclone whatever the profile emits.
+
+*Why an explicit GUID from the config key.* Because the GUID is a hash of the
+profile name, renaming a host's `display_name` makes Terminal see an entirely new
+profile, silently orphaning whatever per-profile customisation the user had
+layered onto the old one. The config key is already the stable identity
+everywhere else in the system: E2 deliberately separated `Key` from
+`DisplayName`, E5 keys supervisor state on it, E8 correlates live sessions to it.
+Letting Terminal identity follow `display_name` would make this the single place
+where identity means something different.
+
+Owning the derivation costs about twenty lines, and Microsoft publishes a worked
+test vector (app `"Git"`, profile `"Git Bash"` →
+`{2ece5bfe-50ed-5f3a-ab87-5cd4baafed2b}`) so the implementation is verifiable
+rather than hopeful. Use it as a unit test.
+
+**Consequences.**
+
+- README's Requirements section must state that Bosun's Terminal profiles expect a
+  matching `Host <config-key>` block in `~/.ssh/config`. This is the one genuine
+  cost of the decision and it must not be discovered by a user at the point of
+  failure.
+- `docs/OPERATIONS.md` gains a triage row: profile opens but the connection fails
+  → check for a matching `Host` block.
+- E8's `SshCommandLineParser` is already correct under this decision and needs no
+  change. The E7/E8 contract should still be pinned by a test that feeds E7's
+  actual emitted commandline through E8's parser and asserts it correlates —
+  cheap, and it is the contract.
+- Bosun may *read* `~/.ssh/config` if validating the prerequisite ever becomes
+  worthwhile. Invariant I5 forbids touching Terminal's `settings.json`; it says
+  nothing about ssh's config. Not worth building until wanted.
+
+---
+
+## ADR-014 — Unreachable hosts: poll by tier, and make the Mount click mean something
+
+**Status:** Accepted (2026-08-16). Resolves `bs-gaw`. Amends ADR-008 and ADR-011.
+
+**Context.** Independent adversarial testing of E5 surfaced a contradiction
+between two accepted decisions.
+
+ADR-011 rule 1 says `probe.interval_seconds` governs polling while a host is
+**idle**, naming `Ready` *and* `Unreachable`, and that `0` means do not poll while
+idle. Its Consequence paragraph is blunter: "on-demand hosts generate no traffic
+until the user mounts one."
+
+`docs/ARCHITECTURE.md` §4 Backoff says `Unreachable → Probing` uses the backoff
+ladder, unconditionally, with no exemption for `interval_seconds = 0`. The
+implementation follows §4 and polls an `interval_seconds = 0` on-demand host every
+300s forever while its server is off.
+
+Taking ADR-011 literally is worse, and this is the part that makes the decision
+non-obvious: an `Unreachable` host that is never re-polled can never reach
+`Ready`, and transition rule 1 forbids `Mounting` from anywhere else. So the
+tray's Mount click on that host becomes a **permanent silent no-op** — the user
+clicks, nothing happens, forever, with no error. Today `RequestMountAsync` in
+that state logs at Debug and returns.
+
+**Decision.**
+
+1. A host in `Unreachable` is polled on the backoff ladder **if its mount mode is
+   `persistent`**. Persistent hosts must keep polling: that is the mechanism by
+   which a drive returns on its own, which is `docs/OPERATIONS.md` T2.
+2. An **on-demand** host in `Unreachable` is **not** polled. It stays dark until
+   the user acts.
+3. `RequestMountAsync` on an `Unreachable` host **triggers an immediate probe**,
+   and proceeds to mount if it passes. It is never a silent no-op.
+
+**Reasoning.**
+
+The split by tier is what makes ADR-008 and ADR-011 true rather than
+aspirational. "On-demand hosts generate no traffic until the user mounts one"
+holds literally, because under decision 3 the user's click is precisely what
+generates the traffic.
+
+Decision 3 also honours Invariant I1 without weakening it. The click does not
+mount; it *probes*, and mounts only if the probe passes. Nothing reaches
+`Mounting` except from `Ready` after a passing deep probe, exactly as before — the
+user's action simply supplies the trigger that a suppressed timer would not.
+
+The alternative, polling every `Unreachable` host regardless of tier, costs one
+probe per down host per 300s. Small, but it is exactly the noise ADR-008 set out
+to avoid, and on-demand hosts are frequently the ones that are off.
+
+**Consequences.**
+
+- `docs/ARCHITECTURE.md` §4 gains an explicit rule for `RequestMountAsync` from
+  `Unreachable`. "Silently does nothing" is not a defensible behaviour for a tray
+  menu item and should never have been reachable.
+- ADR-011's Consequence paragraph becomes literally true rather than approximately
+  true.
+- A persistent host that is unreachable still generates ladder traffic while its
+  server is off. That is intended: it is what makes the drive come back without
+  the user doing anything.
+
