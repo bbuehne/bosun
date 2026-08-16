@@ -2,6 +2,7 @@ using Bosun.Configuration;
 using Bosun.Rclone;
 using Bosun.Rclone.Process;
 using Bosun.Supervisor;
+using Bosun.Terminal;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -12,15 +13,28 @@ namespace Bosun.Hosting;
 /// The ONE hosted service that owns ADR-012 Decision 1's ordered startup sequence (bs-6f9):
 ///
 /// <code>
-/// load config -&gt; detect WinFsp -&gt; start rclone rcd + health check
+/// load config -&gt; write Terminal fragment -&gt; detect WinFsp -&gt; start rclone rcd + health check
 ///   -&gt; provision remotes -&gt; adopt-or-clear existing mounts -&gt; run the supervisor
 /// </code>
 ///
-/// Also resolves bs-127 (register <see cref="RcloneProcessService"/> as a hosted service) and
-/// bs-bw4 (nothing was calling <see cref="IRcloneRemoteProvisioner.EnsureRemoteAsync"/>): this
-/// class is now the one place that calls both, in the order that makes them correct.
+/// Also resolves bs-127 (register <see cref="RcloneProcessService"/> as a hosted service),
+/// bs-bw4 (nothing was calling <see cref="IRcloneRemoteProvisioner.EnsureRemoteAsync"/>), and
+/// bs-3lt (nothing was calling <see cref="FragmentRewriteCoordinator"/>): this class is now the
+/// one place that calls all three, in the order that makes them correct.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Why the Terminal fragment write is early and ungated (bs-3lt).</b> It runs immediately after
+/// config loads -- before WinFsp detection, before rclone -- and is never skipped just because a
+/// LATER step failed. ADR-012's whole degradation model rests on Terminal profiles being the half
+/// of Bosun that keeps working when mounting cannot; putting the write after WinFsp/rclone would
+/// mean a machine with neither (the maintainer's own machine, today) gets no working profiles
+/// either, which defeats the point. A write failure here is its own degradation -- recorded in
+/// <see cref="StartupReadiness.TerminalFragmentWritten"/> /
+/// <see cref="StartupReadiness.TerminalFragmentFaultMessage"/> with a causal reason (ADR-012
+/// Decision 3) -- and must never abort startup or disable mounting; see the try/catch around it
+/// below.
+/// </para>
 /// <para>
 /// <b>Why one hosted service and not several independent <c>AddHostedService</c> registrations.</b>
 /// The order above is load-bearing (see the class-level doc on the individual steps below), and
@@ -48,9 +62,13 @@ namespace Bosun.Hosting;
 /// <see langword="try"/>/<see langword="catch"/> -- constructor injection would let the DI
 /// container attempt it implicitly (and uncatchably, from this class's point of view) the moment
 /// something else asked for an <see cref="IHostConfigStore"/>. The same reasoning applies to
-/// <see cref="RcloneProcessService"/>, <see cref="IRcloneRemoteProvisioner"/>, and
-/// <see cref="MountSupervisor"/>: each depends on <see cref="IHostConfigStore"/> transitively, so
-/// none of them may be resolved before this class has confirmed config loaded successfully.
+/// <see cref="FragmentRewriteCoordinator"/>, <see cref="RcloneProcessService"/>,
+/// <see cref="IRcloneRemoteProvisioner"/>, and <see cref="MountSupervisor"/>: each depends on
+/// <see cref="IHostConfigStore"/> transitively, so none of them may be resolved before this class
+/// has confirmed config loaded successfully. This is also why <see cref="FragmentRewriteCoordinator"/>
+/// is registered in <c>BosunHostFactory</c> but never independently resolved or
+/// constructor-injected anywhere else -- its own class remarks record the same constraint from the
+/// other side.
 /// </para>
 /// <para>
 /// <b>Why <see cref="MountSupervisor"/> (the concrete type) and not <see cref="IMountSupervisor"/>.</b>
@@ -74,6 +92,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
     private readonly object readinessGate = new();
 
     private IHostConfigStore? configStore;
+    private FragmentRewriteCoordinator? fragmentRewriteCoordinator;
     private RcloneProcessService? rcloneProcessService;
     private IRcloneRemoteProvisioner? remoteProvisioner;
     private MountSupervisor? mountSupervisor;
@@ -153,6 +172,10 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         }
 
         stopped = true;
+
+        // Unsubscribes from IHostConfigStore.ConfigChanged -- harmless to skip (the process is
+        // exiting either way) but cheap and symmetric with every other subscription torn down here.
+        fragmentRewriteCoordinator?.Dispose();
 
         if (rcloneProcessService is not null)
         {
@@ -234,6 +257,29 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
                 "provisioning are disabled until this is fixed and Bosun is restarted", options.ConfigPath);
         }
 
+        // Step 1b: write the initial Windows Terminal fragment (bs-3lt). Deliberately immediately
+        // after config loads and BEFORE WinFsp/rclone -- see the class remarks on why this must be
+        // early and ungated. Skipped only when there is no config to write from at all (ConfigState
+        // == Invalid); a failure here is its own degradation, never fatal to the rest of startup.
+        var fragmentWritten = false;
+        string? fragmentFaultMessage = null;
+        if (configState != ConfigReadinessState.Invalid)
+        {
+            try
+            {
+                fragmentRewriteCoordinator = services.GetRequiredService<FragmentRewriteCoordinator>();
+                await fragmentRewriteCoordinator.WriteInitialAsync(ct).ConfigureAwait(false);
+                fragmentWritten = true;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(
+                    ex, "Failed to write the initial Windows Terminal fragment at {ConfigPath}; Terminal " +
+                    "profiles may be missing or stale until this is fixed, but mounting is unaffected", options.ConfigPath);
+                fragmentFaultMessage = ex.Message;
+            }
+        }
+
         // Step 2: detect WinFsp. Independent of config -- always runs, always reported accurately,
         // regardless of what step 1 produced (ADR-012's fail-soft principle: a failed step
         // disables what depends on it and leaves everything else running). Wrapped for the same
@@ -257,6 +303,8 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         {
             ConfigState = configState,
             ConfigErrors = configErrors,
+            TerminalFragmentWritten = fragmentWritten,
+            TerminalFragmentFaultMessage = fragmentFaultMessage,
             WinFspInstalled = winFsp.IsInstalled,
             WinFspMessage = winFsp.Message,
             RcloneHealthy = false,

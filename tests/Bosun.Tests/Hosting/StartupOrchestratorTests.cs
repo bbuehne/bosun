@@ -4,11 +4,13 @@ using Bosun.Probe;
 using Bosun.Rclone;
 using Bosun.Rclone.Process;
 using Bosun.Supervisor;
+using Bosun.Terminal;
 using Bosun.Tests.Configuration.Fakes;
 using Bosun.Tests.Hosting.Fakes;
 using Bosun.Tests.Rclone.Fakes;
 using Bosun.Tests.Rclone.Process.Fakes;
 using Bosun.Tests.Supervisor.Fakes;
+using Bosun.Tests.Terminal.Fakes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -43,6 +45,11 @@ public sealed class StartupOrchestratorTests
         Assert.True(readiness.RcloneHealthy);
         Assert.True(readiness.SupervisorRunning);
         Assert.Single(harness.Launcher.StartCalls);
+
+        // bs-3lt: AwaitingFirstRun is still a valid (empty) config -- the fragment gets written too,
+        // even with zero hosts, not just Loaded.
+        Assert.True(readiness.TerminalFragmentWritten);
+        Assert.NotEmpty(harness.FragmentFileSystem.DestinationContent(harness.FragmentPath) ?? "");
     }
 
     [Fact]
@@ -60,6 +67,65 @@ public sealed class StartupOrchestratorTests
         Assert.Equal(GlobalConfig.DefaultRcloneRcPort, parsed.Global.RcloneRcPort);
         Assert.Equal(GlobalConfig.DefaultFailuresBeforeUnmount, parsed.Global.FailuresBeforeUnmount);
         Assert.Equal(GlobalConfig.DefaultMountedProbeIntervalSeconds, parsed.Global.MountedProbeIntervalSeconds);
+    }
+
+    [Fact]
+    public async Task Fragment_IsWrittenBeforeWinFspDetection_AndBeforeRclone()
+    {
+        // bs-3lt: the fragment write must happen immediately after config loads, strictly before
+        // WinFsp detection or rclone -- Terminal profiles must not wait on, or be skipped by,
+        // anything downstream that can fail (ADR-012's degradation model). Proven directly rather
+        // than inferred: the winFspReader callback below captures whether the fragment was already
+        // written by the time WinFsp detection actually runs.
+        var fragmentFileSystem = new FakeFragmentFileSystem();
+        var fragmentWrittenBeforeWinFspRan = false;
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(
+            initialConfigContent: ValidConfig(hostBlocks: [host]),
+            fragmentFileSystem: fragmentFileSystem,
+            winFspReader: () =>
+            {
+                fragmentWrittenBeforeWinFspRan = fragmentFileSystem.TouchedPaths.Count > 0;
+                return @"C:\WinFsp";
+            });
+
+        await harness.StartAsync();
+
+        Assert.True(fragmentWrittenBeforeWinFspRan, "the fragment should already be written by the time WinFsp detection runs");
+        Assert.True(harness.Orchestrator.Current.TerminalFragmentWritten);
+        Assert.Null(harness.Orchestrator.Current.TerminalFragmentFaultMessage);
+        Assert.Contains("nas", fragmentFileSystem.DestinationContent(harness.FragmentPath));
+    }
+
+    [Fact]
+    public async Task FragmentWriteFailure_IsRecordedCausally_ButDoesNotAbortStartupOrDisableMounting()
+    {
+        // bs-3lt: "a fragment-write failure is its own degradation ... must not abort startup, and
+        // must not disable mounting" -- proven here by driving the exact same persistent-mount,
+        // WinFsp-and-rclone-healthy path RemotesAreProvisionedBeforeTheFirstDeepProbe/other happy
+        // tests use, but with the fragment write forced to fail, and asserting the mount still
+        // happens.
+        var host = HostBlock("nas", MountMode.Persistent, drive: "P:");
+        await using var harness = new Harness(
+            initialConfigContent: ValidConfig(hostBlocks: [host]),
+            failFragmentWriteWith: new IOException("disk full"));
+
+        await harness.StartAsync();
+
+        var readiness = harness.Orchestrator.Current;
+        Assert.False(readiness.TerminalFragmentWritten);
+        Assert.Contains("disk full", readiness.TerminalFragmentFaultMessage, StringComparison.Ordinal);
+
+        // Everything else -- WinFsp, rclone, provisioning, the supervisor, and the actual mount --
+        // is completely unaffected.
+        Assert.True(readiness.WinFspInstalled);
+        Assert.True(readiness.RcloneHealthy);
+        Assert.True(readiness.SupervisorRunning);
+        Assert.True(readiness.MountingAvailable);
+        Assert.Contains("nas", harness.Provisioner.EnsureRemoteCalls);
+        Assert.Single(harness.RcloneClient.MountCalls);
+        var snapshot = harness.MountSupervisor.GetSnapshot().Single(h => h.HostKey == "nas");
+        Assert.Equal(MountState.Mounted, snapshot.State);
     }
 
     [Fact]
@@ -86,6 +152,11 @@ public sealed class StartupOrchestratorTests
 
         Assert.False(readiness.MountingAvailable);
         Assert.Equal("the configuration file is invalid", readiness.MountBlockedReason("anything"));
+
+        // bs-3lt: nothing to write a fragment FROM -- there is no config, valid or otherwise (this
+        // is distinct from AwaitingFirstRun, where the template itself is a valid, empty config).
+        Assert.False(readiness.TerminalFragmentWritten);
+        Assert.Empty(harness.FragmentFileSystem.TouchedPaths);
     }
 
     [Fact]
@@ -123,6 +194,11 @@ public sealed class StartupOrchestratorTests
         var snapshot = harness.MountSupervisor.GetSnapshot().Single(h => h.HostKey == "nas");
         Assert.Equal(MountState.Ready, snapshot.State);
         Assert.Equal("WinFsp is not installed", snapshot.MountUnavailableReason);
+
+        // bs-3lt: the fragment write does not depend on WinFsp at all -- Terminal profiles are
+        // exactly the thing that must still work when mounting cannot.
+        Assert.True(readiness.TerminalFragmentWritten);
+        Assert.Contains("nas", harness.FragmentFileSystem.DestinationContent(harness.FragmentPath));
     }
 
     [Fact]
@@ -146,6 +222,10 @@ public sealed class StartupOrchestratorTests
         // neither rclone nor WinFsp) even though nothing can mount.
         Assert.True(readiness.SupervisorRunning);
         Assert.False(readiness.MountingAvailable);
+
+        // bs-3lt: the fragment write does not depend on rclone either -- it runs before rclone is
+        // even started.
+        Assert.True(readiness.TerminalFragmentWritten);
     }
 
     [Fact]
@@ -387,10 +467,12 @@ public sealed class StartupOrchestratorTests
     {
         public string Root { get; }
         public string ConfigPath { get; }
+        public string FragmentPath { get; }
         public FakeRcloneProcessLauncher Launcher { get; } = new();
         public FakeRcloneClient RcloneClient { get; } = new();
         public FakeProbe Probe { get; } = new();
         public FakeRcloneRemoteProvisioner Provisioner { get; }
+        public FakeFragmentFileSystem FragmentFileSystem { get; }
         public FakeTimeProvider RcloneTime { get; } = new();
         public FakeTimeProvider SupervisorTime { get; } = new();
         public List<string> Order { get; } = [];
@@ -406,11 +488,27 @@ public sealed class StartupOrchestratorTests
             Func<string?>? winFspReader = null,
             TimeSpan? healthCheckTimeout = null,
             TimeSpan? healthCheckPollInterval = null,
-            TimeSpan? restartDelay = null)
+            TimeSpan? restartDelay = null,
+            Exception? failFragmentWriteWith = null,
+            FakeFragmentFileSystem? fragmentFileSystem = null)
         {
             Root = Path.Combine(Path.GetTempPath(), "bosun-tests", "orchestrator", Guid.NewGuid().ToString("N"));
             ConfigPath = Path.Combine(Root, "hosts.toml");
+            // A fake path under the test's own temp Root -- never the real
+            // %LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Bosun\bosun.json (CLAUDE.md
+            // worktree-safety rules; bs-3lt's own acceptance criteria) -- and FakeFragmentFileSystem
+            // never touches disk regardless, so this path is never actually created.
+            FragmentPath = Path.Combine(Root, "fake-fragments", "bosun.json");
             Provisioner = new FakeRcloneRemoteProvisioner(Order);
+            // Accepts a caller-supplied instance so a test can hold a direct reference to it (e.g.
+            // to inspect write ordering from inside a winFspReader callback) without going through
+            // the not-yet-assigned Harness variable itself.
+            FragmentFileSystem = fragmentFileSystem ?? new FakeFragmentFileSystem();
+
+            if (failFragmentWriteWith is not null)
+            {
+                FragmentFileSystem.FailOnWrite = failFragmentWriteWith;
+            }
 
             if (initialConfigContent is not null)
             {
@@ -459,6 +557,17 @@ public sealed class StartupOrchestratorTests
 
             services.AddSingleton<IFirstRunConfigBootstrapper, FirstRunConfigBootstrapper>();
             services.AddSingleton<IWinFspDetector>(new WinFspDetector(winFspReader ?? (() => @"C:\WinFsp")));
+
+            // bs-3lt: the same fake-filesystem/fake-path pattern FragmentWriterTests /
+            // FragmentRewriteCoordinatorTests already use -- FakeFragmentFileSystem never touches a
+            // real path regardless of what FragmentPath is set to, so this is safe from a worktree.
+            services.AddSingleton<IFragmentFileSystem>(FragmentFileSystem);
+            services.AddSingleton(new FragmentWriterOptions { FragmentPath = FragmentPath });
+            services.AddSingleton<IFragmentWriter, FragmentWriter>();
+            services.AddSingleton(sp => new FragmentRewriteCoordinator(
+                sp.GetRequiredService<IFragmentWriter>(),
+                sp.GetRequiredService<IHostConfigStore>(),
+                sp.GetRequiredService<ILogger<FragmentRewriteCoordinator>>()));
 
             Services = services.BuildServiceProvider();
 

@@ -201,6 +201,51 @@ public sealed class ConfigValidatorTests
         Assert.Equal("negative-probe-interval", error.Rule);
     }
 
+    // -- bs-ze7: session.tmux = true requires session.tmux_session ------------------------------
+
+    [Fact]
+    public void Validate_TmuxTrueWithNullSession_IsRejected()
+    {
+        var config = Build(h => h with { Session = h.Session with { Tmux = true, TmuxSession = null } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("tmux-requires-session", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_TmuxTrueWithEmptySession_IsRejected()
+    {
+        var config = Build(h => h with { Session = h.Session with { Tmux = true, TmuxSession = "" } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("tmux-requires-session", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_TmuxTrueWithSessionName_IsAccepted()
+    {
+        var config = Build(h => h with { Session = h.Session with { Tmux = true, TmuxSession = "main" } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void Validate_TmuxFalseWithNoSession_IsAccepted()
+    {
+        // tmux_session is only meaningful when tmux = true -- absent is fine when tmux is off.
+        var config = Build(h => h with { Session = h.Session with { Tmux = false, TmuxSession = null } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
     [Fact]
     public void Validate_ProbeIntervalSecondsZero_IsAccepted()
     {

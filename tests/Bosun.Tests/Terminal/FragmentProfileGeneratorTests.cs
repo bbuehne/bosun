@@ -139,6 +139,32 @@ public sealed class FragmentProfileGeneratorTests
     }
 
     [Fact]
+    public void CreateProfile_reconnect_wraps_with_a_bounded_retry_count_and_a_giveup_message()
+    {
+        // bs-ew1: an unbounded loop cannot tell "connection keeps dropping" apart from "ssh.exe
+        // cannot be launched at all" (cmd.exe's own not-recognised exit code, 9009, is >= 255 and
+        // so satisfies the same retry condition as a dropped connection) and spins forever with
+        // nothing surfaced. Verified against a real cmd.exe (see FragmentProfileGenerator's remarks
+        // on WrapWithReconnectLoop) -- this test only pins the generated string's shape.
+        var host = TerminalHostFixtures.Host("example-remote", reconnect: true);
+
+        var profile = FragmentProfileGenerator.CreateProfile(host);
+
+        // Bounded, not the old "for /l %n in (1,0,2)" infinite-step-zero form.
+        Assert.Contains($"for /l %n in (1,1,{FragmentProfileGenerator.MaxReconnectAttempts})", profile.CommandLine);
+        Assert.DoesNotContain("(1,0,2)", profile.CommandLine);
+
+        // A give-up message fires only after the cap, reporting the last exit code -- so the tab
+        // says what happened instead of scrolling forever.
+        Assert.Contains($"giving up after {FragmentProfileGenerator.MaxReconnectAttempts} attempts", profile.CommandLine);
+        Assert.Contains("last exit code", profile.CommandLine);
+
+        // Delayed expansion is required for !errorlevel! to reflect the real, current value in a
+        // single-line `cmd /c "..."` invocation (see the remarks for why %errorlevel% is stale there).
+        Assert.Contains("/v:on", profile.CommandLine);
+    }
+
+    [Fact]
     public void CreateProfile_reconnect_false_does_not_wrap_at_all()
     {
         var host = TerminalHostFixtures.Host("example-remote", reconnect: false);

@@ -81,6 +81,7 @@ public sealed class StartupReadinessTests
         var readiness = StartupReadiness.Initial;
 
         Assert.Equal(ConfigReadinessState.Invalid, readiness.ConfigState);
+        Assert.False(readiness.TerminalFragmentWritten);
         Assert.False(readiness.WinFspInstalled);
         Assert.False(readiness.RcloneHealthy);
         Assert.False(readiness.SupervisorRunning);
@@ -90,6 +91,7 @@ public sealed class StartupReadinessTests
     private static StartupReadiness Loaded() => new()
     {
         ConfigState = ConfigReadinessState.Loaded,
+        TerminalFragmentWritten = true,
         WinFspInstalled = true,
         WinFspMessage = "WinFsp found.",
         RcloneHealthy = true,

@@ -9,19 +9,21 @@ namespace Bosun.Terminal;
 /// "rewrite on config change" requirement).
 /// </summary>
 /// <remarks>
-/// <b>Deliberately not registered in <c>BosunHostFactory</c> yet, and deliberately not an
-/// <see cref="Microsoft.Extensions.Hosting.IHostedService"/>.</b> <c>StartupOrchestrator</c>'s own
-/// class remarks (ADR-012) are explicit that <c>IHostConfigStore</c> must be resolved from
-/// <see cref="IServiceProvider"/> by exactly one place, wrapped in a try/catch, because its
-/// registered factory does real synchronous file I/O and throws on an invalid or unreadable first
-/// load -- and that an <see cref="Microsoft.Extensions.Hosting.IHostedService"/> whose constructor
-/// (via DI activation, which happens before <c>StartAsync</c> even runs and is NOT wrapped by the
-/// generic host) resolves it independently would race that guarantee. Deciding exactly where in the
-/// startup sequence fragment-writing should first happen is therefore an ordering question for
-/// whoever owns that sequence, not an implementation detail of E7 -- see the discovered-work note in
-/// the E7 delivery report. This class is fully built and tested in isolation (a caller supplies an
-/// already-resolved <see cref="IHostConfigStore"/> and <see cref="IFragmentWriter"/> directly) so
-/// wiring it in later is a one-line, low-risk change once that ordering decision is made.
+/// <b>Registered in <c>BosunHostFactory</c> as a resolvable singleton, but deliberately NOT an
+/// <see cref="Microsoft.Extensions.Hosting.IHostedService"/> and NOT constructor-injected anywhere
+/// (bs-3lt).</b> <c>StartupOrchestrator</c>'s own class remarks (ADR-012) are explicit that
+/// <c>IHostConfigStore</c> must be resolved from <see cref="IServiceProvider"/> by exactly one
+/// place, wrapped in a try/catch, because its registered factory does real synchronous file I/O and
+/// throws on an invalid or unreadable first load -- and that an
+/// <see cref="Microsoft.Extensions.Hosting.IHostedService"/> whose constructor (via DI activation,
+/// which happens before <c>StartAsync</c> even runs and is NOT wrapped by the generic host)
+/// resolves it independently would race that guarantee. <c>StartupOrchestrator</c> is therefore the
+/// one and only place that ever calls <c>GetRequiredService&lt;FragmentRewriteCoordinator&gt;()</c>
+/// -- immediately after confirming config loaded successfully, before WinFsp detection or rclone
+/// (ADR-012's degradation model: Terminal profiles are the half of Bosun that works when mounting
+/// cannot). This class is fully built and tested in isolation from that wiring (a caller supplies an
+/// already-resolved <see cref="IHostConfigStore"/> and <see cref="IFragmentWriter"/> directly), which
+/// is what made it a one-line-per-call-site, low-risk wire-up once the ordering decision landed.
 /// </remarks>
 public sealed class FragmentRewriteCoordinator : IDisposable
 {
@@ -45,11 +47,23 @@ public sealed class FragmentRewriteCoordinator : IDisposable
         _store.ConfigChanged += OnConfigChanged;
     }
 
-    /// <summary>Writes the fragment for whatever config the store is currently serving. Callers
-    /// invoke this once, explicitly, to seed the fragment at startup -- construction itself never
-    /// does I/O (matches the "constructing a service does nothing" convention <c>BosunHostFactory</c>
-    /// relies on for worktree safety).</summary>
-    public Task WriteInitialAsync(CancellationToken cancellationToken = default) => WriteSafeAsync(_store.Current, cancellationToken);
+    /// <summary>
+    /// Writes the fragment for whatever config the store is currently serving. Callers invoke this
+    /// once, explicitly, to seed the fragment at startup -- construction itself never does I/O
+    /// (matches the "constructing a service does nothing" convention <c>BosunHostFactory</c> relies
+    /// on for worktree safety).
+    /// </summary>
+    /// <remarks>
+    /// Deliberately calls <see cref="IFragmentWriter.WriteAsync"/> directly rather than going
+    /// through <see cref="WriteSafeAsync"/> -- unlike <see cref="OnConfigChanged"/> (a synchronous
+    /// event handler that cannot safely block on, or propagate a failure from, an async write), the
+    /// caller here explicitly awaits this method BECAUSE it wants to know the outcome (bs-3lt:
+    /// <c>StartupOrchestrator</c> records a failure here into <c>StartupReadiness</c> with a causal
+    /// reason). Swallowing the exception here, the way <see cref="OnConfigChanged"/> must, would
+    /// make that impossible -- the caller would see a completed task regardless of whether anything
+    /// was actually written.
+    /// </remarks>
+    public Task WriteInitialAsync(CancellationToken cancellationToken = default) => _writer.WriteAsync(_store.Current, cancellationToken);
 
     private void OnConfigChanged(object? sender, ConfigChangedEventArgs e) =>
         _pendingWrite = WriteSafeAsync(e.Config, CancellationToken.None);
