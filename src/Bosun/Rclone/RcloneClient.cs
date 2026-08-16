@@ -28,7 +28,17 @@ public sealed class RcloneClient(HttpClient httpClient) : IRcloneClient
 
     /// <summary>Cache modes at or above the Invariant I6 floor. Anything else -- including
     /// <see langword="null"/>, empty, "off", "minimal", or a typo -- is clamped to "writes" by
-    /// <see cref="MountAsync"/>.</summary>
+    /// <see cref="MountAsync"/>.
+    ///
+    /// Kept as defence-in-depth after bs-lrd / bs-mb2 closed the underlying gap:
+    /// <see cref="Bosun.Configuration.ConfigValidator"/> now rejects any <c>mount.vfs_cache_mode</c>
+    /// outside this same allow-list ("invalid-vfs-cache-mode"), and
+    /// <see cref="Bosun.Configuration.ConfigParser"/> defaults an absent value to "writes" at
+    /// bind time, so this clamp should be unreachable --
+    /// every request built from a validated config already carries "writes" or "full". It stays
+    /// because this is the one place I6 is actually enforced on the wire (per the E3 brief), and
+    /// a caller that somehow bypasses config validation must still not be able to mount with a
+    /// cache mode below the floor.</summary>
     private static readonly HashSet<string> CacheModesAtOrAboveFloor =
         new(StringComparer.OrdinalIgnoreCase) { "writes", "full" };
 

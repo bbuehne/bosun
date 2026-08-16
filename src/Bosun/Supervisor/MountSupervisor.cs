@@ -731,12 +731,16 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     }
 
     /// <summary>
-    /// Defensive clamp for bs-z3y (open decision, no validation rule for
-    /// <c>global.failures_before_unmount</c> yet): treats anything below 1 as 1. Erring toward
-    /// unmounting-on-the-next-failure is the safe direction; erring toward "never unmounts" would
-    /// be a direct Invariant I2 violation. Logs once per process, loudly, the first time a clamp
-    /// is needed -- not fixing the missing validation rule, which is bs-z3y's call to make, not
-    /// this epic's.
+    /// Defensive clamp, kept as defence-in-depth after bs-z3y closed the underlying gap:
+    /// <see cref="ConfigValidator"/> now rejects <c>global.failures_before_unmount &lt; 1</c>
+    /// outright ("invalid-failures-before-unmount"), so this clamp should be unreachable in
+    /// practice -- every config that reaches the supervisor has already passed validation. It
+    /// stays rather than being deleted because a value could still arrive here some other way
+    /// (a future direct construction of <see cref="GlobalConfig"/> that bypasses
+    /// <see cref="ConfigValidator"/>, a test double, etc.), and if that ever happens, erring
+    /// toward unmounting-on-the-next-failure is the only safe direction -- erring toward "never
+    /// unmounts" would be a direct Invariant I2 violation. Logs once per process, loudly, the
+    /// first time a clamp is needed, precisely because it should never fire.
     /// </summary>
     private int EffectiveFailuresBeforeUnmount()
     {
@@ -750,7 +754,8 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         {
             loggedFailuresBeforeUnmountClamp = true;
             logger.LogWarning(
-                "global.failures_before_unmount is {Configured}, which has no validation rule yet (bs-z3y). " +
+                "global.failures_before_unmount is {Configured}, which ConfigValidator should have rejected " +
+                "(rule invalid-failures-before-unmount, bs-z3y) -- this clamp should be unreachable. " +
                 "Clamping to 1 so a mounted host is unmounted on its very next probe failure rather than never " +
                 "(Invariant I2: erring toward unmounting, never toward leaving a drive letter up indefinitely).",
                 configured);
