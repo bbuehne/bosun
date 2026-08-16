@@ -2,6 +2,7 @@ using Bosun.Configuration;
 using Bosun.Rclone;
 using Bosun.Rclone.Process;
 using Bosun.Supervisor;
+using Bosun.SystemEventIntegration;
 using Bosun.Terminal;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -96,6 +97,8 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
     private RcloneProcessService? rcloneProcessService;
     private IRcloneRemoteProvisioner? remoteProvisioner;
     private MountSupervisor? mountSupervisor;
+    private ISystemEventSource? systemEventSource;
+    private SystemEventSupervisorAdapter? systemEventAdapter;
     private CancellationTokenSource? supervisorLoopCts;
     private Task? supervisorLoopTask;
     private StartupReadiness current = StartupReadiness.Initial;
@@ -172,6 +175,15 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         }
 
         stopped = true;
+
+        // Unsubscribes from ISystemEventSource's events, then from the real static
+        // SystemEvents/NetworkChange classes underneath it (bs-ohk). Torn down first, before
+        // anything else here: SystemEvents holds its subscriber via a STATIC event (see
+        // Win32SystemEventSource's remarks), so leaving this subscribed would leak the adapter --
+        // and everything it references, including this orchestrator -- for the remaining lifetime
+        // of the process even though Bosun believes it has shut down.
+        systemEventAdapter?.Dispose();
+        systemEventSource?.Dispose();
 
         // Unsubscribes from IHostConfigStore.ConfigChanged -- harmless to skip (the process is
         // exiting either way) but cheap and symmetric with every other subscription torn down here.
@@ -353,6 +365,37 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         if (rcloneProcessService is not null)
         {
             rcloneProcessService.StatusChanged += OnRcloneProcessStatusChanged;
+        }
+
+        // Step 7: subscribe to system events (bs-ohk). Deliberately the LAST step of the ordered
+        // sequence, and deliberately gated on mountSupervisor -- not on supervisorStarted -- being
+        // non-null: as long as MountSupervisor was constructed and its RunAsync loop was launched
+        // (see StartMountSupervisorAsync), the command channel the adapter posts to is being
+        // pumped, even if that one initial StartAsync call itself happened to fail. Subscribing
+        // any earlier would mean an event could arrive before there is anything running to act on
+        // it (docs/ARCHITECTURE.md §3). Fail-soft, like every other step here (ADR-012 Decision 2):
+        // a subscription failure disables suspend/resume/network-change reactions for this session
+        // but never aborts startup.
+        if (mountSupervisor is not null)
+        {
+            try
+            {
+                systemEventSource = services.GetRequiredService<ISystemEventSource>();
+                systemEventAdapter = new SystemEventSupervisorAdapter(
+                    systemEventSource,
+                    mountSupervisor,
+                    configStore!,
+                    TimeProvider.System,
+                    services.GetRequiredService<ILogger<SystemEventSupervisorAdapter>>());
+                systemEventSource.Start();
+                logger.LogInformation("Subscribed to system power/network/session events");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(
+                    ex, "Failed to subscribe to system power/network/session events; suspend/resume/network-change " +
+                    "reactions are disabled this session");
+            }
         }
     }
 
