@@ -70,8 +70,14 @@ Markdown task lists are forbidden; do not create a `TODO.md`, a `PLAN.md`, or a
 - File an issue for any work that will take longer than roughly two minutes.
 - File issues for work you *discover* mid-task rather than silently expanding
   scope — that is what Beads is for.
-- When you finish a unit of work, close its issue and run `bd sync` so the JSONL
-  lands in git alongside the code.
+- When you finish a unit of work, close its issue and commit
+  `.beads/issues.jsonl` so the issue graph lands in git alongside the code.
+  `export.auto` is enabled, so bd refreshes that file after write commands
+  (throttled); `bd export` forces it immediately. There is **no `bd sync`
+  command** — it shipped only in the withdrawn v1.2.0/v1.2.1 releases, and
+  v1.2.2 is a re-release of the 1.1 line that deliberately excludes it. The
+  Dolt database in `.beads/embeddeddolt/` is gitignored, so without that commit
+  the issue graph does not survive a clone.
 
 **Do not assume `bd` flag syntax from this document.** Beads is under active
 development. Run `bd quickstart` and `bd --help` and use the syntax the installed
