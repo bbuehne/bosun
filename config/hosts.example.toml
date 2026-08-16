@@ -9,6 +9,7 @@ rclone_config_path              = "%APPDATA%\\rclone\\rclone.conf"
 probe_timeout_seconds           = 5
 failures_before_unmount         = 3
 backoff_seconds                 = [5, 15, 30, 60, 300]
+mounted_probe_interval_seconds  = 60
 suspend_unmount_timeout_seconds = 8
 start_with_windows              = true
 
@@ -67,6 +68,8 @@ identity_file = "~/.ssh/id_ed25519"
   color_scheme = "Campbell"
 
   [hosts.example-remote.probe]
+  # 0 = not polled while idle. Once mounted it is still probed, at
+  # global.mounted_probe_interval_seconds — see ADR-011.
   interval_seconds = 0
   deep_probe       = true
 

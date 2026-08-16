@@ -169,7 +169,8 @@ reconsidered.
 
 ## ADR-008 — Three independent per-host axes
 
-**Status:** Accepted
+**Status:** Accepted — amended by ADR-011 (the "not polled" consequence applies
+only while a host is idle, never while it is mounted)
 
 **Decision.** Mount lifecycle, terminal session autostart, and probe cadence are
 configured separately per host, not collapsed into a single "persistent /
@@ -180,9 +181,10 @@ no mount; an archive server wants a mount and no shell; a production box wants a
 mount, a red-tinted manual session, and aggressive probing. Collapsing these
 forces bad defaults.
 
-**Consequence.** On-demand hosts are **not polled**. Probing hosts the user is
-not using costs little bandwidth but makes the UI slow and the auth logs noisy.
-On-demand rows render as unknown until acted on.
+**Consequence.** On-demand hosts are **not polled while idle**. Probing hosts the
+user is not using costs little bandwidth but makes the UI slow and the auth logs
+noisy. On-demand rows render as unknown until acted on. Once such a host is
+mounted it *is* polled — see ADR-011.
 
 ---
 
@@ -234,3 +236,53 @@ declined without apology.
 filesystem mounts and that a failure can hang File Explorer. A stranger's bad
 day is louder than a stranger's good one; setting this expectation makes the
 occasional angry issue fair rather than surprising.
+
+---
+
+## ADR-011 — A mounted host is always probed
+
+**Status:** Accepted. Amends ADR-008.
+
+**Context.** ADR-008 established that on-demand hosts are not polled, and
+`docs/CONFIG-SCHEMA.md` gives `probe.interval_seconds = 0` as their sensible
+default — `config/hosts.example.toml`'s `example-remote` is configured exactly
+that way. Separately, `docs/ARCHITECTURE.md` §4 rule 3 made unmount-on-failure
+depend entirely on that same recurring probe: `failures_before_unmount`
+consecutive failures move a host from `Mounted` to `Draining`.
+
+Composed, those two rules produced a hole. An on-demand host with
+`interval_seconds = 0` that the user mounts from the tray is never probed while
+mounted. It therefore never accumulates a failure, never reaches `Draining`, and
+if the server dies the drive letter stays up pointing at nothing — the wedged
+Explorer that Invariant I2 and ADR-005 exist to prevent. The configuration the
+example file ships as a *recommended* default was the one that disabled the
+project's central safety property.
+
+**Decision.**
+
+1. `probe.interval_seconds` governs polling **while a host is idle** (`Ready`,
+   `Unreachable`) only. `0` means "do not poll while idle".
+2. A host in `Mounted` is **always** probed. The effective interval is
+   `min(interval_seconds, mounted_probe_interval_seconds)` when
+   `interval_seconds > 0`, and `mounted_probe_interval_seconds` when it is `0`.
+3. `global.mounted_probe_interval_seconds` is a new setting, default `60`. Absent
+   means `60`, not a validation error — no other `[global]` field is mandatory,
+   and rejecting a whole config for a newly-introduced key would break every
+   existing `hosts.toml` on upgrade. Zero or negative *is* a validation error,
+   because it would disable the cadence this ADR exists to guarantee.
+
+**Reasoning.** ADR-008's justification for not polling is that probing hosts *the
+user is not using* makes the UI slow and the auth logs noisy. A mounted host is
+by definition one the user is using, so the justification does not reach it —
+this is a clarification of ADR-008's scope rather than a reversal of it. The
+upper clamp in rule 2 exists for the same reason as the rule itself: a host
+configured with a long idle cadence must not inherit an unbounded unmount
+latency the moment it is mounted. With the defaults, worst-case time from host
+death to drive removal is `60 × 3 = 3 minutes`, which is what
+`docs/OPERATIONS.md` T3 already asserts.
+
+**Consequence.** On-demand hosts generate no traffic until the user mounts one,
+then probe at the mounted cadence until it is unmounted. The idle/mounted split
+must be visible in the supervisor's probe scheduling, not buried in a config
+default, and it is a named test case: a regression that stops probing mounted
+hosts is an I2 violation, not a performance change.

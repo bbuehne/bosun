@@ -82,6 +82,9 @@ Two levels:
 
 TCP success does not imply SFTP success. Never mount on a shallow probe alone.
 
+Probe scheduling depends on state, not only on configuration: an idle host may
+be left unpolled, a **mounted** host never is. See §4 rule 3 and ADR-011.
+
 ### `IMountSupervisor`
 Owns the state machine in §4. The only component permitted to call
 `mount/mount` and `mount/unmount`.
@@ -170,8 +173,23 @@ right before building any UI.
    `Unreachable` or `Probing` directly to `Mounting`. (Invariant I1.)
 2. Entering `Mounting` triggers a deep probe. Deep probe failure routes to
    `Draining`, not to `Mounted`.
-3. While `Mounted`, the shallow probe continues on the configured interval.
+3. While `Mounted`, a host is **always** shallow-probed, whatever
+   `probe.interval_seconds` says. The effective mounted interval is:
+
+   ```
+   interval_seconds > 0  →  min(interval_seconds, global.mounted_probe_interval_seconds)
+   interval_seconds == 0 →  global.mounted_probe_interval_seconds
+   ```
+
    `failures_before_unmount` consecutive failures (default 3) → `Draining`.
+
+   `probe.interval_seconds = 0` means "do not poll this host while it is idle"
+   (ADR-008). It must never mean "do not poll it while it is mounted": a mounted
+   host that is not probed can never accumulate failures, never reaches
+   `Draining`, and leaves a drive letter pointing at a dead host — the exact
+   failure this project exists to prevent (Invariant I2). The upper clamp exists
+   for the same reason: a host configured with a long idle interval must not
+   inherit an unbounded unmount latency once mounted. See ADR-011.
 4. `Draining` calls `mount/unmount`. If unmount does not confirm within the
    timeout, escalate to a forced unmount, then verify against `mount/listmounts`.
    Never leave the state machine believing a drive is gone when it is not.

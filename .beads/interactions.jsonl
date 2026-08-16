@@ -1,0 +1,1 @@
+{"id":"int-5aee4853cb2b63736f21a7b914e81e15","kind":"field_change","created_at":"2026-08-16T05:21:27.7270042Z","actor":"Barry","issue_id":"bs-6hy","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"CLAUDE.md §3 corrected; bd sync confirmed absent in 1.2.2 (withdrawn 1.2.x-only feature)"}}
