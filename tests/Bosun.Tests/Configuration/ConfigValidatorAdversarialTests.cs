@@ -353,17 +353,53 @@ public sealed class ConfigValidatorAdversarialTests
     }
 
     /// <summary>
-    /// Documents the CURRENT specified behaviour, not an endorsement of it: docs/CONFIG-SCHEMA.md
-    /// specifies <c>vfs_cache_mode</c> as a deny-list (<c>{off, minimal}</c>), so an
-    /// unrecognised value — a typo — passes validation and is handed to rclone as written. Open
-    /// as <c>bs-lrd</c>. This test is the canary: if it fails because someone introduced an
-    /// allow-list, that is very likely the right change and this test should be deliberately
-    /// rewritten, not deleted. Until then it catches an accidental, undecided tightening.
+    /// bs-lrd closed: <c>vfs_cache_mode</c> is now an allow-list (<c>{writes, full}</c>), not a
+    /// deny-list, so a typo like "wrties" is rejected at validation instead of reaching
+    /// <c>mount/mount</c> unrecognised. Rewritten from the canary this used to be
+    /// (<c>Validate_UnrecognisedVfsCacheModeTypo_CurrentlyPasses_BecauseTheRuleIsADenyList</c>),
+    /// which documented the deny-list gap and predicted exactly this change.
     /// </summary>
     [Fact]
-    public void Validate_UnrecognisedVfsCacheModeTypo_CurrentlyPasses_BecauseTheRuleIsADenyList()
+    public void Validate_UnrecognisedVfsCacheModeTypo_IsRejected_BecauseTheRuleIsNowAnAllowList()
     {
         var config = ConfigOf(ValidHost("host-a") with { Mount = ValidMount() with { VfsCacheMode = "wrties" } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-vfs-cache-mode", error.Rule);
+    }
+
+    /// <summary>
+    /// bs-mb2: the allow-list is compared case-insensitively, matching rclone's own flag
+    /// parsing. "Off" and "OFF" are the exact value Invariant I6 forbids, spelled differently —
+    /// a deny-list compared with <see cref="StringComparer.Ordinal"/> let both straight through.
+    /// </summary>
+    [Theory]
+    [InlineData("Off")]
+    [InlineData("OFF")]
+    [InlineData("Minimal")]
+    public void Validate_VfsCacheModeCasingVariantOfARejectedValue_IsStillRejected(string mode)
+    {
+        var config = ConfigOf(ValidHost("host-a") with { Mount = ValidMount() with { VfsCacheMode = mode } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-vfs-cache-mode", error.Rule);
+    }
+
+    /// <summary>
+    /// bs-mb2: the flip side of the casing check -- "Writes" and "FULL" are accepted, not just
+    /// their canonical lowercase spellings, because the comparison is case-insensitive in both
+    /// directions.
+    /// </summary>
+    [Theory]
+    [InlineData("Writes")]
+    [InlineData("FULL")]
+    public void Validate_VfsCacheModeCasingVariantOfAnAcceptedValue_IsAccepted(string mode)
+    {
+        var config = ConfigOf(ValidHost("host-a") with { Mount = ValidMount() with { VfsCacheMode = mode } });
 
         var result = ConfigValidator.Validate(config, AlwaysExists);
 

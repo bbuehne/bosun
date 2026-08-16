@@ -246,6 +246,218 @@ public sealed class ConfigValidatorTests
         Assert.True(result.IsValid);
     }
 
+    // -- bs-z3y: global.failures_before_unmount ----------------------------------------------
+
+    [Fact]
+    public void Validate_FailuresBeforeUnmountZero_IsRejected()
+    {
+        var config = Build(h => h, global => global with { FailuresBeforeUnmount = 0 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-failures-before-unmount", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_FailuresBeforeUnmountNegative_IsRejected()
+    {
+        var config = Build(h => h, global => global with { FailuresBeforeUnmount = -1 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-failures-before-unmount", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_FailuresBeforeUnmountOne_IsAccepted()
+    {
+        // The boundary itself: 1 is the smallest value that still lets a mounted host be
+        // unmounted (rather than never), so it must be accepted, not just "> 1".
+        var config = Build(h => h, global => global with { FailuresBeforeUnmount = 1 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
+    // -- bs-z3y: global.probe_timeout_seconds -------------------------------------------------
+
+    [Fact]
+    public void Validate_ProbeTimeoutSecondsZero_IsRejected()
+    {
+        var config = Build(h => h, global => global with { ProbeTimeoutSeconds = 0 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-probe-timeout", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_ProbeTimeoutSecondsNegative_IsRejected()
+    {
+        var config = Build(h => h, global => global with { ProbeTimeoutSeconds = -5 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-probe-timeout", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_ProbeTimeoutSecondsOne_IsAccepted()
+    {
+        var config = Build(h => h, global => global with { ProbeTimeoutSeconds = 1 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
+    // -- bs-z3y: global.rclone_rc_port --------------------------------------------------------
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(65536)]
+    [InlineData(100000)]
+    public void Validate_RcloneRcPortOutsideValidRange_IsRejected(int port)
+    {
+        var config = Build(h => h, global => global with { RcloneRcPort = port });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-rclone-rc-port", error.Rule);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(5572)]
+    [InlineData(65535)]
+    public void Validate_RcloneRcPortWithinValidRange_IsAccepted(int port)
+    {
+        var config = Build(h => h, global => global with { RcloneRcPort = port });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
+    // -- bs-z3y: global.suspend_unmount_timeout_seconds ---------------------------------------
+
+    [Fact]
+    public void Validate_SuspendUnmountTimeoutSecondsZero_IsRejected()
+    {
+        var config = Build(h => h, global => global with { SuspendUnmountTimeoutSeconds = 0 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-suspend-unmount-timeout", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_SuspendUnmountTimeoutSecondsNegative_IsRejected()
+    {
+        var config = Build(h => h, global => global with { SuspendUnmountTimeoutSeconds = -8 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-suspend-unmount-timeout", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_SuspendUnmountTimeoutSecondsOne_IsAccepted()
+    {
+        var config = Build(h => h, global => global with { SuspendUnmountTimeoutSeconds = 1 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
+    // -- bs-z3y: mount.idle_unmount_seconds ---------------------------------------------------
+
+    [Fact]
+    public void Validate_IdleUnmountSecondsNegative_IsRejected()
+    {
+        var config = Build(h => h with { Mount = h.Mount with { IdleUnmountSeconds = -1 } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("negative-idle-unmount-seconds", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_IdleUnmountSecondsZero_IsAccepted()
+    {
+        // docs/CONFIG-SCHEMA.md: 0 = never. Must not be conflated with "absent".
+        var config = Build(h => h with { Mount = h.Mount with { IdleUnmountSeconds = 0 } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void Validate_IdleUnmountSecondsAbsent_IsAccepted()
+    {
+        var config = Build(h => h with { Mount = h.Mount with { IdleUnmountSeconds = null } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
+    // -- bs-b8t: mount.network_mode -------------------------------------------------------------
+
+    [Fact]
+    public void Validate_NetworkModeFalse_IsRejected()
+    {
+        var config = Build(h => h with { Mount = h.Mount with { NetworkMode = false } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-network-mode", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_NetworkModeTrue_IsAccepted()
+    {
+        var config = Build(h => h with { Mount = h.Mount with { NetworkMode = true } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
+    // -- bs-5bk: duplicate display_name is case-insensitive -----------------------------------
+
+    [Fact]
+    public void Validate_DuplicateDisplayNameDifferingOnlyByCase_IsRejected()
+    {
+        var config = new BosunConfig
+        {
+            Global = new GlobalConfig(),
+            Hosts = new Dictionary<string, HostConfig>
+            {
+                ["host-a"] = ValidHost("host-a") with { DisplayName = "Prod", Mount = ValidMount() with { Drive = "N:" } },
+                ["host-b"] = ValidHost("host-b") with { DisplayName = "prod", Mount = ValidMount() with { Drive = "O:" } },
+            },
+        };
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("duplicate-display-name", error.Rule);
+    }
+
     [Fact]
     public void Validate_ConfigViolatingTwoRules_ReportsBothNotJustTheFirst()
     {

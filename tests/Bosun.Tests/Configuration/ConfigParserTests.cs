@@ -103,11 +103,13 @@ public sealed class ConfigParserTests
 
         // mode = "none" -- every other mount field is absent from the TOML entirely and must
         // bind to null rather than throw. Requiring them is ConfigValidator's job (bs-c0g), not
-        // the binder's.
+        // the binder's. vfs_cache_mode is the one exception: bs-lrd / bs-mb2 default it to
+        // "writes" at bind time unconditionally of mode, so nothing downstream ever sees a null
+        // for it -- see the remarks on MountConfig.VfsCacheMode.
         Assert.Equal(MountMode.None, host.Mount.Mode);
         Assert.Null(host.Mount.Drive);
         Assert.Null(host.Mount.RemotePath);
-        Assert.Null(host.Mount.VfsCacheMode);
+        Assert.Equal(MountConfig.DefaultVfsCacheMode, host.Mount.VfsCacheMode);
         Assert.Null(host.Mount.NetworkMode);
         Assert.Null(host.Mount.IdleUnmountSeconds);
 

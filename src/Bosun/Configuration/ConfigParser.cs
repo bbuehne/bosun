@@ -90,7 +90,10 @@ public static class ConfigParser
                 Mode = ParseMountMode(mountRaw.Mode, key),
                 Drive = mountRaw.Drive,
                 RemotePath = mountRaw.RemotePath,
-                VfsCacheMode = mountRaw.VfsCacheMode,
+                // bs-lrd / bs-mb2: absent defaults to "writes" here, in the config layer, so no
+                // downstream consumer (mount building, display, etc.) ever sees a null for this
+                // field -- rclone's own default ("off") is the exact value Invariant I6 forbids.
+                VfsCacheMode = mountRaw.VfsCacheMode ?? MountConfig.DefaultVfsCacheMode,
                 NetworkMode = mountRaw.NetworkMode,
                 IdleUnmountSeconds = mountRaw.IdleUnmountSeconds,
             },
