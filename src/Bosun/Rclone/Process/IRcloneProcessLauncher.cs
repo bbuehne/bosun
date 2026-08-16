@@ -51,6 +51,17 @@ public sealed record RcloneProcessStartInfo
 {
     public required string ExecutablePath { get; init; }
     public required IReadOnlyList<string> Arguments { get; init; }
+
+    /// <summary>
+    /// Extra environment variables to set on the child process, merged into (never replacing)
+    /// the inherited process environment -- e.g. <c>RCLONE_RC_USER</c>/<c>RCLONE_RC_PASS</c>
+    /// (bs-ard). Deliberately environment, not a command-line argument: a command line is
+    /// readable by any process running as the same user via <c>Win32_Process.CommandLine</c>
+    /// (see <see cref="Process.RcloneProcessService.BuildStartInfo"/>'s remarks), so a secret
+    /// belongs here, never in <see cref="Arguments"/>.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> EnvironmentVariables { get; init; } =
+        new Dictionary<string, string>();
 }
 
 /// <summary>

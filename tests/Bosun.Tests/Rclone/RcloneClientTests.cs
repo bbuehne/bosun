@@ -224,10 +224,83 @@ public sealed class RcloneClientTests
         await Assert.ThrowsAsync<RcloneRcException>(() => client.GetVersionAsync(CancellationToken.None));
     }
 
-    private static (RcloneClient Client, FakeHttpMessageHandler Handler) CreateClient()
+    // -- bs-ard: Basic auth on every request ------------------------------------------------
+
+    [Fact]
+    public async Task GetVersionAsync_sends_correct_Basic_auth_even_though_rclone_says_this_call_does_not_require_it()
+    {
+        // Uniformity over cleverness: RcloneClient does not special-case core/version just
+        // because rclone's docs say it is the one endpoint that does not require auth.
+        var credential = new RcloneRcCredential("bosun-test-user", "bosun-test-pass");
+        var (client, handler) = CreateClient(credential);
+        handler.EnqueueJson(HttpStatusCode.OK, """{"version":"v1.75.0"}""");
+
+        await client.GetVersionAsync(CancellationToken.None);
+
+        AssertBasicAuth(handler.Requests[0].Authorization, credential);
+    }
+
+    [Theory]
+    [InlineData("core/version")]
+    [InlineData("config/create")]
+    [InlineData("config/get")]
+    [InlineData("mount/mount")]
+    [InlineData("mount/unmount")]
+    [InlineData("mount/listmounts")]
+    [InlineData("operations/list")]
+    public async Task Every_endpoint_sends_the_same_Basic_auth_header(string endpoint)
+    {
+        var credential = new RcloneRcCredential("bosun-test-user", "bosun-test-pass");
+        var (client, handler) = CreateClient(credential);
+        handler.EnqueueJson(HttpStatusCode.OK, """{"version":"v1.75.0","mountPoint":"N:"}""");
+
+        switch (endpoint)
+        {
+            case "core/version":
+                await client.GetVersionAsync(CancellationToken.None);
+                break;
+            case "config/create":
+                await client.CreateConfigAsync("bosun-example-nas", "sftp", new Dictionary<string, string>(), CancellationToken.None);
+                break;
+            case "config/get":
+                await client.GetConfigAsync("bosun-example-nas", CancellationToken.None);
+                break;
+            case "mount/mount":
+                await client.MountAsync(new RcloneMountRequest { Fs = "bosun-example-nas:/", MountPoint = "N:" }, CancellationToken.None);
+                break;
+            case "mount/unmount":
+                await client.UnmountAsync("N:", CancellationToken.None);
+                break;
+            case "mount/listmounts":
+                await client.ListMountsAsync(CancellationToken.None);
+                break;
+            case "operations/list":
+                await client.ListAsync("bosun-example-nas:", "", CancellationToken.None);
+                break;
+        }
+
+        Assert.Equal(endpoint, handler.Requests[0].Endpoint);
+        AssertBasicAuth(handler.Requests[0].Authorization, credential);
+    }
+
+    [Fact]
+    public void Constructor_rejects_a_null_credential_rather_than_silently_sending_unauthenticated_requests()
+    {
+        var httpClient = new HttpClient(new FakeHttpMessageHandler()) { BaseAddress = new Uri("http://127.0.0.1:5572/") };
+        Assert.Throws<ArgumentNullException>(() => new RcloneClient(httpClient, credential: null!));
+    }
+
+    private static void AssertBasicAuth(System.Net.Http.Headers.AuthenticationHeaderValue? actual, RcloneRcCredential expected)
+    {
+        Assert.NotNull(actual);
+        Assert.Equal("Basic", actual!.Scheme);
+        Assert.Equal(expected.ToBasicAuthHeaderValue(), actual.Parameter);
+    }
+
+    private static (RcloneClient Client, FakeHttpMessageHandler Handler) CreateClient(RcloneRcCredential? credential = null)
     {
         var handler = new FakeHttpMessageHandler();
         var httpClient = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1:5572/") };
-        return (new RcloneClient(httpClient), handler);
+        return (new RcloneClient(httpClient, credential ?? new RcloneRcCredential("bosun-test-user", "bosun-test-pass")), handler);
     }
 }

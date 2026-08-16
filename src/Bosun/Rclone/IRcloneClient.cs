@@ -29,7 +29,12 @@ public interface IRcloneClient
     /// <c>core/version</c> -- the startup/liveness health check <see cref="Process.RcloneProcessService"/>
     /// uses to confirm a freshly spawned <c>rclone rcd</c> is actually answering.
     /// Source: https://rclone.org/rc/#core-version ("Authentication is not required for this
-    /// call.", no parameters).
+    /// call.", no parameters). <b>Caveat found while fixing bs-ard:</b> that claim held only
+    /// against a real rclone v1.75.0 rcd started with NO rc auth configured at all; once rc auth
+    /// IS configured (RCLONE_RC_USER/RCLONE_RC_PASS -- which Bosun's <c>RcloneProcessService</c>
+    /// always sets, per bs-ard), a real binary was observed to return 401 for an unauthenticated
+    /// <c>core/version</c> call too. <see cref="RcloneClient"/> sends Basic auth on every call
+    /// including this one specifically because of that -- see its remarks.
     /// </summary>
     Task<RcloneVersionInfo> GetVersionAsync(CancellationToken cancellationToken);
 

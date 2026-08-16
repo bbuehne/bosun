@@ -37,6 +37,17 @@ public sealed class Win32RcloneProcessLauncher : IRcloneProcessLauncher
             startInfoNative.ArgumentList.Add(argument);
         }
 
+        // Merged into the inherited environment (ProcessStartInfo.Environment starts populated
+        // with the current process's environment when UseShellExecute is false), never replacing
+        // it wholesale -- the child still needs PATH etc. This is also, deliberately, the ONLY
+        // place a secret like RCLONE_RC_PASS reaches the child process: never ArgumentList, which
+        // ends up in a command line any same-user process can read (see the remarks on
+        // RcloneProcessStartInfo.EnvironmentVariables and RcloneProcessService.BuildStartInfo).
+        foreach (var (key, value) in startInfo.EnvironmentVariables)
+        {
+            startInfoNative.Environment[key] = value;
+        }
+
         var process = new Diag.Process { StartInfo = startInfoNative, EnableRaisingEvents = true };
 
         try

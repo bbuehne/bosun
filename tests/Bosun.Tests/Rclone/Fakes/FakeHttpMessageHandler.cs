@@ -27,7 +27,8 @@ internal sealed class FakeHttpMessageHandler : HttpMessageHandler
             ? string.Empty
             : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-        Requests.Add(new RecordedRequest(request.RequestUri!.AbsolutePath.TrimStart('/'), body));
+        Requests.Add(new RecordedRequest(
+            request.RequestUri!.AbsolutePath.TrimStart('/'), body, request.Headers.Authorization));
 
         return _scriptedResponses.TryDequeue(out var next)
             ? next
@@ -35,4 +36,8 @@ internal sealed class FakeHttpMessageHandler : HttpMessageHandler
     }
 }
 
-internal sealed record RecordedRequest(string Endpoint, string Body);
+/// <summary><paramref name="Authorization"/> is the <c>Authorization</c> request header
+/// (<see langword="null"/> if none was sent) -- bs-ard's Basic-auth requirement is asserted
+/// against this rather than trusting <c>HttpClient.DefaultRequestHeaders</c> to have been applied,
+/// since what actually reached the wire (or, here, the fake handler) is what matters.</summary>
+internal sealed record RecordedRequest(string Endpoint, string Body, System.Net.Http.Headers.AuthenticationHeaderValue? Authorization);

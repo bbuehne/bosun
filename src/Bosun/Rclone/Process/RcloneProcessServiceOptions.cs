@@ -11,7 +11,10 @@ public sealed record RcloneProcessServiceOptions
     public string ExecutablePath { get; init; } = "rclone";
 
     /// <summary>Loopback port to bind <c>rclone rcd</c> to. NEVER a non-loopback interface --
-    /// the rc API is unauthenticated (see <see cref="RcloneProcessService.BuildStartInfo"/>).</summary>
+    /// even though the rc API now requires Basic auth with a random per-launch credential
+    /// (bs-ard; see <see cref="RcloneProcessService.BuildStartInfo"/>), a loopback-only bind
+    /// remains the point of defence against anything off-box, and a LAN-reachable bind was never
+    /// the design.</summary>
     public required int RcloneRcPort { get; init; }
 
     /// <summary>Passed as <c>--config</c> so <c>rclone rcd</c> reads/writes the same

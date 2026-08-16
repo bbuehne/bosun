@@ -39,7 +39,8 @@ public sealed class RcloneProcessService(
     IRcloneClient client,
     RcloneProcessServiceOptions options,
     TimeProvider timeProvider,
-    ILogger<RcloneProcessService> logger) : IHostedService, IAsyncDisposable
+    ILogger<RcloneProcessService> logger,
+    RcloneRcCredential credential) : IHostedService, IAsyncDisposable
 {
     private readonly object _gate = new();
     private IRcloneProcessHandle? _handle;
@@ -339,15 +340,30 @@ public sealed class RcloneProcessService(
     }
 
     /// <summary>
-    /// <c>rclone rcd --rc-addr 127.0.0.1:&lt;port&gt; --config &lt;path&gt;</c>. Loopback ONLY,
-    /// never <c>0.0.0.0</c> or a LAN-reachable address -- the rc API has no authentication by
-    /// default and this project relies on that being safe specifically because the port is
-    /// loopback-only (Invariant "rc API is unauthenticated... never a non-loopback interface").
-    /// Source for defaults and flag names: https://rclone.org/commands/rclone_rcd/ -- "By
-    /// default it only listens on localhost" and "By default this will serve files without
-    /// needing a login", confirming no additional <c>--rc-user</c>/<c>--rc-pass</c>/
-    /// <c>--rc-no-auth</c> flag is required for a loopback bind.
+    /// <c>rclone rcd --rc-addr 127.0.0.1:&lt;port&gt; --config &lt;path&gt;</c>, with
+    /// <c>RCLONE_RC_USER</c>/<c>RCLONE_RC_PASS</c> set in the child's environment (bs-ard).
+    /// Loopback ONLY, never <c>0.0.0.0</c> or a LAN-reachable address -- but loopback alone is
+    /// NOT sufficient, and the remark this replaces was wrong to claim otherwise.
     /// </summary>
+    /// <remarks>
+    /// <b>Corrected citation (bs-ard).</b> This used to cite https://rclone.org/commands/rclone_rcd/
+    /// ("By default this will serve files without needing a login") to claim no additional
+    /// <c>--rc-user</c>/<c>--rc-pass</c>/<c>--rc-no-auth</c> flag was required for a loopback
+    /// bind. That claim was verified WRONG against a real rclone v1.75.0 binary: every rc
+    /// endpoint except <c>core/version</c> returns HTTP 403 ("authentication must be set up on
+    /// the rc server ... or the --rc-no-auth flag must be in use") unless rcd is given
+    /// credentials or started with <c>--rc-no-auth</c>. Bosun uses neither
+    /// <c>--rc-user</c>/<c>--rc-pass</c> command-line flags (a command line is readable by any
+    /// same-user process, e.g. via <c>Win32_Process.CommandLine</c> -- the exact API
+    /// <c>ISessionMonitor</c> uses to enumerate <c>ssh.exe</c>) NOR <c>--rc-no-auth</c> (which
+    /// would remove auth entirely for every local caller, including <c>mount/mount</c> and
+    /// <c>mount/unmount</c>). Instead, a cryptographically random per-Bosun-launch credential
+    /// (<see cref="RcloneRcCredential"/>) is passed via the <c>RCLONE_RC_USER</c>/
+    /// <c>RCLONE_RC_PASS</c> environment variables, which rclone documents rcd reads
+    /// (https://rclone.org/rc/#authentication) as equivalent to the command-line flags. See the
+    /// class remarks on <see cref="RcloneRcCredential"/> for why the SAME credential is reused
+    /// across every restart rather than rotated per attempt.
+    /// </remarks>
     private RcloneProcessStartInfo BuildStartInfo() => new()
     {
         ExecutablePath = options.ExecutablePath,
@@ -359,6 +375,11 @@ public sealed class RcloneProcessService(
             "--config",
             options.RcloneConfigPath,
         ],
+        EnvironmentVariables = new Dictionary<string, string>
+        {
+            ["RCLONE_RC_USER"] = credential.UserName,
+            ["RCLONE_RC_PASS"] = credential.Password,
+        },
     };
 
     private void SetStatus(RcloneProcessStatus status, RcloneProcessFaultKind faultKind, string? detail)
