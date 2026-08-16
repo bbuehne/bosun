@@ -27,7 +27,11 @@ public sealed class SerilogFileSinkTests : IDisposable
     {
         const string marker = "bs-xqs-sentinel-message";
 
-        var host = BosunHostFactory.CreateHost(new BosunHostOptions { LogDirectory = _logDirectory });
+        var host = BosunHostFactory.CreateHost(new BosunHostOptions
+        {
+            LogDirectory = _logDirectory,
+            ConfigPath = Path.Combine(_logDirectory, "hosts.toml"),
+        });
         try
         {
             var logger = host.Services.GetRequiredService<ILogger<SerilogFileSinkTests>>();
