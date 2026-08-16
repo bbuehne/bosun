@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Deliberate opt-in to the integration tests (bs-ef4):
+
+      dotnet test [settings switch] tests/Bosun.Tests/integration.runsettings
+
+  Use ONLY on a real machine, deliberately, when you intend to touch real components: a live
+  rclone rcd, WinFsp, drive letters, a real SFTP host, or the real Windows Terminal fragment path.
+  These can mount drives and, if something goes wrong, wedge Explorer (Invariant I2, ADR-005).
+
+  Why a whole second file rather than a command-line filter: a filter passed on the command line
+  is ANDed with the TestCaseFilter in bosun.runsettings, not substituted for it, which yields
+  "(Category!=Integration)&(Category=Integration)" and silently matches nothing. Verified
+  empirically. Supplying this file instead replaces the settings outright, which does work.
+-->
+<RunSettings>
+  <RunConfiguration>
+    <TestCaseFilter>Category=Integration</TestCaseFilter>
+  </RunConfiguration>
+</RunSettings>

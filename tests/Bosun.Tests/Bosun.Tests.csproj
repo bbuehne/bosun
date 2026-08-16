@@ -1,8 +1,14 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
     <IsPackable>false</IsPackable>
+    <!--
+      A bare "dotnet test" excludes the Integration category by default, so it cannot reach a real
+      rclone rcd, WinFsp, or a drive letter. Opting in is deliberate and is documented in
+      bosun.runsettings. See also bs-ef4.
+    -->
+    <RunSettingsFilePath>$(MSBuildProjectDirectory)\bosun.runsettings</RunSettingsFilePath>
   </PropertyGroup>
 
   <ItemGroup>
