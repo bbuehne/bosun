@@ -214,6 +214,13 @@ right before building any UI.
    item that does nothing, forever, with no error is not a defensible behaviour.
    This does not weaken rule 1: the click causes a *probe*, and `Mounting` is
    still reached only from `Ready` after a passing deep probe. See ADR-014.
+9. **A user-requested unmount parks the host.** It stays unmounted until an
+   explicit user remount, a config reload, or an application restart — including
+   for `persistent` hosts, which would otherwise auto-mount again on their very
+   next arrival at `Ready` and make the tray's Unmount item look like it did
+   nothing. A parked host **keeps probing**, so the tray can show live
+   reachability; it simply does not auto-mount. Rule 6 governs a tier's *resting*
+   state, not the override of an explicit command. See ADR-015.
 
 ### Backoff
 
