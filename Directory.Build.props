@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    Shared build properties for every project in the Bosun solution.
+    See CLAUDE.md §4 (stack constraints) and §5 (working style).
+  -->
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AnalysisLevel>latest</AnalysisLevel>
+
+    <!--
+      NEVER set PublishTrimmed here or in any project. Trimming is
+      unsupported for WPF and fails at runtime in non-obvious ways.
+      See CLAUDE.md §4 and .github/workflows/release.yml.
+    -->
+  </PropertyGroup>
+
+</Project>

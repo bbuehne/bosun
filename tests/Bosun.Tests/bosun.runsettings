@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Default test settings for Bosun (bs-ef4).
+
+  TestCaseFilter excludes the Integration category so that a bare "dotnet test" — the thing
+  everyone types, and the thing an agent types without thinking — CANNOT reach a real rclone rcd,
+  WinFsp, a drive letter, or the real Windows Terminal fragment path.
+
+  Safety before convenience: Bosun mounts real drive letters, and one pointing at an unreachable
+  host blocks Explorer, "dir", and file dialogs process-wide across the OS (Invariant I2,
+  ADR-005). Opting in to that is a deliberate act, and requires the sibling settings file:
+
+      dotnet test                                            -> safe; excludes Integration
+      dotnet test [settings] integration.runsettings         -> explicit opt-in
+
+  NOTE, verified empirically rather than assumed: a filter passed on the COMMAND LINE is ANDed
+  with the TestCaseFilter below, not substituted for it. Asking for "Category=Integration" that
+  way produces "(Category!=Integration)&(Category=Integration)" and silently matches NOTHING —
+  it looks like a clean run rather than an error. Supply integration.runsettings instead, which
+  replaces these settings outright.
+-->
+<RunSettings>
+  <RunConfiguration>
+    <TestCaseFilter>Category!=Integration</TestCaseFilter>
+  </RunConfiguration>
+</RunSettings>

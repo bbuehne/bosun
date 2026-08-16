@@ -17,6 +17,28 @@ rclone lsd bosun-example-nas:
 If that fails, Bosun's mounts for that host will fail too. Fix it at the rclone
 layer first.
 
+## Running the tests
+
+```powershell
+dotnet test                                                       # the default suite
+dotnet test --settings tests/Bosun.Tests/integration.runsettings  # integration tests only
+```
+
+The default suite is **safe by construction**: `tests/Bosun.Tests/bosun.runsettings` excludes the
+`Integration` category, and the test project applies it via `RunSettingsFilePath`, so a bare
+`dotnet test` cannot reach a live `rclone rcd`, WinFsp, a drive letter, a real SFTP host, or the
+real Windows Terminal fragment path. Everything in it uses fakes and injected time. CI inherits
+the same default.
+
+Integration tests touch real components and can mount real drives — run them deliberately, on a
+machine where a wedged Explorer would be an inconvenience rather than a disaster.
+
+Mark such a test with `[Trait(TestCategories.Category, TestCategories.Integration)]`.
+
+> A command-line `--filter` is **ANDed** with the default rather than replacing it, so
+> `--filter "Category=Integration"` yields `(Category!=Integration)&(Category=Integration)` and
+> silently matches nothing — it looks like a clean run. Use `--settings` as shown above.
+
 ## Manual test protocol
 
 These cannot be automated and must be run by hand before any release.
