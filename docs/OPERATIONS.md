@@ -83,6 +83,8 @@ These cannot be automated and must be run by hand before any release.
 | Drive never appears | Deep probe failing. Try `rclone lsd <remote>:` manually. |
 | Drive appears then vanishes | Expected on probe failure — check whether the host is genuinely reachable. |
 | Terminal profiles missing | Fragment path wrong for this Terminal install (Store vs unpackaged). Check the written file exists and is valid JSON. |
+| Profile opens but the connection fails | No matching `Host <host-key>` block in `~/.ssh/config`. Bosun emits `ssh <host-key>` deliberately, so that your `ProxyJump` and friends still apply (ADR-013) — but it means the alias has to exist. Test it directly: `ssh <host-key>`. |
+| Profile lost its colours or font after a rename | Terminal derives profile identity from the GUID, and Bosun derives that GUID from the host's **config key**, not `display_name` (ADR-013). Renaming `display_name` should be safe; renaming the TOML key is what creates a new profile. |
 | Terminal profiles duplicated | Something wrote to `settings.json`. Invariant I5 violation. |
 | Files fail to save from an editor | `vfs_cache_mode` below `writes`. Validation should have caught this. |
 

@@ -98,9 +98,19 @@ between Store and unpackaged installs.
 Each host becomes a profile whose `commandline` is either:
 
 ```
-ssh <host>                                  # tmux = false
-ssh -t <host> tmux new -A -s <session>      # tmux = true
+ssh <config-key>                                  # tmux = false
+ssh -t <config-key> tmux new -A -s <session>      # tmux = true
 ```
+
+`<config-key>` is the host's **TOML key** — `example-nas`, not `display_name` and
+not `user@hostname`. Bosun therefore expects a matching `Host <config-key>` block
+in the user's `~/.ssh/config`, which is a documented prerequisite (README) and a
+triage row (`docs/OPERATIONS.md`). The fully-specified alternative would bypass
+`ProxyJump` and everything else the user configured there. See **ADR-013**.
+
+Bosun emits an explicit profile `guid`, derived from the config key rather than
+letting Terminal derive one from `display_name` — otherwise renaming a host
+silently orphans the user's per-profile customisation. Also ADR-013.
 
 wrapped in the reconnect loop script if `session.reconnect = true`.
 
@@ -199,6 +209,12 @@ right before building any UI.
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
    `Mounted → Draining` after that period without filesystem activity.
 
+8. **`RequestMountAsync` on an `Unreachable` host triggers an immediate probe**
+   and proceeds to mount if it passes. It is never a silent no-op — a tray menu
+   item that does nothing, forever, with no error is not a defensible behaviour.
+   This does not weaken rule 1: the click causes a *probe*, and `Mounting` is
+   still reached only from `Ready` after a passing deep probe. See ADR-014.
+
 ### Backoff
 
 `Unreachable → Probing` uses the configured backoff ladder, default
@@ -206,6 +222,14 @@ right before building any UI.
 zero** by a network address change, a power resume, or an explicit user "retry
 now". This is what makes the dock/undock experience feel immediate rather than
 sluggish.
+
+**The ladder runs for `persistent` hosts only.** An **on-demand** host in
+`Unreachable` is not polled at all; it stays dark until the user acts, and rule 8
+is what makes that safe. This is what makes ADR-008's and ADR-011's promise —
+"on-demand hosts generate no traffic until the user mounts one" — literally true
+rather than approximately true. Persistent hosts must keep polling: that is the
+mechanism by which a drive returns on its own, which is `docs/OPERATIONS.md` T2.
+See ADR-014.
 
 ### Reconciliation
 
