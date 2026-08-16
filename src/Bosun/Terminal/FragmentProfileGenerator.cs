@@ -45,10 +45,24 @@ public static class FragmentProfileGenerator
     public const string DefaultStartingDirectory = "%USERPROFILE%";
 
     /// <summary>Fallback tmux session name used only if <see cref="SessionConfig.Tmux"/> is true but
-    /// <see cref="SessionConfig.TmuxSession"/> is null/empty. <c>ConfigValidator</c> does not
-    /// currently enforce that the two travel together (see bs- discovered-work note in the E7
-    /// implementation report), so this generator defends against that gap rather than throwing.</summary>
+    /// <see cref="SessionConfig.TmuxSession"/> is null/empty. <c>ConfigValidator</c>'s
+    /// <c>tmux-requires-session</c> rule (bs-ze7) should have caught this before it ever reaches
+    /// here -- this fallback is defence-in-depth only, matching the same pattern already used for
+    /// <c>failures_before_unmount</c> and <c>vfs_cache_mode</c>: validation is the real guard, this
+    /// is what keeps the generator from throwing or producing a malformed commandline if it is ever
+    /// bypassed (e.g. a config loaded before the rule existed).</summary>
     public const string DefaultTmuxSession = "main";
+
+    /// <summary>
+    /// Small fixed cap on <see cref="WrapWithReconnectLoop"/>'s retry count (bs-ew1). Necessary
+    /// because the loop's own retry condition ("exit code &gt;= 255") cannot distinguish a dropped
+    /// connection (exactly 255) from <c>ssh.exe</c> failing to launch at all -- verified against a
+    /// real <c>cmd.exe</c>: a not-found command sets <c>errorlevel</c> to 9009, which is also
+    /// &gt;= 255, so an uncapped loop retries a permanently-broken invocation forever with nothing
+    /// ever surfaced in the tab. This is a maintainer recommendation on an open decision, not a
+    /// settled one -- trivially reverted to an unbounded loop if preferred.
+    /// </summary>
+    public const int MaxReconnectAttempts = 5;
 
     /// <summary>
     /// Builds the whole fragment document -- one profile per host in <paramref name="hosts"/>,
@@ -118,10 +132,12 @@ public static class FragmentProfileGenerator
 
     /// <summary>
     /// Wraps <paramref name="sshInvocation"/> in a <c>cmd.exe</c> loop that retries on exit code 255
-    /// (dropped connection) and stops on anything else, including 0 (user typed <c>exit</c>) --
-    /// docs/CONFIG-SCHEMA.md's <c>session.reconnect</c> row.
+    /// (dropped connection) and stops on anything else, including 0 (user typed <c>exit</c>), up to
+    /// <see cref="MaxReconnectAttempts"/> tries -- docs/CONFIG-SCHEMA.md's <c>session.reconnect</c>
+    /// row.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Why this doesn't change what E8 sees.</b> Terminal's <c>commandline</c> field launches a
     /// process directly (no shell interprets it) -- so a retry loop needs an actual shell to host
     /// it, which is why the OUTER process here is <c>cmd.exe</c>, not <c>ssh.exe</c>. But the INNER
@@ -136,15 +152,47 @@ public static class FragmentProfileGenerator
     /// string's own first token is <c>cmd.exe</c>, not <c>ssh</c>. The contract test in
     /// <c>tests/Bosun.Tests/Terminal</c> therefore feeds <see cref="BuildSshInvocation"/>'s result,
     /// not this method's, into the parser.
+    /// </para>
     /// <para>
-    /// <c>if not errorlevel 255 exit /b</c> relies on ssh's exit code never exceeding 255 (the
-    /// standard POSIX exit-code range, which <c>cmd.exe</c>'s <c>errorlevel</c> comparison treats as
-    /// "&gt;=" rather than "=="): since nothing in that range can exceed 255, this is equivalent to
-    /// "exit code was less than 255", i.e. anything other than the dropped-connection code, matching
-    /// the exact two-code contract in docs/CONFIG-SCHEMA.md. <c>exit /b</c> with no explicit code
-    /// preserves <c>cmd.exe</c>'s current <c>%errorlevel%</c>.
+    /// <b>Why bounded (bs-ew1).</b> The original unbounded loop (<c>for /l %n in (1,0,2)</c>, a step
+    /// of 0 so the counter never advances and the loop never ends on its own) relied on <c>if not
+    /// errorlevel 255 exit /b</c> to stop it -- but that comparison is "&gt;=", not "==" (see below),
+    /// so it stops on ANY exit code &lt; 255, not specifically on 0 or specifically on 255. If
+    /// <c>ssh.exe</c> cannot be launched at all (not on PATH, typo'd config key), verified against a
+    /// real <c>cmd.exe</c> shows <c>errorlevel</c> becomes 9009 -- Windows' own "command not
+    /// recognised" code -- which is itself &gt;= 255, so the loop treats "ssh does not exist" exactly
+    /// like "connection dropped" and retries it forever, with nothing ever surfaced in the tab beyond
+    /// cmd.exe's own one-line "is not recognized" message repeating silently off the top of
+    /// scrollback. Capping at <see cref="MaxReconnectAttempts"/> turns that into a bounded, visible
+    /// failure: after the cap, the tab prints the last exit code and exits, instead of scrolling
+    /// forever.
+    /// </para>
+    /// <para>
+    /// <c>if not errorlevel 255 exit /b !errorlevel!</c> relies on ssh's exit code never exceeding
+    /// 255 (the standard POSIX exit-code range, which <c>cmd.exe</c>'s <c>errorlevel</c> comparison
+    /// treats as "&gt;=" rather than "=="): since nothing in that range can exceed 255, this is
+    /// equivalent to "exit code was less than 255", i.e. anything other than the dropped-connection
+    /// code, matching the exact two-code contract in docs/CONFIG-SCHEMA.md.
+    /// </para>
+    /// <para>
+    /// <b>Two non-obvious <c>cmd.exe</c> quirks this depends on, both verified against a real
+    /// <c>cmd.exe</c> in a throwaway script (never committed, never touching this repo).</b>
+    /// (1) When this whole string is launched via <c>cmd.exe /d /c "..."</c> -- a single command
+    /// line, not a <c>.bat</c> file -- plain <c>%errorlevel%</c> substitution happens ONCE, at parse
+    /// time, for the entire line, before anything in it has run; it is therefore always stale (here,
+    /// always 0). Delayed expansion (<c>/v:on</c>, and <c>!errorlevel!</c> instead of
+    /// <c>%errorlevel%</c>) is required to read the real, current value -- <c>if errorlevel N</c>
+    /// itself is unaffected either way, since that is a built-in runtime test, not a variable
+    /// substitution. (2) An un-parenthesized <c>if condition action</c> followed by <c>&amp;
+    /// nextStatement</c>, in this same single-line context, does NOT let <c>nextStatement</c> run
+    /// unconditionally the way it would inside a <c>.bat</c> file -- when the condition is false, the
+    /// <c>&amp;</c>-chained statement after it is swallowed along with the untaken branch. Every
+    /// <c>if</c> below is therefore wrapped in its own outer parens (<c>(if ... (...))</c>) so it
+    /// cannot absorb what follows it.
     /// </para>
     /// </remarks>
     private static string WrapWithReconnectLoop(string sshInvocation) =>
-        $"cmd.exe /d /c \"for /l %n in (1,0,2) do ({sshInvocation} & if not errorlevel 255 exit /b)\"";
+        $"cmd.exe /d /v:on /c \"for /l %n in (1,1,{MaxReconnectAttempts}) do ({sshInvocation} & " +
+        "(if not errorlevel 255 (exit /b !errorlevel!)) & " +
+        $"(if %n=={MaxReconnectAttempts} (echo Bosun: giving up after {MaxReconnectAttempts} attempts -- last exit code !errorlevel! & exit /b !errorlevel!)))\"";
 }

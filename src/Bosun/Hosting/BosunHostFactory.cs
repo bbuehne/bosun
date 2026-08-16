@@ -126,14 +126,23 @@ public static class BosunHostFactory
         // file is touched until something actually calls WriteAsync -- matching the worktree-safety
         // rule every other registration here follows. FragmentWriterOptions.CreateDefault() resolves
         // the verified real path (bs-3ir): %LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Bosun\
-        // bosun.json. Nothing yet calls WriteAsync in production -- wiring an initial write and a
-        // FragmentRewriteCoordinator into the startup sequence is deliberately left as discovered
-        // work (see FragmentRewriteCoordinator's class remarks): IHostConfigStore may only be
-        // resolved, wrapped in try/catch, by StartupOrchestrator (ADR-012), so deciding exactly where
-        // fragment-writing joins that sequence is an ordering question for whoever owns it next.
+        // bosun.json.
         builder.Services.AddSingleton<IFragmentFileSystem, RealFragmentFileSystem>();
         builder.Services.AddSingleton(FragmentWriterOptions.CreateDefault());
         builder.Services.AddSingleton<IFragmentWriter, FragmentWriter>();
+
+        // bs-3lt: registered as a resolvable singleton, NOT constructor-injected anywhere and NOT
+        // an IHostedService -- same reasoning as RcloneProcessService below. Its constructor takes
+        // IHostConfigStore, which transitively means this factory lambda is only safe to run AFTER
+        // StartupOrchestrator has confirmed config loaded successfully; merely registering it here
+        // does no I/O and resolves nothing eagerly (DI registration is lazy), so it stays safe to
+        // build a host from a worktree. StartupOrchestrator is the one and only place that ever
+        // calls GetRequiredService<FragmentRewriteCoordinator>(), inside its own try/catch -- see
+        // its class remarks.
+        builder.Services.AddSingleton(sp => new FragmentRewriteCoordinator(
+            sp.GetRequiredService<IFragmentWriter>(),
+            sp.GetRequiredService<IHostConfigStore>(),
+            sp.GetRequiredService<ILogger<FragmentRewriteCoordinator>>()));
 
         // RcloneProcessService owns the one long-lived `rclone rcd` child (Invariant I3/I4;
         // docs/ARCHITECTURE.md §2). Registered as a resolvable singleton -- NOT via

@@ -235,6 +235,18 @@ public static class ConfigValidator
                 "negative-probe-interval",
                 $"hosts.{host.Key}: probe.interval_seconds must not be negative (got {host.Probe.IntervalSeconds})"));
         }
+
+        // bs-ze7: without this, `tmux = true` with no `tmux_session` passed validation cleanly and
+        // FragmentProfileGenerator silently fell back to "main" -- fine for a single host, but two
+        // hosts both omitting tmux_session would silently share a tmux session name with no warning
+        // anywhere. The generator's fallback stays as defence-in-depth (see its own doc comment);
+        // this is the rule that should catch it first.
+        if (host.Session.Tmux && string.IsNullOrEmpty(host.Session.TmuxSession))
+        {
+            errors.Add(new ConfigValidationError(
+                "tmux-requires-session",
+                $"hosts.{host.Key}: session.tmux = true requires a non-empty session.tmux_session"));
+        }
     }
 
     private static string ToTomlValue(MountMode mode) => mode switch

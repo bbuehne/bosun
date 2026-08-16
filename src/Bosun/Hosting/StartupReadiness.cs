@@ -53,12 +53,31 @@ public sealed record StartupReadiness
         RcloneHealthy = false,
         RcloneFaultMessage = "rclone rcd has not been started yet.",
         SupervisorRunning = false,
+        TerminalFragmentWritten = false,
     };
 
     public required ConfigReadinessState ConfigState { get; init; }
 
     /// <summary>Populated only when <see cref="ConfigState"/> is <see cref="ConfigReadinessState.Invalid"/>.</summary>
     public IReadOnlyList<string> ConfigErrors { get; init; } = [];
+
+    /// <summary>
+    /// True once the initial Windows Terminal fragment write (bs-3lt) has completed successfully
+    /// for whatever config loaded this run -- including the empty first-run template. Written
+    /// immediately after config loads, before WinFsp detection or rclone: Terminal profiles are the
+    /// half of Bosun that works even when mounting cannot (ADR-012's degradation model), so they
+    /// must not wait on, or be skipped by, anything downstream that can fail. Does not reflect
+    /// LATER rewrites triggered by <see cref="Configuration.IHostConfigStore.ConfigChanged"/> --
+    /// those are fire-and-forget by design (see <see cref="Terminal.FragmentRewriteCoordinator"/>)
+    /// and are not re-published here.
+    /// </summary>
+    public required bool TerminalFragmentWritten { get; init; }
+
+    /// <summary>Populated only when <see cref="TerminalFragmentWritten"/> is <see langword="false"/>
+    /// and a config was actually loaded (i.e. not populated merely because config was invalid --
+    /// there both fields describe the same root cause, "no config to write from", so this is left
+    /// null rather than reported redundantly against <see cref="ConfigErrors"/>).</summary>
+    public string? TerminalFragmentFaultMessage { get; init; }
 
     public required bool WinFspInstalled { get; init; }
 
