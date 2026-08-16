@@ -32,7 +32,12 @@ public sealed record ConfigValidationResult(IReadOnlyList<ConfigValidationError>
 /// </summary>
 public static class ConfigValidator
 {
-    private static readonly Regex DriveLetterPattern = new("^[D-Z]:$", RegexOptions.Compiled);
+    // \A and \z, NOT ^ and $. docs/CONFIG-SCHEMA.md writes the rule as ^[D-Z]:$, but in .NET `$`
+    // also matches immediately before a trailing newline, so "D:\n" -- expressible in a TOML basic
+    // string -- passed validation with zero errors and would have reached mount/mount verbatim as
+    // the mount point. \z anchors to the true end of input. Caught by an independent adversarial
+    // test (Validate_DriveWithATrailingNewline_IsRejected); do not "simplify" this back.
+    private static readonly Regex DriveLetterPattern = new(@"\A[D-Z]:\z", RegexOptions.Compiled);
 
     private static readonly IReadOnlySet<string> RejectedVfsCacheModes =
         new HashSet<string>(StringComparer.Ordinal) { "off", "minimal" };
