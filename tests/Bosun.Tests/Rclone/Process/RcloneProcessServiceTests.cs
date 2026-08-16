@@ -73,8 +73,7 @@ public sealed class RcloneProcessServiceTests
         Assert.Equal(RcloneProcessFaultKind.LaunchFailed, service.FaultKind);
         Assert.Single(launcher.StartCalls);
 
-        time.Advance(TimeSpan.FromSeconds(5));
-        await PumpAsync();
+        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(5), () => service.Status == RcloneProcessStatus.Healthy);
 
         Assert.Equal(2, launcher.StartCalls.Count);
         Assert.Equal(RcloneProcessStatus.Healthy, service.Status);
@@ -116,8 +115,7 @@ public sealed class RcloneProcessServiceTests
         await PumpAsync();
         Assert.Equal(RcloneProcessFaultKind.ProcessExitedUnexpectedly, service.FaultKind);
 
-        time.Advance(TimeSpan.FromSeconds(2));
-        await PumpAsync();
+        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(2), () => service.Status == RcloneProcessStatus.Healthy);
 
         Assert.Equal(2, launcher.StartCalls.Count);
         Assert.Equal(RcloneProcessStatus.Healthy, service.Status);
@@ -184,6 +182,41 @@ public sealed class RcloneProcessServiceTests
     /// entirely driven by <paramref name="time"/>; this loop's only job is to keep offering the
     /// timer a chance to fire once it exists.
     /// </remarks>
+    /// <summary>
+    /// Advances <paramref name="time"/> by <paramref name="delta"/>, then waits -- on a bounded
+    /// real-time budget, polling the actual asserted condition rather than guessing how long to
+    /// wait -- until <paramref name="condition"/> is true.
+    /// </summary>
+    /// <remarks>
+    /// Exists for the same underlying reason as <see cref="AdvanceUntilCompleteAsync"/>, but for
+    /// state driven off <c>RcloneProcessService.SuperviseAsync</c>'s
+    /// <c>Task.Delay(TimeSpan, TimeProvider, CancellationToken)</c> await, which has no
+    /// caller-visible <see cref="Task"/> to await directly (<c>SuperviseAsync</c> is a detached
+    /// background loop). The BCL's TimeProvider-flavoured <c>Task.Delay</c> promise does not
+    /// guarantee its continuation resumes inline on the thread that fires the timer: firing the
+    /// timer synchronously inside <see cref="FakeTimeProvider.Advance"/> (as this test's
+    /// <c>Advance</c> call does) only queues the awaiting method's continuation onto the
+    /// <see cref="ThreadPool"/> -- it does not guarantee that continuation has actually run by the
+    /// time <c>Advance</c> returns. A fixed count of <c>Task.Yield()</c>s (the old
+    /// <c>PumpAsync</c>-based pattern this replaced) is a bet on how quickly the pool schedules
+    /// that already-queued work item, and loses that bet under a cold or contended pool --
+    /// reproduced empirically on the very first isolated run of
+    /// <see cref="LaunchFailed_retries_after_RestartDelay_and_can_then_become_Healthy"/> while
+    /// diagnosing bs-6oz. Polling the real asserted condition removes the bet without weakening
+    /// what is asserted: the assertions after this call are unchanged, only how long the test is
+    /// willing to wait for them to become true before failing on its own.
+    /// </remarks>
+    private static async Task AdvanceAndWaitUntilAsync(FakeTimeProvider time, TimeSpan delta, Func<bool> condition)
+    {
+        time.Advance(delta);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(5).ConfigureAwait(false);
+        }
+    }
+
     private static async Task AdvanceUntilCompleteAsync(Task task, FakeTimeProvider time, TimeSpan step)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
