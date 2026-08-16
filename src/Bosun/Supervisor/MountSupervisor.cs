@@ -87,6 +87,17 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     private bool loggedFailuresBeforeUnmountClamp;
     private ITimer? reconciliationTimer;
 
+    /// <summary>Process-wide mounting-availability gate (bs-yvw.1). Defaults to available so every
+    /// pre-existing test/behaviour that never touches <see cref="SetMountingAvailabilityAsync"/>
+    /// (i.e. everything before <c>StartupOrchestrator</c> started pushing real WinFsp/rclone
+    /// health into it) is unaffected. Read directly by <see cref="TryBeginMountAsync"/> and
+    /// <see cref="GetSnapshot"/> -- both already only ever run on the single channel-processing
+    /// thread/one-caller-at-a-time discipline documented on the class, the same discipline every
+    /// other <c>HostRuntime</c> field relies on, except <see cref="GetSnapshot"/> which reads
+    /// mutable state from an arbitrary caller thread exactly as every other snapshot field already
+    /// does (docs/ARCHITECTURE.md §5: "UI reads a snapshot").</summary>
+    private MountingAvailability mountingAvailability = MountingAvailability.Available;
+
     public MountSupervisor(
         IHostConfigStore configStore,
         IRcloneClient rcloneClient,
@@ -251,6 +262,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 LastTransitionUtc = h.LastTransitionUtc,
                 LastTransitionTrigger = h.LastTransitionTrigger,
                 UserParked = h.UserParked,
+                MountUnavailableReason = mountingAvailability.IsAvailable ? null : mountingAvailability.Reason,
             })
             .ToList();
 
@@ -258,6 +270,16 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         EnqueueAndWait(ct =>
         {
             var host = RequireHost(hostKey);
+
+            // bs-yvw.1 / ADR-014 rule 8: an explicit mount request while mounting is unavailable
+            // must fail loudly with the causal reason, not silently do nothing -- the same
+            // "no silent no-op" standard rule 8 already set for a request against an Unreachable
+            // host. Checked here (before the Ready-only TryBeginMountAsync guard) precisely so it
+            // still fires for a host that IS Ready and would otherwise mount right now.
+            if (!mountingAvailability.IsAvailable)
+            {
+                throw new MountingUnavailableException(hostKey, mountingAvailability.Cause!.Value, mountingAvailability.Reason!);
+            }
 
             // An explicit mount request is exactly the "explicit user remount" that un-parks a host
             // a previous RequestUnmountAsync parked (bs-fix-e5 defect 3). Harmless when the host was
@@ -362,6 +384,37 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
     public Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default) =>
         EnqueueAndWait(ct => ReconcileAsync(ct), cancellationToken);
+
+    public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>
+        EnqueueAndWait(async ct =>
+        {
+            var wasAvailable = mountingAvailability.IsAvailable;
+            mountingAvailability = availability;
+
+            if (availability.IsAvailable && !wasAvailable)
+            {
+                logger.LogInformation("Mounting became available again");
+
+                // Recovery (bs-yvw.1): every persistent host sitting in Ready only because the
+                // gate refused it gets its mount attempt now, rather than waiting for a restart.
+                // On-demand hosts need no equivalent sweep -- RequestMountAsync stops throwing
+                // MountingUnavailableException the instant mountingAvailability above is updated,
+                // so the user's next click (or the tray re-enabling the menu item) just works.
+                foreach (var host in hosts.Values
+                    .Where(h => h.State == MountState.Ready
+                        && h.Config.Mount.Mode == MountMode.Persistent
+                        && h.AdministrativelyEnabled
+                        && !h.UserParked)
+                    .ToList())
+                {
+                    await TryBeginMountAsync(host, "mounting became available", ct).ConfigureAwait(false);
+                }
+            }
+            else if (!availability.IsAvailable && wasAvailable)
+            {
+                logger.LogWarning("Mounting became unavailable: {Reason}", availability.Reason);
+            }
+        }, cancellationToken);
 
     public async ValueTask DisposeAsync()
     {
@@ -626,6 +679,22 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         if (host.State != MountState.Ready)
         {
             logger.LogDebug("Ignoring mount request for {HostKey}: not Ready (currently {State})", host.Key, host.State);
+            return;
+        }
+
+        if (!mountingAvailability.IsAvailable)
+        {
+            // bs-yvw.1: the second, structural condition on entering Mounting, alongside "must be
+            // Ready" above -- checked BEFORE SetState/the deep probe, not after, so a host whose
+            // mount cannot possibly succeed (WinFsp missing, rcd down) does not keep hitting the
+            // remote host's SFTP subsystem with a deep probe every retry for no reason (the exact
+            // "endless and noisy in the target server's auth log" shape this fix exists to close).
+            // The host stays Ready and keeps shallow-probing; SetMountingAvailabilityAsync sweeps
+            // it back in the moment the gate reopens.
+            logger.LogInformation(
+                "Refusing to mount {HostKey}: mounting is unavailable ({Reason}); staying Ready -- will be " +
+                "attempted automatically once mounting becomes available again",
+                host.Key, mountingAvailability.Reason);
             return;
         }
 

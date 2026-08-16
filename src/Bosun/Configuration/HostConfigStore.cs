@@ -95,15 +95,31 @@ public sealed class HostConfigStore : IHostConfigStore, IDisposable
         options ??= new HostConfigStoreOptions();
         identityFileExists ??= DefaultIdentityFileExists;
 
-        var text = reader.ReadAllText(path);
-        var config = ConfigParser.Parse(text, sourceName);
-        var validation = ConfigValidator.Validate(config, identityFileExists);
-        if (!validation.IsValid)
+        try
         {
-            throw new InvalidConfigException(sourceName, validation.Errors.Select(e => e.Message).ToArray());
-        }
+            var text = reader.ReadAllText(path);
+            var config = ConfigParser.Parse(text, sourceName);
+            var validation = ConfigValidator.Validate(config, identityFileExists);
+            if (!validation.IsValid)
+            {
+                throw new InvalidConfigException(sourceName, validation.Errors.Select(e => e.Message).ToArray());
+            }
 
-        return new HostConfigStore(path, sourceName, reader, watcher, timeProvider, identityFileExists, options, config);
+            return new HostConfigStore(path, sourceName, reader, watcher, timeProvider, identityFileExists, options, config);
+        }
+        catch
+        {
+            // watcher is constructed by the caller and starts watching immediately (see
+            // FileSystemConfigWatcher's constructor) -- before this method's own read/parse/
+            // validate has run. On any failure here, no HostConfigStore is ever returned to take
+            // ownership of it, so nothing would otherwise dispose it. That is a real, live
+            // FileSystemWatcher leaked on every failed initial load -- harmless in the previously
+            // untested/lazy path, but bs-6f9's StartupOrchestrator now deliberately exercises this
+            // exact branch (an invalid or unreadable first-run config), so it is no longer a
+            // theoretical concern.
+            watcher.Dispose();
+            throw;
+        }
     }
 
     public void Dispose()

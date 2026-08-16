@@ -14,6 +14,17 @@ internal sealed class FakeRcloneClient : IRcloneClient
     private readonly Dictionary<string, IReadOnlyDictionary<string, string>> _configs = new(StringComparer.Ordinal);
     private readonly Queue<Func<Task<RcloneVersionInfo>>> _versionScript = new();
 
+    // bs-yvw.1: ListMountsAsync used to always return empty regardless of prior MountAsync/
+    // UnmountAsync calls, unlike the other IRcloneClient doubles in this suite
+    // (FakeRcloneMountClient, RcloneDouble), which correctly maintain an in-memory table. That
+    // mismatch was latent (nothing previously called ListMountsAsync after a real MountAsync in a
+    // test using this fake) until a StartupOrchestrator test exercised MountSupervisor's
+    // reconciliation right after a real mount: ListMountsAsync's stale "nothing is mounted"
+    // answer looked exactly like out-of-band drift, and MountSupervisor correctly (if
+    // unexpectedly, for the test) drained and re-mounted. Fixed to genuinely reflect state, same
+    // as the real rc API would.
+    private readonly List<RcloneMountInfo> _mounts = [];
+
     public List<string> GetVersionCalls { get; } = [];
     public List<(string RemoteName, string Type, IReadOnlyDictionary<string, string> Parameters)> CreateConfigCalls { get; } = [];
     public List<string> GetConfigCalls { get; } = [];
@@ -53,17 +64,20 @@ internal sealed class FakeRcloneClient : IRcloneClient
     public Task<RcloneMountResult> MountAsync(RcloneMountRequest request, CancellationToken cancellationToken)
     {
         MountCalls.Add(request);
+        _mounts.RemoveAll(m => string.Equals(m.MountPoint, request.MountPoint, StringComparison.OrdinalIgnoreCase));
+        _mounts.Add(new RcloneMountInfo { Fs = request.Fs, MountPoint = request.MountPoint, MountedOn = DateTimeOffset.UnixEpoch });
         return Task.FromResult(new RcloneMountResult { MountPoint = request.MountPoint });
     }
 
     public Task UnmountAsync(string mountPoint, CancellationToken cancellationToken)
     {
         UnmountCalls.Add(mountPoint);
+        _mounts.RemoveAll(m => string.Equals(m.MountPoint, mountPoint, StringComparison.OrdinalIgnoreCase));
         return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<RcloneMountInfo>>([]);
+        Task.FromResult<IReadOnlyList<RcloneMountInfo>>(_mounts.ToList());
 
     private Exception? _listThrows;
 

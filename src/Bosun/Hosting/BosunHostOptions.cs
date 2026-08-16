@@ -21,24 +21,27 @@ public sealed record BosunHostOptions
     /// it at a fixture, never the maintainer's real, gitignored <c>config/hosts.toml</c>.
     /// </summary>
     /// <remarks>
-    /// The default below (next to the executable, mirroring this repo's own
-    /// <c>config/hosts.toml</c> layout) is an assumption, not a confirmed convention —
-    /// docs/OPERATIONS.md does not pin down where an installed copy of Bosun should look for its
-    /// config. Flagged as bs-worth-confirming; see the bs-0na/bs-c0g/bs-30b delivery report.
+    /// ADR-012 Decision 4: <c>%LOCALAPPDATA%\Bosun\hosts.toml</c>, symmetric with
+    /// <see cref="LogDirectory"/> so docs/OPERATIONS.md can say "your configuration and your logs
+    /// are both under <c>%LOCALAPPDATA%\Bosun</c>". A repo-relative path (for local development
+    /// against this repo's own <c>config/hosts.toml</c>) survives only as a deliberate override —
+    /// construct a <see cref="BosunHostOptions"/> directly rather than using this default.
     /// </remarks>
     public required string ConfigPath { get; init; }
 
     /// <summary>
-    /// The options Bosun uses at real runtime: logs under <c>%LOCALAPPDATA%\Bosun\logs</c>
-    /// (docs/OPERATIONS.md "Logs"), config at <c>&lt;app directory&gt;\config\hosts.toml</c>.
+    /// The options Bosun uses at real runtime: both logs and config under
+    /// <c>%LOCALAPPDATA%\Bosun</c> (ADR-012 Decision 4; docs/OPERATIONS.md "Logs" and
+    /// "Configuration").
     /// </summary>
     public static BosunHostOptions CreateDefault()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var bosunDirectory = Path.Combine(localAppData, "Bosun");
         return new BosunHostOptions
         {
-            LogDirectory = Path.Combine(localAppData, "Bosun", "logs"),
-            ConfigPath = Path.Combine(AppContext.BaseDirectory, "config", "hosts.toml"),
+            LogDirectory = Path.Combine(bosunDirectory, "logs"),
+            ConfigPath = Path.Combine(bosunDirectory, "hosts.toml"),
         };
     }
 }
