@@ -427,3 +427,23 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# --- Bosun ---
+
+# Local host configuration - never commit
+config/hosts.toml
+
+# Graphify build artifacts
+graphify-out/
+
+# Beads local database (the JSONL export is committed, the SQLite db is not)
+.beads/*.db
+.beads/*.db-shm
+.beads/*.db-wal
+
+# Local publish output
+publish/
+
+# Claude Code local overrides and agent worktrees
+.claude/settings.local.json
+.claude/worktrees/

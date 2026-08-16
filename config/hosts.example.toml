@@ -1,0 +1,94 @@
+# Bosun host configuration — example
+#
+# Copy to config/hosts.toml and edit. hosts.toml is gitignored.
+# Full schema: docs/CONFIG-SCHEMA.md
+
+[global]
+rclone_rc_port                  = 5572
+rclone_config_path              = "%APPDATA%\\rclone\\rclone.conf"
+probe_timeout_seconds           = 5
+failures_before_unmount         = 3
+backoff_seconds                 = [5, 15, 30, 60, 300]
+suspend_unmount_timeout_seconds = 8
+start_with_windows              = true
+
+
+# An always-on box on the LAN. Persistent mount, quiet session.
+[hosts.example-nas]
+display_name  = "Example NAS"
+hostname      = "nas.example.internal"
+port          = 22
+user          = "youruser"
+identity_file = "~/.ssh/id_ed25519"
+
+  [hosts.example-nas.mount]
+  mode                 = "persistent"
+  drive                = "N:"
+  remote_path          = "/volume1/share"
+  vfs_cache_mode       = "writes"
+  network_mode         = true
+  idle_unmount_seconds = 0
+
+  [hosts.example-nas.session]
+  autostart    = false
+  reconnect    = true
+  tmux         = true
+  tmux_session = "main"
+  tab_color    = "#2D5F3F"
+  color_scheme = "Campbell"
+
+  [hosts.example-nas.probe]
+  interval_seconds = 60
+  deep_probe       = true
+
+
+# A remote server that is not always up. On-demand, red tab, no polling.
+[hosts.example-remote]
+display_name  = "Example Remote"
+hostname      = "remote.example.com"
+port          = 22
+user          = "youruser"
+identity_file = "~/.ssh/id_ed25519"
+
+  [hosts.example-remote.mount]
+  mode                 = "on-demand"
+  drive                = "R:"
+  remote_path          = "/srv/app"
+  vfs_cache_mode       = "writes"
+  network_mode         = true
+  idle_unmount_seconds = 900
+
+  [hosts.example-remote.session]
+  autostart    = false
+  reconnect    = true
+  tmux         = true
+  tmux_session = "main"
+  tab_color    = "#7A1F1F"
+  color_scheme = "Campbell"
+
+  [hosts.example-remote.probe]
+  interval_seconds = 0
+  deep_probe       = true
+
+
+# A jump host: shell only, no mount.
+[hosts.example-jump]
+display_name  = "Example Jump"
+hostname      = "jump.example.com"
+port          = 22
+user          = "youruser"
+identity_file = "~/.ssh/id_ed25519"
+
+  [hosts.example-jump.mount]
+  mode = "none"
+
+  [hosts.example-jump.session]
+  autostart    = true
+  reconnect    = true
+  tmux         = false
+  tab_color    = "#3A4A6B"
+  color_scheme = "Campbell"
+
+  [hosts.example-jump.probe]
+  interval_seconds = 0
+  deep_probe       = false
