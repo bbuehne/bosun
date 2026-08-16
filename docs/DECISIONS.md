@@ -286,3 +286,135 @@ then probe at the mounted cadence until it is unmounted. The idle/mounted split
 must be visible in the supervisor's probe scheduling, not buried in a config
 default, and it is a named test case: a regression that stops probing mounted
 hosts is an I2 violation, not a performance change.
+
+---
+
+## ADR-012 — The startup contract: ordered, fail-soft, one owner
+
+**Status:** **PROPOSED** — awaiting the maintainer's decision. Nothing has been
+implemented against it. Resolves `bs-bw4`, `bs-127`, `bs-o09`, and informs
+`bs-16b`.
+
+**Context.** Five epics landed with no agreed answer to a question none of them
+owned: *what happens, in what order, when Bosun starts?* Each deferred it
+correctly rather than guessing, and the deferrals have now accumulated into a
+gap.
+
+- `IRcloneRemoteProvisioner` exists, is tested, and **is called by nothing**. No
+  `bosun-<hostKey>` remote is ever written to `rclone.conf`, so on a real machine
+  every deep probe and every mount fails. E3 documented the wiring as belonging
+  to orchestration; E5 declined to invent it. The tool cannot currently work.
+- `RcloneProcessService` is deliberately **not** registered as an `IHostedService`,
+  because doing so would force `IHostConfigStore` to resolve during
+  `host.StartAsync()`, breaking the lazy-config pattern E1 established and a test
+  that depends on it.
+- `BosunHostOptions.ConfigPath` defaults to `<app dir>/config/hosts.toml`, which
+  was an assumption. `docs/OPERATIONS.md` documents where logs go and is silent
+  on configuration.
+- `HostConfigStore.Load` throws on an invalid initial config, by design — there is
+  no previous config to fall back to. Nobody has decided what the application does
+  with that exception.
+- `FileSystemConfigWatcher`'s constructor throws if its directory does not exist,
+  so a genuine first run currently dies before any friendlier message is possible.
+
+The through-line: **five components each degrade sensibly on their own, and
+nothing composes them.**
+
+**Decision.**
+
+1. **One owner.** A single hosted service owns startup and runs an explicit,
+   ordered sequence:
+
+   ```
+   load config → detect WinFsp → start rclone rcd + health check
+     → provision remotes → adopt-or-clear existing mounts → run the supervisor
+   ```
+
+   The order is not arbitrary. Remotes must exist before any deep probe can pass
+   (I1 forbids mounting without one). Adopt-or-clear must precede the supervisor
+   loop — `docs/ARCHITECTURE.md` §6 says existing mounts are reconciled "before
+   doing anything else", because a surviving mount from a crashed run is exactly
+   the drive letter most likely to be pointing somewhere wrong.
+
+2. **Every step degrades; no step aborts startup.** Each failure disables the
+   capabilities that depend on it, records a reason, and leaves everything else
+   working. This is not a new principle — it is the WinFsp rule from
+   `docs/ARCHITECTURE.md` §6 ("detect at startup, show an actionable message,
+   disable all mount features, leave terminal features working") generalised to
+   every startup dependency.
+
+3. **An invalid config degrades too.** Bosun starts, mounts and probes are
+   disabled, the parse error is surfaced, and the config watcher keeps running so
+   that fixing the file recovers without a restart. Terminal profiles continue to
+   be served from the last valid config if one exists.
+
+4. **Readiness is a typed, observable value**, not a log line — a record the tray
+   renders and the status window explains. "Why is nothing mounted" must be
+   answerable from the UI.
+
+5. **Configuration lives at `%LOCALAPPDATA%\Bosun\hosts.toml`.** First run creates
+   the directory and writes a template derived from `hosts.example.toml`. The
+   repo-relative path survives only as a development override through the
+   already-injected `BosunHostOptions`.
+
+**Reasoning.**
+
+*Why fail-soft rather than fail-fast.* Ordinarily a tool that cannot do its job
+should say so and stop. Bosun cannot: it has **no main window**. A hard startup
+failure produces a tray application that simply never appears, and `bs-16b`
+records that a failure before the logger is constructed is currently written
+nowhere at all — no file, no debug sink, no dialog. The honest-looking choice is
+in practice the silent one. Degrading with a visible reason is both kinder and
+more informative.
+
+It also matches what the tool already promises. A user with no WinFsp still gets
+their Terminal profiles. A user with a typo in `hosts.toml` should still get the
+profiles from the last config that parsed, and a tray icon telling them which
+line is wrong.
+
+*Why one owner rather than several hosted services.* Ordering is the whole
+problem. Independent `IHostedService` registrations start in registration order,
+which encodes the sequence somewhere invisible and fragile. An explicit sequence
+in one place can be read, tested, and logged as a unit.
+
+*Why the lazy-config objection does not survive.* `RcloneProcessService` was kept
+out of the hosted-service pipeline to preserve laziness that exists for a *test*:
+one that builds a host whose `ConfigPath` points nowhere. That is a test concern
+that leaked into production design. The real application should load its config at
+startup. Tests should build a host **without** the startup orchestrator, which
+`BosunHostFactory` is already composable enough to allow. Fix the test, not the
+architecture.
+
+*Why `%LOCALAPPDATA%`.* Symmetry with the log path is worth real money during
+triage — `docs/OPERATIONS.md` gets to say "your configuration and your logs are
+both under `%LOCALAPPDATA%\Bosun`", which is one sentence a stranger can follow.
+The `<app dir>` default is additionally wrong under E10's single-file publish,
+where `<app dir>` can resolve to an extraction directory rather than where the
+executable lives, and hostile to an install under `Program Files`.
+
+**Consequences.**
+
+- A new startup component, its ordered sequence, and its degraded modes all need
+  tests. Each step's failure is a case: no config, invalid config, no WinFsp, no
+  rclone binary, rcd fails to start, provisioning fails for one host but not
+  others.
+- The tray (E9) gains a real job beyond per-host status: explaining a degraded
+  Bosun. That should be in E9's brief before it is written.
+- First-run bootstrap becomes real work — create the directory, write the
+  template, and make `FileSystemConfigWatcher` tolerate a directory that did not
+  exist a moment ago.
+- `bs-16b` becomes more urgent, not less. Fail-soft means more paths that must
+  report *something*, and a pre-logger failure that vanishes silently undermines
+  the whole model.
+
+**Rejected alternatives.**
+
+*Fail fast on invalid config.* Defensible for a CLI, wrong for a windowless tray
+app whose failure would be invisible. Revisit only if `bs-16b` is fixed such that
+a startup failure is guaranteed to reach the user.
+
+*Provision remotes lazily, on first mount attempt.* Tempting — it needs no
+startup ordering at all. Rejected because it puts a config-file write on the
+mount path, which is latency-sensitive and already the most dangerous code in the
+project, and because a provisioning failure would then surface as a mysterious
+mount failure rather than a startup condition the user can see and fix.
