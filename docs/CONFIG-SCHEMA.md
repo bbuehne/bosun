@@ -12,6 +12,7 @@ rclone_config_path      = "%APPDATA%\\rclone\\rclone.conf"
 probe_timeout_seconds   = 5
 failures_before_unmount = 3
 backoff_seconds         = [5, 15, 30, 60, 300]   # holds at last value
+mounted_probe_interval_seconds = 60   # ceiling for probing while Mounted; see ADR-011
 suspend_unmount_timeout_seconds = 8   # Windows will not wait forever
 start_with_windows      = true
 ```
@@ -55,7 +56,8 @@ identity_file = "~/.ssh/id_ed25519"
 | `mount.drive` | Required when `mode != "none"`. Must be a free letter with a colon. Collisions are a validation error, not something to auto-resolve. |
 | `mount.vfs_cache_mode` | `writes` is the floor. `off` and `minimal` are rejected at validation — they break editors and Office. |
 | `mount.network_mode` | Must be `true`. Present as a field for debugging only. |
-| `probe.interval_seconds` | `0` means never poll. Sensible default for on-demand hosts (ADR-008). |
+| `probe.interval_seconds` | Polling cadence **while the host is idle** (`Ready` / `Unreachable`). `0` means never poll while idle — the sensible default for on-demand hosts (ADR-008). It does **not** disable probing while the host is `Mounted`; see `mounted_probe_interval_seconds` and ADR-011. |
+| `global.mounted_probe_interval_seconds` | Upper bound on the probe interval for a host in `Mounted`. A mounted host is always probed: at `interval_seconds` when that is greater than zero and smaller than this value, otherwise at this value. Bounds worst-case unmount latency to `mounted_probe_interval_seconds × failures_before_unmount` (default 3 minutes). |
 | `session.reconnect` | Wraps the ssh invocation in a loop that retries on exit code 255 (dropped) but exits cleanly on 0 (user typed `exit`). |
 | `session.tmux` | Strongly recommended. Reconnect gives a *new shell* otherwise — scrollback and working directory are lost. tmux makes reconnection resume the actual session. |
 
@@ -70,3 +72,7 @@ Reject the whole config, keep the previous one, and surface the error if any of:
 - `vfs_cache_mode` in `{off, minimal}`
 - `identity_file` path does not resolve to an existing file
 - `backoff_seconds` empty or containing non-positive values
+- `probe.interval_seconds` negative
+- `global.mounted_probe_interval_seconds` zero or negative — a mounted host must
+  always have a probe cadence (ADR-011). Absent is **not** an error: it defaults
+  to `60`, consistent with every other `[global]` field.
