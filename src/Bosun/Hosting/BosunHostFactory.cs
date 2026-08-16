@@ -1,4 +1,6 @@
 using System.IO;
+using Bosun.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Serilog;
@@ -46,6 +48,16 @@ public static class BosunHostFactory
 
         builder.Logging.ClearProviders();
         builder.Logging.AddSerilog(serilogLogger, dispose: true);
+
+        // Lazily constructed: nothing here touches config/hosts.toml until something actually
+        // resolves IHostConfigStore. That keeps this factory (and every test that merely builds
+        // or starts a host without resolving it) safe to run from a worktree, per CLAUDE.md's
+        // worktree-safety rules -- Load() below does real, synchronous file I/O.
+        builder.Services.AddSingleton<IHostConfigStore>(sp => HostConfigStore.Load(
+            path: options.ConfigPath,
+            reader: new FileConfigReader(),
+            watcher: new FileSystemConfigWatcher(options.ConfigPath),
+            timeProvider: TimeProvider.System));
 
         return builder.Build();
     }
