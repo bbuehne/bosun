@@ -1,5 +1,7 @@
 using System.IO;
 using Bosun.Configuration;
+using Bosun.SessionMonitor;
+using Bosun.SessionMonitor.Interop;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -58,6 +60,14 @@ public static class BosunHostFactory
             reader: new FileConfigReader(),
             watcher: new FileSystemConfigWatcher(options.ConfigPath),
             timeProvider: TimeProvider.System));
+
+        // E8 (bs-gme/bs-8dr/bs-8je): all Windows interop stays behind ISessionMonitor. Every
+        // constructor here is inert -- no process enumeration, no CIM, no P/Invoke call happens
+        // until something actually calls GetActiveSessions(), which keeps `dotnet build` /
+        // `dotnet test` safe to run from a worktree (CLAUDE.md worktree-safety rules).
+        builder.Services.AddSingleton<ISshProcessEnumerator, CimSshProcessEnumerator>();
+        builder.Services.AddSingleton<ITcpConnectionReader, Win32TcpConnectionReader>();
+        builder.Services.AddSingleton<ISessionMonitor, SshSessionMonitor>();
 
         return builder.Build();
     }
