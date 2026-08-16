@@ -543,7 +543,8 @@ public sealed class StartupOrchestratorTests
                     RestartDelay = restartDelay ?? TimeSpan.FromSeconds(5),
                 },
                 RcloneTime,
-                sp.GetRequiredService<ILogger<RcloneProcessService>>()));
+                sp.GetRequiredService<ILogger<RcloneProcessService>>(),
+                new RcloneRcCredential("bosun-test-user", "bosun-test-pass")));
 
             services.AddSingleton<IRcloneRemoteProvisioner>(Provisioner);
             services.AddSingleton<IProbe>(new RecordingProbe(Probe, Order));

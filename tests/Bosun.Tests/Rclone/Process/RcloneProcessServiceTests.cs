@@ -3,6 +3,7 @@ using Bosun.Rclone.Process;
 using Bosun.Tests.Configuration.Fakes;
 using Bosun.Tests.Rclone.Fakes;
 using Bosun.Tests.Rclone.Process.Fakes;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Bosun.Tests.Rclone.Process;
@@ -40,6 +41,102 @@ public sealed class RcloneProcessServiceTests
 
         var args = Assert.Single(launcher.StartCalls).Arguments;
         Assert.Equal(["rcd", "--rc-addr", "127.0.0.1:5573", "--config", @"C:\fixture\rclone.conf"], args);
+    }
+
+    // -- bs-ard: the rc credential reaches the child via environment, never the command line ----
+
+    [Fact]
+    public async Task StartAsync_passes_the_rc_credential_via_environment_variables_not_arguments()
+    {
+        var credential = new RcloneRcCredential("bosun-test-user", "bosun-test-pass");
+        var (service, launcher, _, _, _) = Create(credential: credential);
+        launcher.EnqueueSuccess(new FakeRcloneProcessHandle());
+
+        await service.StartAsync(CancellationToken.None);
+
+        var startInfo = Assert.Single(launcher.StartCalls);
+        Assert.Equal("bosun-test-user", startInfo.EnvironmentVariables["RCLONE_RC_USER"]);
+        Assert.Equal("bosun-test-pass", startInfo.EnvironmentVariables["RCLONE_RC_PASS"]);
+
+        // The secret must never appear on the command line -- a command line is readable by any
+        // same-user process (Win32_Process.CommandLine).
+        Assert.DoesNotContain(startInfo.Arguments, a => a.Contains("bosun-test-pass"));
+        Assert.DoesNotContain(startInfo.Arguments, a => a.Contains("bosun-test-user"));
+        Assert.DoesNotContain(startInfo.Arguments, a => a.Contains("rc-user", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(startInfo.Arguments, a => a.Contains("rc-pass", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Restart_after_an_unexpected_exit_reuses_the_same_credential()
+    {
+        // The per-Bosun-process-lifetime decision (see RcloneRcCredential's class remarks):
+        // every launch attempt -- including a restart -- must carry the SAME credential, since
+        // RcloneClient's Authorization header was set once, at construction, and is never
+        // refreshed.
+        var credential = new RcloneRcCredential("bosun-test-user", "bosun-test-pass");
+        var (service, launcher, _, time, _) = Create(credential: credential, restartDelay: TimeSpan.FromSeconds(2));
+        var firstHandle = new FakeRcloneProcessHandle();
+        var secondHandle = new FakeRcloneProcessHandle();
+        launcher.EnqueueSuccess(firstHandle);
+        launcher.EnqueueSuccess(secondHandle);
+
+        await service.StartAsync(CancellationToken.None);
+        firstHandle.SimulateExit(1);
+        await PumpAsync();
+        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(2), () => service.Status == RcloneProcessStatus.Healthy);
+
+        Assert.Equal(2, launcher.StartCalls.Count);
+        Assert.All(launcher.StartCalls, s =>
+        {
+            Assert.Equal("bosun-test-user", s.EnvironmentVariables["RCLONE_RC_USER"]);
+            Assert.Equal("bosun-test-pass", s.EnvironmentVariables["RCLONE_RC_PASS"]);
+        });
+    }
+
+    [Fact]
+    public async Task The_rc_password_never_appears_in_any_logged_output()
+    {
+        // A long, high-entropy, near-impossible-to-coincidentally-match marker in place of a
+        // real random password -- if THIS ever shows up in a captured log line, something logged
+        // the secret (or the whole credential via an unguarded {Credential} template).
+        const string secretMarker = "SECRET-MARKER-3f9a7c2e-91b6-4d8a-b7ee-do-not-log-me";
+        var credential = new RcloneRcCredential("bosun-test-user", secretMarker);
+        var logger = new RecordingLogger<RcloneProcessService>();
+
+        var (service, launcher, _, time, _) = Create(
+            restartDelay: TimeSpan.FromSeconds(1),
+            healthCheckTimeout: TimeSpan.FromMilliseconds(100),
+            healthCheckPollInterval: TimeSpan.FromSeconds(1),
+            stopTimeout: TimeSpan.FromMilliseconds(50),
+            credential: credential,
+            logger: logger);
+
+        // Exercise several of RcloneProcessService's logging paths: a launch failure
+        // (LogError), a successful start (LogInformation), an unexpected exit and restart
+        // (LogWarning), and a stop (which itself calls Kill, generating no additional log line
+        // in the happy path) -- see the class's own logger.Log* call sites.
+        launcher.EnqueueLaunchFailure();
+        var neverHealthyHandle = new FakeRcloneProcessHandle();
+        launcher.EnqueueSuccess(neverHealthyHandle);
+
+        await service.StartAsync(CancellationToken.None);
+        Assert.Equal(RcloneProcessFaultKind.LaunchFailed, service.FaultKind);
+
+        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(1), () => service.Status == RcloneProcessStatus.Healthy);
+        Assert.Equal(RcloneProcessStatus.Healthy, service.Status);
+
+        neverHealthyHandle.SimulateExit(1);
+        await PumpAsync();
+        var restartedHandle = new FakeRcloneProcessHandle();
+        launcher.EnqueueSuccess(restartedHandle);
+        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(1), () => launcher.StartCalls.Count == 3);
+
+        var stopTask = service.StopAsync(CancellationToken.None);
+        await AdvanceUntilCompleteAsync(stopTask, time, TimeSpan.FromMilliseconds(50));
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.NotEmpty(logger.CapturedText);
+        Assert.DoesNotContain(logger.CapturedText, line => line.Contains(secretMarker, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -233,7 +330,9 @@ public sealed class RcloneProcessServiceTests
         TimeSpan? restartDelay = null,
         TimeSpan? healthCheckTimeout = null,
         TimeSpan? healthCheckPollInterval = null,
-        TimeSpan? stopTimeout = null)
+        TimeSpan? stopTimeout = null,
+        RcloneRcCredential? credential = null,
+        ILogger<RcloneProcessService>? logger = null)
     {
         var launcher = new FakeRcloneProcessLauncher();
         var client = new FakeRcloneClient();
@@ -248,7 +347,13 @@ public sealed class RcloneProcessServiceTests
             StopTimeout = stopTimeout ?? TimeSpan.FromSeconds(5),
         };
 
-        var service = new RcloneProcessService(launcher, client, options, time, NullLogger<RcloneProcessService>.Instance);
+        var service = new RcloneProcessService(
+            launcher,
+            client,
+            options,
+            time,
+            logger ?? NullLogger<RcloneProcessService>.Instance,
+            credential ?? new RcloneRcCredential("bosun-test-user", "bosun-test-pass"));
         var statusHistory = new List<RcloneProcessStatus>();
         service.StatusChanged += (_, e) => statusHistory.Add(e.Status);
 

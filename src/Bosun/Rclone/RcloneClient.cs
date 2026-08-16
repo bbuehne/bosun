@@ -1,4 +1,5 @@
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -13,6 +14,7 @@ namespace Bosun.Rclone;
 /// (<see cref="Hosting.BosunHostFactory"/>), not this class's.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Every rc call in this file is POST with a JSON body, matching every worked example on
 /// https://rclone.org/rc/ (e.g. <c>curl http://localhost:5572/core/version</c> via HTTP POST).
 /// A non-2xx response, or a 2xx response whose body cannot be parsed as the expected shape,
@@ -21,10 +23,39 @@ namespace Bosun.Rclone;
 /// throws (<see cref="HttpRequestException"/>, <see cref="TaskCanceledException"/>) -- see the
 /// remarks on <see cref="RcloneRcException"/> for why that distinction is preserved rather than
 /// collapsed into one exception type.
+/// </para>
+/// <para>
+/// <b>Authentication (bs-ard).</b> Verified against a real rclone v1.75.0 binary: every rc
+/// endpoint except <c>core/version</c> returns HTTP 403 unless the rcd process was started with
+/// rc credentials. <paramref name="credential"/>'s value is used to set the
+/// <c>Authorization: Basic ...</c> header on <paramref name="httpClient"/> once, here in the
+/// constructor -- <see cref="HttpClient"/> applies its <c>DefaultRequestHeaders</c> to every
+/// request it sends, so this covers every call this class makes, including
+/// <see cref="GetVersionAsync"/>. rclone's own docs say <c>core/version</c> does not require
+/// auth, but that was observed to be true only when rc auth is not configured at all -- with a
+/// real credential configured (which <see cref="Process.RcloneProcessService"/> always does, per
+/// bs-ard), a real v1.75.0 binary returns 401 for an unauthenticated <c>core/version</c> call
+/// too, so sending auth here is not just uniformity, it is required for the health check
+/// (<see cref="Process.RcloneProcessService.WaitUntilHealthyAsync"/>) to ever succeed. See the
+/// remarks on <see cref="RcloneRcCredential"/> for why one credential, generated once for the
+/// whole Bosun process lifetime, stays valid across every <c>rclone rcd</c> restart.
+/// </para>
 /// </remarks>
-public sealed class RcloneClient(HttpClient httpClient) : IRcloneClient
+public sealed class RcloneClient : IRcloneClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    private readonly HttpClient _httpClient;
+
+    public RcloneClient(HttpClient httpClient, RcloneRcCredential credential)
+    {
+        ArgumentNullException.ThrowIfNull(httpClient);
+        ArgumentNullException.ThrowIfNull(credential);
+
+        _httpClient = httpClient;
+        _httpClient.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Basic", credential.ToBasicAuthHeaderValue());
+    }
 
     /// <summary>Cache modes at or above the Invariant I6 floor. Anything else -- including
     /// <see langword="null"/>, empty, "off", "minimal", or a typo -- is clamped to "writes" by
@@ -256,7 +287,7 @@ public sealed class RcloneClient(HttpClient httpClient) : IRcloneClient
     {
         var requestJson = (body ?? new JsonObject()).ToJsonString(JsonOptions);
         using var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
-        using var response = await httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
+        using var response = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
 
         var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 

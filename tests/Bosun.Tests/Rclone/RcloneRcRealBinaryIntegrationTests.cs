@@ -1,38 +1,33 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
 using Bosun.Rclone;
 using Bosun.Rclone.Process;
 
 namespace Bosun.Tests.Rclone;
 
 /// <summary>
-/// Verifies bs-ehx: two more <c>rclone rc</c> endpoints against a REAL <c>rclone rcd</c> child
-/// process -- excluded from the default suite (CLAUDE.md worktree-safety rules). Closes the one
-/// gap E3 flagged as inferred rather than verified: <c>config/get</c>'s response shape (see the
-/// remarks on <see cref="IRcloneClient.GetConfigAsync"/>), plus <c>mount/listmounts</c>' empty-list
-/// shape that E5's reconciliation and bs-ka9's Fs-aware adoption both depend on.
+/// Real-<c>rclone-rcd</c> integration coverage that two independent branches each contributed:
+/// (1) <see cref="Correct_Basic_auth_succeeds_no_auth_and_wrong_password_are_both_rejected"/>,
+/// raw-HTTP proof of the exact defect bs-ard fixes and the exact fix -- correct Basic auth
+/// succeeds, no auth is rejected, a wrong password is rejected -- against rclone v1.75.0.
+/// Deliberately bypasses <see cref="RcloneClient"/> entirely and talks to the rc HTTP API with
+/// plain <see cref="HttpClient"/> calls, so this test cannot be fooled by a bug in
+/// <see cref="RcloneClient"/> itself -- it proves what the WIRE actually does. (2) the two
+/// bs-ehx tests below (<c>ConfigCreate_then_ConfigGet_roundtrips...</c> and
+/// <c>ListMountsAsync_returns_an_empty_list...</c>), ported forward across the same bs-ard
+/// change to run through the real, now-authenticated <see cref="RcloneClient"/> instead of the
+/// <c>--rc-no-auth</c> bypass they originally used -- see their own remarks for what changed.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Safety.</b> Every rcd instance here is pointed at a throwaway <c>--config</c> file inside
-/// <see cref="Path.GetTempPath"/>, created fresh per test and deleted in a <c>finally</c> block --
-/// never the real <c>%APPDATA%\rclone\rclone.conf</c>. <c>mount/mount</c> and <c>mount/unmount</c>
-/// are never called (they need WinFsp, not installed here, and only <c>IMountSupervisor</c> may
-/// call them per the architectural boundary documented on <see cref="IRcloneClient"/>).
-/// </para>
-/// <para>
-/// <b>Deliberately bypasses <see cref="RcloneProcessService"/>.</b> This class starts the rcd
-/// process directly via <see cref="Win32RcloneProcessLauncher"/> (the same launcher
-/// <see cref="RcloneProcessService"/> uses in production) with an extra <c>--rc-no-auth</c> flag
-/// that <see cref="RcloneProcessService.BuildStartInfo"/> does NOT currently pass. That is a
-/// deliberate scope boundary, not an oversight -- see the bs-ehx delivery report: rclone v1.75.0
-/// empirically returns <c>403 Forbidden</c> ("authentication must be set up on the rc server...
-/// or the --rc-no-auth flag must be in use") for every rc call in this file EXCEPT
-/// <c>core/version</c> when that flag is absent, which contradicts the citation in
-/// <see cref="RcloneProcessService.BuildStartInfo"/>'s remarks. Fixing that citation/flag is a
-/// production-code, security-relevant decision (auth vs. <c>--rc-no-auth</c>) outside bs-ehx's
-/// "verify parameter shapes" scope, so it is reported as discovered work rather than silently
-/// patched here. This test adds the flag itself, locally, purely so the shapes below can be
-/// exercised against a real server at all.
-/// </para>
+/// Excluded from the default suite (CLAUDE.md worktree-safety rules). Run deliberately via
+/// <c>dotnet test --settings tests/Bosun.Tests/integration.runsettings</c>. Every rcd instance in
+/// this file is pointed at a throwaway <c>--config</c> file inside <see cref="Path.GetTempPath"/>,
+/// created fresh per test and deleted in a <c>finally</c> block -- never the real
+/// <c>%APPDATA%\rclone\rclone.conf</c>. <c>mount/mount</c> is never called anywhere in this file
+/// (WinFsp is not installed here, and only <c>IMountSupervisor</c> may call it per the
+/// architectural boundary on <see cref="IRcloneClient"/>); <c>mount/listmounts</c> is used as a
+/// read-only, auth-requiring probe instead.
 /// </remarks>
 [Trait(TestCategories.Category, TestCategories.Integration)]
 public sealed class RcloneRcRealBinaryIntegrationTests
@@ -40,9 +35,90 @@ public sealed class RcloneRcRealBinaryIntegrationTests
     private const int TestPort = 59574;
 
     [Fact]
+    public async Task Correct_Basic_auth_succeeds_no_auth_and_wrong_password_are_both_rejected()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "bosun-rclone-rc-auth-integration", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var configPath = Path.Combine(tempDir, "rclone.conf");
+
+        var credential = RcloneRcCredential.CreateRandom();
+        var launcher = new Win32RcloneProcessLauncher();
+        var baseAddress = new Uri($"http://127.0.0.1:{TestPort}/");
+
+        var handle = launcher.Start(new RcloneProcessStartInfo
+        {
+            ExecutablePath = RcloneTestBinary.ResolveExecutablePath(),
+            Arguments = ["rcd", "--rc-addr", $"127.0.0.1:{TestPort}", "--config", configPath],
+            EnvironmentVariables = new Dictionary<string, string>
+            {
+                ["RCLONE_RC_USER"] = credential.UserName,
+                ["RCLONE_RC_PASS"] = credential.Password,
+            },
+        });
+
+        try
+        {
+            // Readiness probe uses the correct credential, not no-auth: verified below (and
+            // documented on RcloneClient/IRcloneClient.GetVersionAsync) that once rc auth is
+            // CONFIGURED (RCLONE_RC_USER/RCLONE_RC_PASS set, exactly what Bosun always does),
+            // rclone v1.75.0 enforces Basic auth on core/version too, despite rclone's own docs
+            // saying "Authentication is not required for this call" -- that claim only holds when
+            // no rc auth is configured at all. An unauthenticated readiness probe would therefore
+            // never see anything but 401 and always time out.
+            using var authedProbe = new HttpClient { BaseAddress = baseAddress };
+            authedProbe.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Basic", credential.ToBasicAuthHeaderValue());
+            await WaitUntilRcdIsRespondingAsync(authedProbe);
+
+            // 1. Correct Basic auth -> 200, matching the exact manual verification in the bs-ard
+            // brief ("correct Basic auth | 200 {"mountPoints": []}").
+            using (var authedResponse = await PostAsync(baseAddress, "mount/listmounts", credential.UserName, credential.Password))
+            {
+                var body = await authedResponse.Content.ReadAsStringAsync();
+                Assert.Equal(HttpStatusCode.OK, authedResponse.StatusCode);
+                Assert.Contains("mountPoints", body);
+            }
+
+            // 2. No auth -> 401 (this is the bs-ard defect: EVERY endpoint but core/version used
+            // to fail this way against Bosun's own real calls, not just a hand-crafted request).
+            using (var unauthedResponse = await PostAsync(baseAddress, "mount/listmounts", user: null, pass: null))
+            {
+                Assert.Equal(HttpStatusCode.Unauthorized, unauthedResponse.StatusCode);
+            }
+
+            // 3. Wrong password -> 401, not a silent success.
+            using (var wrongPasswordResponse = await PostAsync(baseAddress, "mount/listmounts", credential.UserName, "definitely-the-wrong-password"))
+            {
+                Assert.Equal(HttpStatusCode.Unauthorized, wrongPasswordResponse.StatusCode);
+            }
+        }
+        finally
+        {
+            handle.Kill();
+            handle.Dispose();
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ported forward from the pre-bs-ard version of this file (bs-ehx): verifies <c>config/get</c>'s
+    /// response shape against a REAL <c>rclone rcd</c>, closing the one gap E3 flagged as inferred
+    /// rather than verified (see the remarks on <see cref="IRcloneClient.GetConfigAsync"/> --
+    /// inferred from <c>config/dump</c>'s documented shape, no worked example existed for
+    /// <c>config/get</c> itself). Now runs against an AUTHENTICATED rcd (bs-ard changed every
+    /// endpoint but <c>core/version</c> to require Basic auth), using the same random-credential +
+    /// environment-variable launch pattern as
+    /// <see cref="Correct_Basic_auth_succeeds_no_auth_and_wrong_password_are_both_rejected"/> above,
+    /// and the real <see cref="RcloneClient"/> (which attaches that credential's Basic auth header
+    /// to every request it sends) rather than the old <c>--rc-no-auth</c> bypass.
+    /// </summary>
+    [Fact]
     public async Task ConfigCreate_then_ConfigGet_roundtrips_the_sftp_parameter_names_against_a_real_rcd()
     {
-        await RunAgainstRealRcdAsync(async client =>
+        await RunAgainstAuthenticatedRcdAsync(async client =>
         {
             var parameters = new Dictionary<string, string>
             {
@@ -60,8 +136,10 @@ public sealed class RcloneRcRealBinaryIntegrationTests
             Assert.NotNull(result);
             // Real rclone v1.75.0's config/get response is confirmed to be exactly the flat
             // "key: value" object E3 inferred from config/dump's documented shape (plus a "type"
-            // key rclone adds itself) -- not wrapped in an envelope, not nested. See the class
-            // remarks and the bs-ehx delivery report for the literal observed JSON.
+            // key rclone adds itself) -- not wrapped in an envelope, not nested. Authentication
+            // (bs-ard) does not change this response shape at all, only whether the call is
+            // accepted in the first place -- see the class-level report on what was actually
+            // observed.
             Assert.Equal("nas.example.internal", result!["host"]);
             Assert.Equal("22", result["port"]);
             Assert.Equal("barry", result["user"]);
@@ -71,15 +149,19 @@ public sealed class RcloneRcRealBinaryIntegrationTests
         });
     }
 
+    /// <summary>
+    /// Ported forward from the pre-bs-ard version of this file (bs-ehx): proves the empty-list
+    /// shape <c>mount/listmounts</c> returns when rclone genuinely has nothing mounted --
+    /// independent of ever calling <c>mount/mount</c> (never done anywhere in this file: WinFsp is
+    /// not installed here, and only <c>IMountSupervisor</c> may call <c>mount/mount</c> per the
+    /// architectural boundary on <see cref="IRcloneClient"/>). Now runs against an authenticated
+    /// rcd -- see the remarks on the sibling <c>ConfigCreate_then_ConfigGet</c> test above for why.
+    /// </summary>
     [Fact]
     public async Task ListMountsAsync_returns_an_empty_list_on_a_clean_rcd_with_nothing_mounted()
     {
-        await RunAgainstRealRcdAsync(async client =>
+        await RunAgainstAuthenticatedRcdAsync(async client =>
         {
-            // No mount/mount call anywhere in this file: WinFsp is not installed, and only
-            // IMountSupervisor may call mount/mount per the architectural boundary on
-            // IRcloneClient. This proves the *shape* mount/listmounts returns when rclone
-            // genuinely has nothing mounted, independent of ever mounting anything.
             var result = await client.ListMountsAsync(CancellationToken.None);
 
             Assert.Empty(result);
@@ -87,38 +169,40 @@ public sealed class RcloneRcRealBinaryIntegrationTests
     }
 
     /// <summary>
-    /// Starts a real <c>rclone rcd</c> bound to loopback with a throwaway <c>--config</c>,
-    /// real <see cref="RcloneClient"/> HTTP calls, and shuts it back down -- always, even if
-    /// <paramref name="body"/> throws.
+    /// Starts a real, AUTHENTICATED <c>rclone rcd</c> bound to loopback with a throwaway
+    /// <c>--config</c>, following exactly the same setup as
+    /// <see cref="Correct_Basic_auth_succeeds_no_auth_and_wrong_password_are_both_rejected"/>:
+    /// a fresh random <see cref="RcloneRcCredential"/>, passed to the child via
+    /// <c>RCLONE_RC_USER</c>/<c>RCLONE_RC_PASS</c> environment variables (never command-line
+    /// flags -- see <see cref="RcloneRcCredential"/>'s remarks), and the same credential passed
+    /// into <see cref="RcloneClient"/>'s constructor so every call it makes, including the
+    /// readiness probe, carries the matching Basic auth header. Shuts the process back down --
+    /// always, even if <paramref name="body"/> throws.
     /// </summary>
-    private static async Task RunAgainstRealRcdAsync(Func<RcloneClient, Task> body)
+    private static async Task RunAgainstAuthenticatedRcdAsync(Func<RcloneClient, Task> body)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "bosun-rclone-ehx-verify", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var configPath = Path.Combine(tempDir, "rclone.conf");
 
+        var credential = RcloneRcCredential.CreateRandom();
         var launcher = new Win32RcloneProcessLauncher();
         IRcloneProcessHandle? handle = null;
 
         try
         {
             using var httpClient = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{TestPort}/") };
-            var client = new RcloneClient(httpClient);
+            var client = new RcloneClient(httpClient, credential);
 
             handle = launcher.Start(new RcloneProcessStartInfo
             {
-                ExecutablePath = ResolveRcloneExecutablePath(),
-                Arguments =
-                [
-                    "rcd",
-                    "--rc-addr",
-                    $"127.0.0.1:{TestPort}",
-                    "--config",
-                    configPath,
-                    // See the class remarks: v1.75.0 rejects every endpoint below with 403 without
-                    // this flag. Local to this test, deliberately not added to production code.
-                    "--rc-no-auth",
-                ],
+                ExecutablePath = RcloneTestBinary.ResolveExecutablePath(),
+                Arguments = ["rcd", "--rc-addr", $"127.0.0.1:{TestPort}", "--config", configPath],
+                EnvironmentVariables = new Dictionary<string, string>
+                {
+                    ["RCLONE_RC_USER"] = credential.UserName,
+                    ["RCLONE_RC_PASS"] = credential.Password,
+                },
             });
 
             await WaitUntilHealthyAsync(client, TimeSpan.FromSeconds(20));
@@ -135,19 +219,6 @@ public sealed class RcloneRcRealBinaryIntegrationTests
                 Directory.Delete(tempDir, recursive: true);
             }
         }
-    }
-
-    /// <summary>Resolves the same way <see cref="RcloneProcessServiceOptions.ExecutablePath"/>'s
-    /// default ("rclone", resolved via PATH) is meant to in production, but falls back to the
-    /// known install location if PATH resolution fails in this shell -- see the bs-ehx delivery
-    /// report for why that fallback exists (PATH was updated by the installer but not yet visible
-    /// to every already-running shell in this environment).</summary>
-    private static string ResolveRcloneExecutablePath()
-    {
-        var explicitPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "rclone", "rclone.exe");
-
-        return File.Exists(explicitPath) ? explicitPath : "rclone";
     }
 
     private static async Task WaitUntilHealthyAsync(RcloneClient client, TimeSpan timeout)
@@ -171,5 +242,50 @@ public sealed class RcloneRcRealBinaryIntegrationTests
 
         throw new TimeoutException(
             $"rclone rcd on port {TestPort} did not become healthy within {timeout}.", lastFailure);
+    }
+
+    private static async Task<HttpResponseMessage> PostAsync(Uri baseAddress, string endpoint, string? user, string? pass)
+    {
+        using var httpClient = new HttpClient { BaseAddress = baseAddress };
+        if (user is not null && pass is not null)
+        {
+            var headerValue = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{pass}"));
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", headerValue);
+        }
+
+        using var content = new StringContent("{}", Encoding.UTF8, "application/json");
+        return await httpClient.PostAsync(endpoint, content);
+    }
+
+    /// <summary>Polls <c>core/version</c> (with the correct credential -- see the caller's
+    /// remarks on why an unauthenticated probe would never succeed once rc auth is configured)
+    /// until it responds, proving the process is up before the auth-specific assertions run.
+    /// Real wall-clock waiting is acceptable here -- this is a marked integration test against a
+    /// real process, not part of the default suite's deterministic-time contract.</summary>
+    private static async Task WaitUntilRcdIsRespondingAsync(HttpClient httpClient)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        Exception? lastError = null;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                using var content = new StringContent("{}", Encoding.UTF8, "application/json");
+                using var response = await httpClient.PostAsync("core/version", content);
+                if (response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            {
+                lastError = ex;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+        }
+
+        throw new TimeoutException("rclone rcd did not respond to core/version within 15s.", lastError);
     }
 }

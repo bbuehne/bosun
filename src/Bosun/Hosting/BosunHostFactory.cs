@@ -96,11 +96,19 @@ public static class BosunHostFactory
         // ConnectAsync is called), matching the worktree-safety rule above.
         builder.Services.AddSingleton<ITcpProbeTransport, TcpProbeTransport>();
 
+        // bs-ard: one random rc credential for the lifetime of this Bosun process, shared by
+        // IRcloneClient (Basic auth header, set once below) and RcloneProcessService (passed to
+        // every `rclone rcd` launch/restart attempt as RCLONE_RC_USER/RCLONE_RC_PASS env vars) --
+        // see the class remarks on RcloneRcCredential for why ONE secret across every restart,
+        // not one per restart.
+        builder.Services.AddSingleton(RcloneRcCredential.CreateRandom());
+
         // E3 (bs-tg9/bs-5mt/bs-e26): IRcloneClient is a thin HttpClient wrapper -- constructing
         // it, and the HttpClient it wraps, does no I/O (no socket touched until a request is
         // actually sent), matching the worktree-safety rule above. The base address is bound
         // to `global.rclone_rc_port`, resolved lazily from IHostConfigStore the first time this
-        // is resolved -- never a non-loopback address (the rc API is unauthenticated).
+        // is resolved -- never a non-loopback address. The rc API requires Basic auth as of
+        // bs-ard; RcloneClient's constructor sets that header from the shared RcloneRcCredential.
         builder.Services.AddSingleton<IRcloneClient>(sp =>
         {
             var global = sp.GetRequiredService<IHostConfigStore>().Current.Global;
@@ -108,7 +116,7 @@ public static class BosunHostFactory
             {
                 BaseAddress = new Uri($"http://127.0.0.1:{global.RcloneRcPort}/"),
             };
-            return new RcloneClient(httpClient);
+            return new RcloneClient(httpClient, sp.GetRequiredService<RcloneRcCredential>());
         });
 
         builder.Services.AddSingleton<IRcloneRemoteProvisioner, RcloneRemoteProvisioner>();
@@ -172,7 +180,8 @@ public static class BosunHostFactory
                 sp.GetRequiredService<IRcloneClient>(),
                 rcloneProcessOptions,
                 TimeProvider.System,
-                sp.GetRequiredService<ILogger<RcloneProcessService>>());
+                sp.GetRequiredService<ILogger<RcloneProcessService>>(),
+                sp.GetRequiredService<RcloneRcCredential>());
         });
 
         // MountSupervisor (bs-psq; docs/ARCHITECTURE.md §4) -- registered as both its concrete
