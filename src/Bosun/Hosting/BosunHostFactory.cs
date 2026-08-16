@@ -7,6 +7,7 @@ using Bosun.Rclone.Process;
 using Bosun.SessionMonitor;
 using Bosun.SessionMonitor.Interop;
 using Bosun.Supervisor;
+using Bosun.Terminal;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -120,6 +121,19 @@ public static class BosunHostFactory
         // provides it").
         builder.Services.AddSingleton<IRemoteRootLister, RemoteRootLister>();
         builder.Services.AddSingleton<IProbe, HostProbe>();
+
+        // E7c (bs-k41): constructing IFragmentWriter does no I/O -- no directory is created and no
+        // file is touched until something actually calls WriteAsync -- matching the worktree-safety
+        // rule every other registration here follows. FragmentWriterOptions.CreateDefault() resolves
+        // the verified real path (bs-3ir): %LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Bosun\
+        // bosun.json. Nothing yet calls WriteAsync in production -- wiring an initial write and a
+        // FragmentRewriteCoordinator into the startup sequence is deliberately left as discovered
+        // work (see FragmentRewriteCoordinator's class remarks): IHostConfigStore may only be
+        // resolved, wrapped in try/catch, by StartupOrchestrator (ADR-012), so deciding exactly where
+        // fragment-writing joins that sequence is an ordering question for whoever owns it next.
+        builder.Services.AddSingleton<IFragmentFileSystem, RealFragmentFileSystem>();
+        builder.Services.AddSingleton(FragmentWriterOptions.CreateDefault());
+        builder.Services.AddSingleton<IFragmentWriter, FragmentWriter>();
 
         // RcloneProcessService owns the one long-lived `rclone rcd` child (Invariant I3/I4;
         // docs/ARCHITECTURE.md §2). Registered as a resolvable singleton -- NOT via
