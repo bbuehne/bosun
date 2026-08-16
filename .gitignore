@@ -436,10 +436,21 @@ config/hosts.toml
 # Graphify build artifacts
 graphify-out/
 
-# Beads local database (the JSONL export is committed, the SQLite db is not)
+# Beads. bd 1.2.2 is Dolt-backed: the database lives in .beads/embeddeddolt/ (ignored
+# by .beads/.gitignore) and is the source of truth. .beads/issues.jsonl is a generated
+# EXPORT of it, and is committed deliberately so the issue graph survives a clone -
+# see CLAUDE.md §3.
+#
+# Because it is generated, a merge conflict in issues.jsonl is never a real conflict.
+# Resolve it by taking either side and re-running `bd export`, which rewrites the file
+# authoritatively from the database. Do not hand-merge it. See bs-jau.
 .beads/*.db
 .beads/*.db-shm
 .beads/*.db-wal
+
+# Audit trail, not the issue graph. Append-only, regenerated locally, of no value to a
+# fresh clone - and committing it doubled the merge-conflict surface for no benefit.
+.beads/interactions.jsonl
 
 # Local publish output
 publish/

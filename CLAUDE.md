@@ -72,6 +72,10 @@ Markdown task lists are forbidden; do not create a `TODO.md`, a `PLAN.md`, or a
   scope — that is what Beads is for.
 - When you finish a unit of work, close its issue and commit
   `.beads/issues.jsonl` so the issue graph lands in git alongside the code.
+  **If it conflicts on a merge, do not hand-merge it.** It is a generated export
+  of the Dolt database, which is the source of truth — take either side and run
+  `bd export`, which rewrites it authoritatively. `.beads/interactions.jsonl` is
+  an audit trail and is gitignored for the same reason.
   `export.auto` is enabled, so bd refreshes that file after write commands
   (throttled); `bd export` forces it immediately. There is **no `bd sync`
   command** — it shipped only in the withdrawn v1.2.0/v1.2.1 releases, and
