@@ -1,0 +1,15 @@
+<Application x:Class="Bosun.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Bosun"
+             ShutdownMode="OnExplicitShutdown">
+    <!--
+        No StartupUri: Bosun has no main window. The tray icon (H.NotifyIcon)
+        arrives in E9 and will own the app's visible surface. ShutdownMode is
+        explicit so the app keeps running with zero windows open, which is the
+        steady state for a tray app.
+    -->
+    <Application.Resources>
+
+    </Application.Resources>
+</Application>
