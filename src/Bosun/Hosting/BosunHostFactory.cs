@@ -1,5 +1,6 @@
 using System.IO;
 using Bosun.Configuration;
+using Bosun.Probe;
 using Bosun.SessionMonitor;
 using Bosun.SessionMonitor.Interop;
 using Microsoft.Extensions.DependencyInjection;
@@ -68,6 +69,14 @@ public static class BosunHostFactory
         builder.Services.AddSingleton<ISshProcessEnumerator, CimSshProcessEnumerator>();
         builder.Services.AddSingleton<ITcpConnectionReader, Win32TcpConnectionReader>();
         builder.Services.AddSingleton<ISessionMonitor, SshSessionMonitor>();
+
+        // E4 (bs-pk4/bs-k8p/bs-fhp): the shallow-probe transport has no unresolved dependencies,
+        // so it is safe to register now -- constructing it does nothing (no socket touched until
+        // ConnectAsync is called), matching the worktree-safety rule above. IProbe/HostProbe is
+        // deliberately NOT registered yet: HostProbe also needs an IRemoteRootLister, and the only
+        // implementation of that interface is E3's real rclone client, which has not landed. Wire
+        // up `builder.Services.AddSingleton<IProbe, HostProbe>()` once E3 provides it.
+        builder.Services.AddSingleton<ITcpProbeTransport, TcpProbeTransport>();
 
         return builder.Build();
     }
