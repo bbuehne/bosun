@@ -5,6 +5,34 @@
 Run `scripts/dev-setup.ps1`. It installs WinFsp, rclone, and uv, and prints the
 Graphify and Beads setup commands.
 
+## Configuration
+
+Your configuration and your logs are both under `%LOCALAPPDATA%\Bosun` (ADR-012
+Decision 4):
+
+```
+%LOCALAPPDATA%\Bosun\hosts.toml   -- your configuration
+%LOCALAPPDATA%\Bosun\logs\        -- rolling daily logs
+```
+
+On first run, if `hosts.toml` does not exist yet, Bosun creates the directory and
+writes a template with a `[global]` block and every example host commented out —
+it configures zero hosts deliberately (a template that tried to mount
+`nas.example.internal` on first launch would be worse than no config at all). Add
+a `[hosts.<key>]` section and restart Bosun to bring a host up. This is the
+expected first-run path, not an error; a first-run window is the intended way to
+discover it (E9).
+
+If `hosts.toml` exists but fails to parse or fails validation, Bosun keeps
+running with mounting and remote provisioning disabled — the same graceful
+degradation as a missing WinFsp — rather than refusing to start. Fix the file and
+restart.
+
+A `config/hosts.example.toml` fuller example, with real host archetypes,
+ships in the repository for reference — it is not what gets copied to
+`%LOCALAPPDATA%\Bosun\hosts.toml` automatically. Full schema:
+`docs/CONFIG-SCHEMA.md`.
+
 ## rclone remotes
 
 Bosun creates its own sftp remotes from `hosts.toml` via `config/create`, so you

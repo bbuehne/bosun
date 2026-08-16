@@ -45,16 +45,45 @@ public sealed class BosunHostFactoryTests : IDisposable
     [Fact]
     public async Task Host_StartsAndStopsCleanlyWithoutAWindow()
     {
-        using var host = BosunHostFactory.CreateHost(new BosunHostOptions
-        {
-            LogDirectory = _logDirectory,
-            // Never resolved in these tests (IHostConfigStore is a lazy DI registration), so
-            // this need not point at a real file -- see CreateHost_ResolvesIHostConfigStore_WhenConfigPathPointsAtAValidFixture.
-            ConfigPath = Path.Combine(_logDirectory, "hosts.toml"),
-        });
+        // registerStartupOrchestrator: false -- per ADR-012's "fix the test, not the
+        // architecture" note (bs-127): in production, host.StartAsync() now runs
+        // StartupOrchestrator, which loads config for real, spawns a real `rclone` child process,
+        // and can drive a real drive letter. None of that is safe from a default-suite test
+        // (CLAUDE.md worktree-safety rules), so this test builds a host WITHOUT the orchestrator
+        // registered -- it exists to prove the HOST ITSELF (DI container, logging, lifetime)
+        // starts and stops cleanly, not to exercise the startup sequence (that is
+        // StartupOrchestratorTests' job).
+        using var host = BosunHostFactory.CreateHost(
+            new BosunHostOptions
+            {
+                LogDirectory = _logDirectory,
+                // Never resolved in these tests (IHostConfigStore is a lazy DI registration), so
+                // this need not point at a real file -- see CreateHost_ResolvesIHostConfigStore_WhenConfigPathPointsAtAValidFixture.
+                ConfigPath = Path.Combine(_logDirectory, "hosts.toml"),
+            },
+            registerStartupOrchestrator: false);
 
         await host.StartAsync();
         await host.StopAsync();
+    }
+
+    [Fact]
+    public async Task Host_WithStartupOrchestratorRegistered_DoesNotResolveIHostConfigStoreOrStartAnythingUntilStarted()
+    {
+        // The default (registerStartupOrchestrator: true) is safe to BUILD from a worktree --
+        // nothing eager happens at Build() time, only when the host is actually started, which
+        // this test deliberately does not do. Covers the other half of the bs-127 contract: the
+        // flag defaults to production behaviour, it doesn't silently disable the orchestrator.
+        using var host = BosunHostFactory.CreateHost(new BosunHostOptions
+        {
+            LogDirectory = _logDirectory,
+            ConfigPath = Path.Combine(_logDirectory, "hosts.toml"),
+        });
+
+        var orchestrator = host.Services.GetRequiredService<Bosun.Hosting.StartupOrchestrator>();
+
+        Assert.Equal(Bosun.Hosting.ConfigReadinessState.Invalid, orchestrator.Current.ConfigState);
+        await Task.CompletedTask;
     }
 
     [Fact]
@@ -89,13 +118,17 @@ public sealed class BosunHostFactoryTests : IDisposable
     }
 
     [Fact]
-    public void CreateDefault_PointsConfigPathUnderAppDirectoryConfigHostsToml()
+    public void CreateDefault_PointsConfigPathUnderLocalApplicationDataBosunHostsToml()
     {
-        // Same rationale as CreateDefault_PointsUnderLocalApplicationDataBosunLogs: computes a
-        // path string only, never passed to CreateHost from a test.
+        // ADR-012 Decision 4 (bs-008): symmetric with the log path. Same rationale as
+        // CreateDefault_PointsUnderLocalApplicationDataBosunLogs: computes a path string only,
+        // never passed to CreateHost from a test.
         var options = BosunHostOptions.CreateDefault();
 
-        var expected = Path.Combine(AppContext.BaseDirectory, "config", "hosts.toml");
+        var expected = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Bosun",
+            "hosts.toml");
 
         Assert.Equal(expected, options.ConfigPath);
     }

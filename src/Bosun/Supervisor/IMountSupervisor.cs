@@ -87,6 +87,17 @@ public interface IMountSupervisor
     /// (<c>mount/listmounts</c> on the fresh process returns empty), so this reconciles every
     /// host against reality immediately rather than waiting for the next tick.</summary>
     Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gates whether ANY host may enter <see cref="MountState.Mounting"/> (bs-yvw.1). Set by
+    /// <see cref="Hosting.StartupOrchestrator"/> from WinFsp detection and <c>rclone rcd</c>
+    /// health. Hosts still probe normally while unavailable, and never enter <c>Mounting</c> until
+    /// this reports <see cref="MountingAvailability.IsAvailable"/> -- see the type's remarks. A
+    /// transition from unavailable to available immediately attempts to mount every
+    /// administratively-enabled, non-parked persistent host sitting in <see cref="MountState.Ready"/>,
+    /// so recovery (e.g. <c>rclone rcd</c> restarting) does not require an app restart.
+    /// </summary>
+    Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default);
 }
 
 /// <summary>The seven states of docs/ARCHITECTURE.md §4, one instance per configured host.</summary>
@@ -121,4 +132,11 @@ public sealed record HostMountSnapshot
     /// -- that is deliberate parking, not a fault, and the tray UI should render it as such rather
     /// than as an unexplained "why hasn't this remounted" state.</summary>
     public bool UserParked { get; init; }
+
+    /// <summary>
+    /// Causal reason ANY host cannot currently mount for a process-wide reason (bs-yvw.1) -- e.g.
+    /// "WinFsp is not installed" -- or <see langword="null"/> when mounting is available. Not
+    /// about this particular host's own reachability; see <see cref="MountingAvailability"/>.
+    /// </summary>
+    public string? MountUnavailableReason { get; init; }
 }

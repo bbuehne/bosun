@@ -6,6 +6,7 @@ using Bosun.Rclone;
 using Bosun.Rclone.Process;
 using Bosun.SessionMonitor;
 using Bosun.SessionMonitor.Interop;
+using Bosun.Supervisor;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -34,7 +35,19 @@ public static class BosunHostFactory
     private const string LogOutputTemplate =
         "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {SourceContext}{NewLine}{Message:lj}{NewLine}{Exception}";
 
-    public static IHost CreateHost(BosunHostOptions? options = null)
+    /// <param name="options">See <see cref="BosunHostOptions"/>.</param>
+    /// <param name="registerStartupOrchestrator">
+    /// Production (the default) registers <see cref="StartupOrchestrator"/> as the host's one
+    /// <see cref="IHostedService"/>, which -- on <c>host.StartAsync()</c> -- loads config, starts
+    /// the real <c>rclone rcd</c> child process, and runs the mount supervisor (ADR-012 Decision
+    /// 1, bs-6f9). Tests that merely build or start/stop a host without exercising that sequence
+    /// must pass <see langword="false"/>: starting it for real spawns a real process and can touch
+    /// a real drive letter, which CLAUDE.md's worktree-safety rules forbid in the default test
+    /// suite. This is the fix bs-127/ADR-012 prescribe for the test that used to rely on
+    /// <c>IHostConfigStore</c> staying unresolved through <c>host.StartAsync()</c> — fix the test
+    /// (build without the orchestrator), not the architecture.
+    /// </param>
+    public static IHost CreateHost(BosunHostOptions? options = null, bool registerStartupOrchestrator = true)
     {
         options ??= BosunHostOptions.CreateDefault();
 
@@ -55,10 +68,14 @@ public static class BosunHostFactory
         builder.Logging.ClearProviders();
         builder.Logging.AddSerilog(serilogLogger, dispose: true);
 
-        // Lazily constructed: nothing here touches config/hosts.toml until something actually
-        // resolves IHostConfigStore. That keeps this factory (and every test that merely builds
-        // or starts a host without resolving it) safe to run from a worktree, per CLAUDE.md's
-        // worktree-safety rules -- Load() below does real, synchronous file I/O.
+        // Lazily constructed: nothing here touches config/hosts.toml merely from calling
+        // CreateHost() -- only from something actually resolving IHostConfigStore. That keeps
+        // BUILDING a host (this method returning) safe to run from a worktree unconditionally.
+        // STARTING a host is a different story as of bs-6f9/ADR-012: with the default
+        // registerStartupOrchestrator: true, host.StartAsync() now deliberately resolves this
+        // (via StartupOrchestrator, the one place allowed to) as its very first step. Tests that
+        // start a host without exercising that must pass registerStartupOrchestrator: false --
+        // see that parameter's doc above and BosunHostFactoryTests.
         builder.Services.AddSingleton<IHostConfigStore>(sp => HostConfigStore.Load(
             path: options.ConfigPath,
             reader: new FileConfigReader(),
@@ -105,20 +122,18 @@ public static class BosunHostFactory
         builder.Services.AddSingleton<IProbe, HostProbe>();
 
         // RcloneProcessService owns the one long-lived `rclone rcd` child (Invariant I3/I4;
-        // docs/ARCHITECTURE.md §2). Registered as a resolvable singleton, but deliberately NOT
-        // via AddHostedService yet: doing so would make host.StartAsync() resolve
-        // IHostConfigStore unconditionally (RcloneProcessServiceOptions needs
-        // global.rclone_rc_port/rclone_config_path), which breaks the deliberately-lazy pattern
-        // established for IHostConfigStore above and asserted on by
-        // BosunHostFactoryTests.Host_StartsAndStopsCleanlyWithoutAWindow (that test starts a host
-        // whose ConfigPath does not point at a real file, specifically to prove nothing forces a
-        // config load just from starting the host). Whether RcloneProcessService should start
-        // before, after, or interleaved with config validation and IRcloneRemoteProvisioner
-        // (bs-e26) is a startup-ordering decision for whichever epic wires the whole app
-        // together (E5/E7) -- not something to guess at here. %APPDATA%-style tokens in
-        // global.rclone_config_path are expanded at the point of use in this factory lambda, the
-        // same way ConfigValidator.ExpandHome expands identity_file's leading `~` at its point
-        // of use rather than at bind time.
+        // docs/ARCHITECTURE.md §2). Registered as a resolvable singleton -- NOT via
+        // AddHostedService (see StartupOrchestrator's class remarks on why: ADR-012 wants ONE
+        // hosted service owning ordering, not several independent registrations racing each
+        // other). StartupOrchestrator resolves this singleton and calls its
+        // StartAsync/StopAsync directly, in the sequence ADR-012 Decision 1 specifies. Resolving
+        // it still ultimately reads global.rclone_rc_port/rclone_config_path from
+        // IHostConfigStore, same as before -- what changed (bs-127) is WHO is allowed to trigger
+        // that resolution and when: only StartupOrchestrator, and only after it has confirmed
+        // config loaded successfully. %APPDATA%-style tokens in global.rclone_config_path are
+        // expanded at the point of use in this factory lambda, the same way
+        // ConfigValidator.ExpandHome expands identity_file's leading `~` at its point of use
+        // rather than at bind time.
         builder.Services.AddSingleton<IRcloneProcessLauncher, Win32RcloneProcessLauncher>();
         builder.Services.AddSingleton(sp =>
         {
@@ -136,6 +151,33 @@ public static class BosunHostFactory
                 TimeProvider.System,
                 sp.GetRequiredService<ILogger<RcloneProcessService>>());
         });
+
+        // MountSupervisor (bs-psq; docs/ARCHITECTURE.md §4) -- registered as both its concrete
+        // type (StartupOrchestrator needs RunAsync, which is deliberately not on IMountSupervisor
+        // -- see its class remarks) and the interface (for future consumers, e.g. the tray UI,
+        // that only need commands/snapshots and should not see RunAsync at all).
+        builder.Services.AddSingleton(sp => new MountSupervisor(
+            sp.GetRequiredService<IHostConfigStore>(),
+            sp.GetRequiredService<IRcloneClient>(),
+            sp.GetRequiredService<IProbe>(),
+            TimeProvider.System,
+            sp.GetRequiredService<ILogger<MountSupervisor>>()));
+        builder.Services.AddSingleton<IMountSupervisor>(sp => sp.GetRequiredService<MountSupervisor>());
+
+        // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
+        // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without
+        // it -- see the parameter doc above.
+        if (registerStartupOrchestrator)
+        {
+            builder.Services.AddSingleton<IFirstRunConfigBootstrapper, FirstRunConfigBootstrapper>();
+            builder.Services.AddSingleton(sp => new StartupOrchestrator(
+                sp,
+                options,
+                sp.GetRequiredService<IFirstRunConfigBootstrapper>(),
+                sp.GetRequiredService<IWinFspDetector>(),
+                sp.GetRequiredService<ILogger<StartupOrchestrator>>()));
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<StartupOrchestrator>());
+        }
 
         return builder.Build();
     }
