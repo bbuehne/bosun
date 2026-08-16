@@ -39,8 +39,17 @@ public static class ConfigValidator
     // test (Validate_DriveWithATrailingNewline_IsRejected); do not "simplify" this back.
     private static readonly Regex DriveLetterPattern = new(@"\A[D-Z]:\z", RegexOptions.Compiled);
 
-    private static readonly IReadOnlySet<string> RejectedVfsCacheModes =
-        new HashSet<string>(StringComparer.Ordinal) { "off", "minimal" };
+    // bs-lrd / bs-mb2: an allow-list, not a deny-list. A deny-list of {off, minimal} let any
+    // typo ("wirtes") or any casing rclone itself accepts ("Off", "OFF") straight through
+    // validation and into mount/mount, where it only failed once the mount was already
+    // attempted. Invariant I6 makes "writes" a correctness floor, so anything not affirmatively
+    // known-safe is rejected -- compared case-insensitively, because rclone's own flag parsing
+    // does not care about case and neither should we.
+    private static readonly IReadOnlySet<string> AllowedVfsCacheModes =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "writes", "full" };
+
+    private const int MinValidRcloneRcPort = 1;
+    private const int MaxValidRcloneRcPort = 65535;
 
     /// <summary>
     /// Validates <paramref name="config"/>, returning every rule violation found — never just
@@ -89,20 +98,57 @@ public static class ConfigValidator
                 "invalid-mounted-probe-interval",
                 $"global.mounted_probe_interval_seconds must be positive (got {global.MountedProbeIntervalSeconds}) -- a mounted host must always have a probe cadence (ADR-011)"));
         }
+
+        // bs-z3y: the same shape of hole ADR-011 closed for mounted_probe_interval_seconds.
+        // Depending on how MountSupervisor's ">=" comparison reads, 0 means either "unmount on
+        // the very next probe tick" or -- the actually observed direction -- "never unmount",
+        // because ConsecutiveMountedFailures never reaches a threshold of 0 by incrementing from
+        // 0. Either way it is a direct Invariant I2 violation, so anything below 1 is rejected
+        // outright rather than left to the runtime clamp in MountSupervisor.
+        if (global.FailuresBeforeUnmount < 1)
+        {
+            errors.Add(new ConfigValidationError(
+                "invalid-failures-before-unmount",
+                $"global.failures_before_unmount must be at least 1 (got {global.FailuresBeforeUnmount}) -- below 1 a mounted host is never unmounted on probe failure (Invariant I2)"));
+        }
+
+        if (global.ProbeTimeoutSeconds <= 0)
+        {
+            errors.Add(new ConfigValidationError(
+                "invalid-probe-timeout",
+                $"global.probe_timeout_seconds must be positive (got {global.ProbeTimeoutSeconds})"));
+        }
+
+        if (global.RcloneRcPort is < MinValidRcloneRcPort or > MaxValidRcloneRcPort)
+        {
+            errors.Add(new ConfigValidationError(
+                "invalid-rclone-rc-port",
+                $"global.rclone_rc_port must be between {MinValidRcloneRcPort} and {MaxValidRcloneRcPort} (got {global.RcloneRcPort})"));
+        }
+
+        if (global.SuspendUnmountTimeoutSeconds <= 0)
+        {
+            errors.Add(new ConfigValidationError(
+                "invalid-suspend-unmount-timeout",
+                $"global.suspend_unmount_timeout_seconds must be positive (got {global.SuspendUnmountTimeoutSeconds}) -- Invariant I8 requires unmounting before suspend within this window"));
+        }
     }
 
     private static void ValidateDuplicateDisplayNames(
         IReadOnlyDictionary<string, HostConfig> hosts,
         List<ConfigValidationError> errors)
     {
-        foreach (var group in hosts.Values.GroupBy(h => h.DisplayName, StringComparer.Ordinal))
+        // bs-5bk: case-insensitive. E7 emits Windows Terminal profiles named from display_name,
+        // and `wt -p` has undocumented tie-breaking on a collision -- "Prod" and "prod" are the
+        // same hazard as an exact duplicate, just spelled differently.
+        foreach (var group in hosts.Values.GroupBy(h => h.DisplayName, StringComparer.OrdinalIgnoreCase))
         {
             if (group.Count() > 1)
             {
                 var keys = string.Join(", ", group.Select(h => h.Key).OrderBy(k => k, StringComparer.Ordinal));
                 errors.Add(new ConfigValidationError(
                     "duplicate-display-name",
-                    $"display_name '{group.Key}' is used by more than one host ({keys}) -- profile launching (wt -p) is not deterministic on a collision"));
+                    $"display_name '{group.Key}' is used by more than one host ({keys}) -- profile launching (wt -p) is not deterministic on a collision (compared case-insensitively)"));
             }
         }
     }
@@ -147,11 +193,33 @@ public static class ConfigValidator
                 $"hosts.{host.Key}: mount.drive '{host.Mount.Drive}' does not match ^[D-Z]:$ (A-C reserved)"));
         }
 
-        if (host.Mount.VfsCacheMode is not null && RejectedVfsCacheModes.Contains(host.Mount.VfsCacheMode))
+        // bs-lrd / bs-mb2: allow-list, not deny-list -- absent (null) is not an error here; a
+        // missing field is defaulted to "writes" by ConfigParser (the config layer), so nothing
+        // downstream ever sees a null. Only an explicitly-supplied, unrecognised value fires.
+        if (host.Mount.VfsCacheMode is not null && !AllowedVfsCacheModes.Contains(host.Mount.VfsCacheMode))
         {
             errors.Add(new ConfigValidationError(
                 "invalid-vfs-cache-mode",
-                $"hosts.{host.Key}: mount.vfs_cache_mode '{host.Mount.VfsCacheMode}' breaks editors and Office outright -- 'writes' is the floor (Invariant I6)"));
+                $"hosts.{host.Key}: mount.vfs_cache_mode '{host.Mount.VfsCacheMode}' is not one of {{writes, full}} -- 'writes' is the floor (Invariant I6)"));
+        }
+
+        // bs-b8t: I7 requires --network-mode on every mount. The field exists "for debugging
+        // only" per docs/CONFIG-SCHEMA.md, but an explicit `false` is an authoring mistake that
+        // previously passed validation silently and was only ever caught by RcloneClient
+        // hardcoding true into the mount/mount body -- the config the user wrote and the mount
+        // that actually happened silently disagreed. Reject it here instead.
+        if (host.Mount.NetworkMode == false)
+        {
+            errors.Add(new ConfigValidationError(
+                "invalid-network-mode",
+                $"hosts.{host.Key}: mount.network_mode must be true (Invariant I7) -- got false"));
+        }
+
+        if (host.Mount.IdleUnmountSeconds is < 0)
+        {
+            errors.Add(new ConfigValidationError(
+                "negative-idle-unmount-seconds",
+                $"hosts.{host.Key}: mount.idle_unmount_seconds must not be negative (got {host.Mount.IdleUnmountSeconds})"));
         }
 
         if (!identityFileExists(ExpandHome(host.IdentityFile)))

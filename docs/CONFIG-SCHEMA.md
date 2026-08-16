@@ -54,8 +54,9 @@ identity_file = "~/.ssh/id_ed25519"
 |---|---|
 | `mount.mode` | `persistent` mounts automatically once probing succeeds. `on-demand` rests in `Ready` and mounts only on user action. `none` disables mounting entirely; terminal features still apply. |
 | `mount.drive` | Required when `mode != "none"`. Must be a free letter with a colon. Collisions are a validation error, not something to auto-resolve. |
-| `mount.vfs_cache_mode` | `writes` is the floor. `off` and `minimal` are rejected at validation — they break editors and Office. |
-| `mount.network_mode` | Must be `true`. Present as a field for debugging only. |
+| `mount.vfs_cache_mode` | `writes` is the floor. Validated as an **allow-list** of `{writes, full}`, compared case-insensitively — anything else, including a typo or a differently-cased spelling of a rejected value (`Off`, `OFF`), is a validation error. Absent is not an error: it is defaulted to `writes` in the config layer (`ConfigParser`), so nothing downstream ever sees a null. |
+| `mount.network_mode` | Must be `true`. Present as a field for debugging only. An explicit `false` is a validation error. |
+| `mount.idle_unmount_seconds` | `0` = never (on-demand only). Negative is a validation error. |
 | `probe.interval_seconds` | Polling cadence **while the host is idle** (`Ready` / `Unreachable`). `0` means never poll while idle — the sensible default for on-demand hosts (ADR-008). It does **not** disable probing while the host is `Mounted`; see `mounted_probe_interval_seconds` and ADR-011. |
 | `global.mounted_probe_interval_seconds` | Upper bound on the probe interval for a host in `Mounted`. A mounted host is always probed: at `interval_seconds` when that is greater than zero and smaller than this value, otherwise at this value. Bounds worst-case unmount latency to `mounted_probe_interval_seconds × failures_before_unmount` (default 3 minutes). |
 | `session.reconnect` | Wraps the ssh invocation in a loop that retries on exit code 255 (dropped) but exits cleanly on 0 (user typed `exit`). |
@@ -63,16 +64,52 @@ identity_file = "~/.ssh/id_ed25519"
 
 ## Validation rules
 
+**Principle:** any `[global]` value that feeds a safety decision carries a
+documented range, and validation rejects outside it. The rules below stop the
+holes found so far; the principle is what stops the next field arriving
+unguarded. `failures_before_unmount` had no rule at all until this pass — `0`
+validated cleanly and, depending on how the comparison against it was written,
+meant either "unmount on the very next probe tick" or, the direction actually
+observed in `MountSupervisor`, "never unmount" — a silent Invariant I2
+violation reachable from a config file, not a code bug. Every numeric
+`[global]` field, and every per-host field that gates a safety decision (mount
+floor, unmount trigger), gets the same treatment: a range, in this table, with
+a validation rule enforcing it.
+
 Reject the whole config, keep the previous one, and surface the error if any of:
 
-- duplicate host key or duplicate `display_name`
+- duplicate host key (see note below — this cannot reach `ConfigValidator`) or
+  duplicate `display_name` (compared **case-insensitively**: `"Prod"` and
+  `"prod"` collide, because `wt -p` resolution is undocumented on a tie and
+  a differently-cased duplicate is the same hazard as an exact one)
 - two hosts claiming the same drive letter
 - `mode != "none"` with no `drive` or no `remote_path`
 - `drive` not matching `^[D-Z]:$` (A–C reserved)
-- `vfs_cache_mode` in `{off, minimal}`
+- `vfs_cache_mode`, when present, not one of `{writes, full}` (**allow-list**,
+  compared case-insensitively — not a deny-list of `{off, minimal}`; see the
+  field semantics table above)
+- `network_mode` explicitly `false` (Invariant I7 requires `--network-mode` on
+  every mount; `null`/absent is not rejected — only an explicit `false`)
+- `idle_unmount_seconds` negative
 - `identity_file` path does not resolve to an existing file
 - `backoff_seconds` empty or containing non-positive values
 - `probe.interval_seconds` negative
 - `global.mounted_probe_interval_seconds` zero or negative — a mounted host must
   always have a probe cadence (ADR-011). Absent is **not** an error: it defaults
   to `60`, consistent with every other `[global]` field.
+- `global.failures_before_unmount` less than `1` — below `1` a mounted host is
+  never unmounted on probe failure (Invariant I2). `1` is the boundary and is
+  valid: it means unmount on the very next consecutive failure.
+- `global.probe_timeout_seconds` zero or negative
+- `global.rclone_rc_port` outside `1`–`65535`
+- `global.suspend_unmount_timeout_seconds` zero or negative — Invariant I8
+  requires everything unmounted within this window before the machine sleeps.
+
+**Note on "duplicate host key":** this cannot actually reach `ConfigValidator`.
+Tomlyn rejects a TOML document that redefines a table (`[hosts.jump]` appearing
+twice) at **parse** time, before binding — see
+`ConfigParserTests.Toml_DuplicateHostKey_IsRejectedRatherThanLastOneWinning`.
+It is listed here for completeness of the invariant ("no two hosts share an
+identity"), not because `ConfigValidator` contains, or should ever grow, code
+looking for it — that condition cannot occur by the time a `BosunConfig`
+exists to validate.

@@ -88,9 +88,18 @@ public enum MountMode
 /// every other field is typically absent from TOML (see <c>hosts.example-jump</c> in
 /// config/hosts.example.toml) and therefore null/default here — that is legal at bind time;
 /// <see cref="ConfigValidator"/> is what enforces "required when mode != none".
+///
+/// <see cref="VfsCacheMode"/> is the one exception to "absent means null": Invariant I6 makes
+/// "writes" a correctness floor for every mount, and rclone's own default is "off" — the exact
+/// value I6 forbids — so <see cref="ConfigParser"/> defaults an absent value to
+/// <see cref="DefaultVfsCacheMode"/> at bind time (bs-lrd / bs-mb2), unconditionally of
+/// <see cref="Mode"/>. Nothing downstream (mount building, this record's consumers) should ever
+/// see a null here for a value ConfigParser bound.
 /// </summary>
 public sealed record MountConfig
 {
+    public const string DefaultVfsCacheMode = "writes";
+
     public required MountMode Mode { get; init; }
     public string? Drive { get; init; }
     public string? RemotePath { get; init; }

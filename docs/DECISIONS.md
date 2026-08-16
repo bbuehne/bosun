@@ -582,3 +582,73 @@ to avoid, and on-demand hosts are frequently the ones that are off.
   server is off. That is intended: it is what makes the drive come back without
   the user doing anything.
 
+
+---
+
+## ADR-015 — A user-requested unmount parks the host
+
+**Status:** Accepted (2026-08-16). Resolves `bs-cql`. Clarifies ADR-005 and
+`docs/ARCHITECTURE.md` §4 rule 6.
+
+**Context.** Independent adversarial testing of E5 found that a **persistent**
+host the user unmounted from the tray drained and then **remounted itself within
+the same drain**. `CompleteDrainAsync` auto-re-enabled every host, and
+`OnEnteredReadyAsync` auto-mounts persistent hosts on every arrival at `Ready` —
+including the arrival immediately following the user's own unmount.
+
+The behaviour was implemented as "stays parked" ahead of this decision, and the
+implementation shipped on `main`. This ADR records the reasoning and ratifies it,
+rather than leaving live behaviour resting on an unrecorded interpretation.
+
+**Decision.** A user-requested unmount **parks** the host. It stays unmounted
+until one of: an explicit user remount, a configuration reload, or an application
+restart. The host continues to probe normally while parked — it simply does not
+auto-mount. The parked state is exposed in the supervisor snapshot.
+
+**Reasoning.**
+
+*The spec already says this, read as a whole.* §4 lists "user unmount" as a
+`Mounted → Draining` trigger. `Draining`'s only outgoing edge is `→ Disabled`.
+`Disabled`'s only outgoing edge is "enable", and its only annotation on the
+diagram is "user disables". Followed end to end, a user unmount ends **parked**.
+Rule 6 governs a *tier's resting state* — where a host sits when nothing has
+happened — not the override of an explicit command. ADR-005 concerns unmounting
+on *probe failure* and says nothing about undoing a deliberate instruction.
+
+*And it is what the click means.* Clicking "unmount" and watching the drive
+reappear a minute later reads as the tool ignoring you. There are ordinary
+reasons to want a letter released: copying a large file locally, a flaky link,
+handing the laptop over, or running a backup that should not traverse a network
+mount. Without this there is no in-app way to achieve any of them short of
+editing `hosts.toml`.
+
+*Why it still probes while parked.* So the tray can show live reachability. A
+parked host that also stopped probing would render as unknown, which looks like a
+fault; the whole point is that a drive deliberately absent must not look like a
+drive that broke.
+
+**Consequences.**
+
+- `docs/ARCHITECTURE.md` §4 gains rule 9 stating this explicitly. The ambiguity
+  existed because the diagram implied it without any rule saying it.
+- The tray (E9) must distinguish **parked** from **unreachable** from **mounted**.
+  A user who parked a drive should see that they parked it. This joins ADR-012's
+  requirement that the icon and status window explain state causally.
+- `Disabled` currently conflates three things — never-enabled (`mode = "none"`),
+  parked-by-suspend, and drained-and-about-to-re-enable. That conflation is *why*
+  this bug existed. A distinct parked state, or an `AdministrativelyEnabled` flag
+  the user unmount clears, would make rule 6 decidable rather than inferable.
+  Worth revisiting if the supervisor's state handling is touched again.
+
+**Rejected alternatives.**
+
+*Keep auto-remounting and make the UI honest* ("unmount (will remount when
+reachable)"). Cheap, and it removes the surprise without removing the problem —
+the user still cannot release a drive letter.
+
+*Treat a user unmount as administratively disabling the host until re-enabled.*
+Strongest reading, but it makes the persistent tier stop meaning anything for that
+host until the user remembers to re-enable it, and a forgotten disable is a worse
+failure than a forgotten park — the drive silently never returns, even after a
+restart.
+
