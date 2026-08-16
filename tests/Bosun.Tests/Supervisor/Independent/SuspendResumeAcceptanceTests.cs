@@ -156,13 +156,11 @@ public sealed class SuspendResumeAcceptanceTests
         Assert.Equal(MountState.Mounted, harness.State("prod"));
         Assert.Equal(MountState.Unreachable, harness.State("archive"));
 
-        // Walk "archive" out to the last rung of the default [5, 15, 30, 60, 300] ladder.
-        foreach (var rung in new[] { 5, 15, 30, 60 })
-        {
-            await harness.AdvanceSecondsAsync(rung);
-        }
-
-        Assert.Equal(5, harness.Snapshot("archive").ConsecutiveIdleFailures);
+        // The ladder walk that used to sit here is gone: ADR-014 (ratified after this test was
+        // written) runs the recurring ladder for persistent hosts only, so an on-demand host cannot
+        // be walked out along the rungs any more. It was only ever setup to make "immediately"
+        // dramatic; immediacy is actually proven below by advancing the clock NOT AT ALL, which is
+        // the stronger assertion and is untouched.
 
         await harness.RunAsync(() => harness.Supervisor.SuspendAsync());
         harness.Probe.SetShallow(IndependentHarness.HostnameOf("archive"), ShallowProbeOutcome.Success);
@@ -191,7 +189,12 @@ public sealed class SuspendResumeAcceptanceTests
     [Fact]
     public async Task A_network_change_restarts_the_backoff_ladder_at_its_first_rung()
     {
-        var host = HostFixtures.OnDemand("archive", drive: "Q:");
+        // Persistent, not on-demand: ADR-014 (ratified after this test was written) runs the
+        // recurring ladder for persistent hosts only, so an on-demand host can no longer be walked
+        // out along the rungs. The assertions below -- that a network change restarts the ladder at
+        // rung 1 rather than leaving it at rung 5 -- are unchanged, and are about the ladder, so
+        // they need the tier that has one.
+        var host = HostFixtures.Persistent("archive", drive: "Q:");
         var global = HostFixtures.Global(backoffSeconds: [5, 15, 30, 60, 300]);
         var harness = new IndependentHarness(HostFixtures.Build(global, host));
         harness.Probe.DefaultShallow = ShallowProbeOutcome.ConnectionRefused;

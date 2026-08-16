@@ -238,6 +238,25 @@ rather than approximately true. Persistent hosts must keep polling: that is the
 mechanism by which a drive returns on its own, which is `docs/OPERATIONS.md` T2.
 See ADR-014.
 
+**Resume and network change do NOT inherit the tier split.** They reset backoff and
+force an immediate probe for **every enabled host**, on-demand included. Only the
+*recurring* ladder is tier-split.
+
+The distinction is scale, not principle. ADR-014's stated cost is that polling
+hosts the user is not using "makes the UI slow and the auth logs noisy" — an
+argument about *continuous* traffic, every rung, forever. A resume or a dock is a
+rare, bounded event producing exactly one probe per host. That cost is not the
+cost ADR-014 was avoiding.
+
+And suppressing it would defeat the thing the reset exists for. `docs/OPERATIONS.md`
+T2 — close the lid on one network, open it on another — is the acceptance test that
+matters, and an on-demand host still displaying a stale `Unreachable` after the
+machine has moved networks is precisely the sluggishness this section says the
+reset eliminates. ADR-008 says on-demand rows "render as unknown until acted on";
+a host that is *known-stale* is a worse answer than one that is unknown.
+
+`mode = "none"` hosts remain untouched: they are not enabled, and are never probed.
+
 ### Reconciliation
 
 Every supervisor tick, compare intended state against `mount/listmounts`. Drift

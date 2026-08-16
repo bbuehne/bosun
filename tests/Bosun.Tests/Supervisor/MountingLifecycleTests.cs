@@ -55,19 +55,31 @@ public sealed class MountingLifecycleTests
         Assert.Single(harness.Rclone.MountCalls);
     }
 
+    /// <summary>
+    /// ADR-014 rule 8: a mount request against an Unreachable host is never a silent no-op. It
+    /// probes immediately -- and here the probe still fails, so the host stays Unreachable and the
+    /// request throws with a causal reason rather than either mounting (Invariant I1 violation) or
+    /// quietly doing nothing (the exact defect rule 8 exists to close).
+    /// </summary>
     [Fact]
-    public async Task RequestMountAsync_is_ignored_when_host_is_not_Ready()
+    public async Task RequestMountAsync_on_an_Unreachable_host_probes_immediately_and_throws_when_the_probe_fails()
     {
         var host = HostFixtures.OnDemand("archive", drive: "Q:");
         var harness = new SupervisorHarness(HostFixtures.Build(HostFixtures.Global(), host));
         harness.Probe.SetDefaultShallow(ShallowProbeOutcome.ConnectionRefused);
         await harness.StartAsync();
         Assert.Equal(MountState.Unreachable, harness.Snapshot("archive").State);
+        var probesBefore = harness.Probe.ShallowProbeCalls.Count;
 
-        await harness.RunAsync(() => harness.Supervisor.RequestMountAsync("archive"));
+        var ex = await Assert.ThrowsAsync<MountRequestRefusedException>(
+            () => harness.RunAsync(() => harness.Supervisor.RequestMountAsync("archive")));
 
-        // Still Unreachable -- no deep probe, no mount call, Invariant I1 upheld.
+        Assert.Equal("archive", ex.HostKey);
+
+        // Still Unreachable -- no deep probe, no mount call, Invariant I1 upheld -- but the
+        // immediate shallow probe rule 8 promises DID happen.
         Assert.Equal(MountState.Unreachable, harness.Snapshot("archive").State);
+        Assert.Equal(probesBefore + 1, harness.Probe.ShallowProbeCalls.Count);
         Assert.Empty(harness.Rclone.MountCalls);
         Assert.Empty(harness.Probe.DeepProbeCalls);
     }

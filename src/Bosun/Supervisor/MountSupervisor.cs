@@ -267,7 +267,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             .ToList();
 
     public Task RequestMountAsync(string hostKey, CancellationToken cancellationToken = default) =>
-        EnqueueAndWait(ct =>
+        EnqueueAndWait(async ct =>
         {
             var host = RequireHost(hostKey);
 
@@ -287,7 +287,49 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             // only the persistent-tier auto-mount in OnEnteredReadyAsync checks it).
             host.UserParked = false;
 
-            return TryBeginMountAsync(host, "user/persistent mount request", ct);
+            if (host.State == MountState.Unreachable)
+            {
+                // ADR-014 rule 8: a mount request against an Unreachable host is never a silent
+                // no-op -- without this, the on-demand tier-split above ("Unreachable is not
+                // polled at all") would strand an on-demand host in Unreachable forever, since rule
+                // 1 forbids Mounting from anywhere but Ready and nothing else would ever move it
+                // there again. The click IS the trigger a suppressed timer no longer supplies.
+                //
+                // Refuses first, rather than probing, if the system is currently suspended --
+                // Invariant I8 in reverse: bringing reachability information (or a mount) back up
+                // in the moments around a suspend is exactly the mount this invariant exists to
+                // prevent.
+                if (suspended)
+                {
+                    throw new MountRequestRefusedException(hostKey, "the system is suspended");
+                }
+
+                // Reuses RequestRetryNowAsync's own reset-and-probe path: a user asking to mount is
+                // at least as strong a signal as a user asking to retry, and the Backoff section
+                // already lists "explicit user retry now" as a reset trigger. This does not weaken
+                // Invariant I1 -- the click causes a *shallow* probe; Mounting is still reached only
+                // from Ready, after its own deep probe (TryBeginMountAsync, below).
+                host.Backoff = BackoffState.Initial;
+                await ForceImmediateIdleProbeAsync(host, "user mount request: immediate probe (ADR-014 rule 8)", ct)
+                    .ConfigureAwait(false);
+
+                if (host.State == MountState.Unreachable)
+                {
+                    // The probe rule 8 itself triggered came back negative. Surface why, causally,
+                    // exactly as MountingUnavailableException already does for the process-wide
+                    // gate -- a quiet return here would be the same silent-no-op problem rule 8
+                    // exists to close, just in a smaller costume.
+                    throw new MountRequestRefusedException(
+                        hostKey, "the host did not respond to an immediate reachability check");
+                }
+
+                // Any other outcome -- Ready (on-demand, or a parked/gate-blocked persistent host),
+                // or Mounted/Draining (a persistent host's own auto-mount already ran inside
+                // OnEnteredReadyAsync, above) -- falls through to the ordinary attempt below, which
+                // is a safe no-op for the states that already resolved themselves.
+            }
+
+            await TryBeginMountAsync(host, "user/persistent mount request", ct).ConfigureAwait(false);
         }, cancellationToken);
 
     public Task RequestUnmountAsync(string hostKey, CancellationToken cancellationToken = default) =>
@@ -347,15 +389,26 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
         foreach (var host in hosts.Values.Where(h => h.AdministrativelyEnabled).ToList())
         {
-            host.Backoff = BackoffState.Initial;
-
             switch (host.State)
             {
                 case MountState.Disabled:
+                    host.Backoff = BackoffState.Initial;
                     await EnableHostAsync(host, "resume: previously enabled", ct).ConfigureAwait(false);
                     break;
                 case MountState.Ready:
+                    host.Backoff = BackoffState.Initial;
+                    await ForceImmediateIdleProbeAsync(host, "resume: bypass backoff", ct).ConfigureAwait(false);
+                    break;
                 case MountState.Unreachable:
+                    // NO tier split here, deliberately. ADR-014 splits the RECURRING ladder only.
+                    // Its stated cost -- "makes the UI slow and the auth logs noisy" -- is an
+                    // argument about continuous traffic, every rung, forever; a resume is a rare,
+                    // bounded event producing one probe per host. Suppressing it would leave an
+                    // on-demand host displaying a stale Unreachable after the machine has moved
+                    // networks, which is exactly the sluggishness §4's Backoff section says the
+                    // reset exists to eliminate, and OPERATIONS.md T2 is the acceptance test for it.
+
+                    host.Backoff = BackoffState.Initial;
                     await ForceImmediateIdleProbeAsync(host, "resume: bypass backoff", ct).ConfigureAwait(false);
                     break;
                 default:
@@ -370,6 +423,10 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     {
         foreach (var host in hosts.Values.Where(h => h.State is MountState.Ready or MountState.Unreachable).ToList())
         {
+            // No tier split -- same reasoning as ResumeAsync above. ADR-014 splits the recurring
+            // ladder; a network change is one bounded probe per host, and it is the event T2 turns
+            // on. An on-demand row left showing a stale Unreachable after a dock is worse than
+            // ADR-008's "unknown until acted on", because it is confidently wrong rather than blank.
             host.Backoff = BackoffState.Initial;
             await ForceImmediateIdleProbeAsync(host, "network change: bypass backoff", ct).ConfigureAwait(false);
         }
@@ -658,6 +715,15 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         }
         else if (host.State == MountState.Unreachable)
         {
+            if (host.Config.Mount.Mode != MountMode.Persistent)
+            {
+                // ADR-014 decision 1/2: the backoff ladder runs for persistent hosts only. An
+                // on-demand host in Unreachable is not polled at all -- it stays dark until the
+                // user acts (RequestMountAsync, rule 8, or an explicit RequestRetryNowAsync). No
+                // timer armed.
+                return;
+            }
+
             delaySeconds = host.Backoff.NextDelaySeconds(global.BackoffSeconds);
         }
         else
