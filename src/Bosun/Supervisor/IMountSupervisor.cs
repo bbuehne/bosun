@@ -44,8 +44,19 @@ public interface IMountSupervisor
     /// never mutates state directly, it posts commands to the same channel").</summary>
     IReadOnlyList<HostMountSnapshot> GetSnapshot();
 
-    /// <summary>User- or persistent-tier-triggered mount request. No-op (logged) unless the host
-    /// is currently <see cref="MountState.Ready"/> -- Invariant I1, docs/ARCHITECTURE.md §4 rule 1.</summary>
+    /// <summary>
+    /// User- or persistent-tier-triggered mount request. No-op (logged) unless the host is
+    /// currently <see cref="MountState.Ready"/> or <see cref="MountState.Unreachable"/> -- Invariant
+    /// I1, docs/ARCHITECTURE.md §4 rule 1: nothing here bypasses "Mounting only from Ready".
+    /// </summary>
+    /// <remarks>
+    /// Against an <see cref="MountState.Unreachable"/> host, this is never a silent no-op
+    /// (docs/ARCHITECTURE.md §4 rule 8 / ADR-014): it resets the backoff ladder and probes
+    /// immediately, mounting only if that probe passes. Throws <see cref="MountRequestRefusedException"/>
+    /// if the probe it triggers fails, or if the system is currently suspended (refused outright,
+    /// without probing -- Invariant I8 in reverse). Throws <see cref="MountingUnavailableException"/>
+    /// if mounting is currently unavailable process-wide (bs-yvw.1), checked before any of the above.
+    /// </remarks>
     Task RequestMountAsync(string hostKey, CancellationToken cancellationToken = default);
 
     /// <summary>User-triggered unmount. No-op (logged) unless the host is currently
@@ -71,14 +82,18 @@ public interface IMountSupervisor
     Task SuspendAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Every previously-enabled host re-probes immediately, bypassing backoff
-    /// (docs/ARCHITECTURE.md §4 rule 5, Backoff section).</summary>
+    /// (docs/ARCHITECTURE.md §4 rule 5, Backoff section). Exception: an on-demand host sitting in
+    /// <see cref="MountState.Unreachable"/> is left dark, exactly as it is for the recurring ladder
+    /// (ADR-014) -- resume is a passive system event, not the user acting on this host.</summary>
     Task ResumeAsync(CancellationToken cancellationToken = default);
 
-    /// <summary>Backoff resets and an immediate re-probe for every idle (<see cref="MountState.Ready"/>/
-    /// <see cref="MountState.Unreachable"/>) host; an immediate forced probe for every
-    /// <see cref="MountState.Mounted"/> host too (E6 bullet: "force-probe mounted hosts"). Does
-    /// NOT touch <see cref="MountState.Disabled"/> hosts -- a network change should not reawaken a
-    /// host the user or config explicitly disabled.</summary>
+    /// <summary>Backoff resets and an immediate re-probe for every idle <see cref="MountState.Ready"/>
+    /// host, and for every idle <see cref="MountState.Unreachable"/> host whose mount mode is
+    /// <c>persistent</c>; an immediate forced probe for every <see cref="MountState.Mounted"/> host
+    /// too (E6 bullet: "force-probe mounted hosts"). Does NOT touch <see cref="MountState.Disabled"/>
+    /// hosts -- a network change should not reawaken a host the user or config explicitly disabled.
+    /// An on-demand host in <see cref="MountState.Unreachable"/> is left dark for the same reason as
+    /// <see cref="ResumeAsync"/> (ADR-014).</summary>
     Task NetworkChangedAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Call whenever <c>RcloneProcessService.StatusChanged</c> reports

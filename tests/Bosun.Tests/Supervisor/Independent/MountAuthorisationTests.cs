@@ -170,7 +170,13 @@ public sealed class MountAuthorisationTests
         await harness.StartAsync();
         Assert.Equal(MountState.Unreachable, harness.State("archive"));
 
-        await harness.RunAsync(() => harness.Supervisor.RequestMountAsync("archive"));
+        // ADR-014 rule 8 (ratified AFTER this test was written) changed the calling convention only:
+        // the request now issues an immediate SHALLOW probe and, when that fails, throws with a
+        // causal reason instead of returning quietly. The three assertions below -- the actual
+        // protective content of this test -- are unchanged and still hold, because a failed shallow
+        // probe leaves the host Unreachable and rule 1 still forbids Mounting from there.
+        await Assert.ThrowsAsync<MountRequestRefusedException>(
+            () => harness.RunAsync(() => harness.Supervisor.RequestMountAsync("archive")));
 
         Assert.Equal(MountState.Unreachable, harness.State("archive"));
         Assert.Equal(0, harness.Probe.DeepCount("archive"));
