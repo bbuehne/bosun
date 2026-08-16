@@ -3,8 +3,11 @@ name: build
 on:
   push:
     branches: [main]
+  # Deliberately unfiltered: work lands through stacked PRs whose base is the
+  # previous epic's branch, not main. Filtering on `branches: [main]` here meant
+  # every stacked PR reported no checks at all, so nothing was validated until
+  # the whole chain merged.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
