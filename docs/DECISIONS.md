@@ -291,9 +291,8 @@ hosts is an I2 violation, not a performance change.
 
 ## ADR-012 — The startup contract: ordered start, and a channel per failure
 
-**Status:** **PROPOSED** — awaiting the maintainer's decision. Nothing is
-implemented against it. Resolves `bs-bw4`, `bs-127`, `bs-o09`. Makes `bs-16b` a
-blocker rather than a nice-to-have.
+**Status:** Accepted (2026-08-16). Resolves `bs-bw4`, `bs-127`, `bs-o09`. Makes
+`bs-16b` a blocker rather than a nice-to-have.
 
 **Context.** Five epics landed with no agreed answer to a question none of them
 owned: *what happens, in what order, when Bosun starts?* Each deferred it
