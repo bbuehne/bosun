@@ -2,6 +2,9 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
+using Bosun.Configuration;
+using Bosun.Supervisor;
+using Bosun.UI.HostEditor;
 using Bosun.UI.Tray;
 using Microsoft.Extensions.Logging;
 using Bosun.Status;
@@ -39,6 +42,13 @@ public partial class MainWindow : Window, IAppWindow
     private IStatusReadModel? _statusReadModel;
     private HostActionDispatcher? _actionDispatcher;
 
+    // bs-ww9.8 / ADR-019: null until ConfigureHostEditor is called. HostEditorController owns all
+    // create/edit/delete logic (unit-tested separately, per CLAUDE.md); this window only opens
+    // HostEditorWindow/HostKeyPromptWindow and reacts to their results.
+    private HostEditorController? _hostEditorController;
+    private IHostConfigStore? _hostConfigStore;
+    private IIdentityFilePicker? _identityFilePicker;
+
     public ILogger<MainWindow>? Logger { get; set; }
 
     public MainWindow()
@@ -59,6 +69,86 @@ public partial class MainWindow : Window, IAppWindow
         _actionDispatcher = actionDispatcher;
         RefreshRows();
         _refreshTimer.Start();
+    }
+
+    /// <summary>Wires host create/edit/delete (bs-ww9.8, ADR-019). Separate from <see cref="Configure"/>
+    /// rather than folded into it, to keep that method's existing signature/callers stable.</summary>
+    public void ConfigureHostEditor(
+        HostEditorController hostEditorController, IHostConfigStore hostConfigStore, IIdentityFilePicker identityFilePicker)
+    {
+        _hostEditorController = hostEditorController;
+        _hostConfigStore = hostConfigStore;
+        _identityFilePicker = identityFilePicker;
+    }
+
+    private void OnAddHostClick(object sender, RoutedEventArgs e)
+    {
+        if (_hostEditorController is null || _identityFilePicker is null)
+        {
+            return;
+        }
+
+        var prompt = new HostKeyPromptWindow(_hostEditorController) { Owner = this };
+        if (prompt.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var form = _hostEditorController.CreateNewHostForm(prompt.HostKey);
+        new HostEditorWindow(_hostEditorController, _identityFilePicker, form) { Owner = this }.ShowDialog();
+    }
+
+    private void OpenEditHostDialog(string hostKey)
+    {
+        if (_hostEditorController is null || _identityFilePicker is null || _hostConfigStore is null)
+        {
+            return;
+        }
+
+        if (!_hostConfigStore.Current.Hosts.TryGetValue(hostKey, out var existing))
+        {
+            Logger?.LogWarning("Edit requested for {HostKey}, which is no longer in the current config", hostKey);
+            return;
+        }
+
+        var form = HostEditorController.CreateEditForm(existing);
+        new HostEditorWindow(_hostEditorController, _identityFilePicker, form) { Owner = this }.ShowDialog();
+    }
+
+    private async void ConfirmAndDeleteHost(string hostKey, string displayName, bool isMounted)
+    {
+        if (_hostEditorController is null)
+        {
+            return;
+        }
+
+        var mountWarning = isMounted
+            ? "\n\nThis host is currently mounted -- its drive will be unmounted first."
+            : string.Empty;
+
+        var confirmed = MessageBox.Show(
+            this,
+            $"Delete host '{displayName}'? This removes it from hosts.toml and cannot be undone.{mountWarning}",
+            "Delete host",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (confirmed != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        var result = await _hostEditorController.DeleteAsync(hostKey);
+        if (!result.Succeeded)
+        {
+            MessageBox.Show(
+                this,
+                result.Error ?? "Delete failed.",
+                "Delete failed",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
     }
 
     private void RefreshRows()
@@ -105,6 +195,23 @@ public partial class MainWindow : Window, IAppWindow
             var item = new MenuItem { Header = action.Label, IsEnabled = action.IsEnabled };
             item.Click += (_, _) => _actionDispatcher.Dispatch(action.Kind, row);
             menu.Items.Add(item);
+        }
+
+        // bs-ww9.8 / ADR-019: Edit/Delete are config operations, not supervisor commands, so they
+        // are dispatched straight to HostEditorController rather than through
+        // HostContextMenuBuilder/HostActionDispatcher (which exist specifically for the
+        // IMountSupervisor-facing actions shared with the tray menu -- Invariant I4's boundary).
+        if (_hostEditorController is not null)
+        {
+            menu.Items.Add(new Separator());
+
+            var editItem = new MenuItem { Header = "Edit Host..." };
+            editItem.Click += (_, _) => OpenEditHostDialog(row.HostKey);
+            menu.Items.Add(editItem);
+
+            var deleteItem = new MenuItem { Header = "Delete Host..." };
+            deleteItem.Click += (_, _) => ConfirmAndDeleteHost(row.HostKey, row.DisplayName, row.State is MountState.Mounted or MountState.Mounting);
+            menu.Items.Add(deleteItem);
         }
 
         HostsGrid.ContextMenu = menu;

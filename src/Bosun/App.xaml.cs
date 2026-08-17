@@ -7,6 +7,7 @@ using Bosun.Status;
 using Bosun.Supervisor;
 using Bosun.UI;
 using Bosun.UI.Autostart;
+using Bosun.UI.HostEditor;
 using Bosun.UI.Tray;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -170,6 +171,14 @@ public partial class App : Application
 
         _mainWindow = new MainWindow { Logger = services.GetRequiredService<ILogger<MainWindow>>() };
         _mainWindow.Configure(statusReadModel, actionDispatcher);
+
+        // bs-ww9.8 / ADR-019: host create/edit/delete. IHostConfigWriter is registered by the
+        // config-writer delivery (bs-ww9.8's other half); resolved here, not constructed, so this
+        // class never owns (or reinvents) that seam.
+        var hostConfigWriter = services.GetRequiredService<IHostConfigWriter>();
+        var hostEditorController = new HostEditorController(
+            hostConfigWriter, configStore, services.GetRequiredService<ILogger<HostEditorController>>());
+        _mainWindow.ConfigureHostEditor(hostEditorController, configStore, new Win32IdentityFilePicker());
 
         // ADR-018 rule 3: closing the window hides it to tray, never exits. The only way to exit
         // is the tray's "Exit" item (TrayIconController) or a future explicit Exit command, both

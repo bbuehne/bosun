@@ -20,7 +20,16 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <TextBlock x:Name="HealthTextBlock" Grid.Row="0" FontWeight="Bold" Margin="0,0,0,8" />
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="HealthTextBlock" Grid.Column="0" FontWeight="Bold" VerticalAlignment="Center" />
+            <!-- bs-ww9.8 / ADR-019: the window can create hosts too, not just edit/delete them
+                 from the per-row context menu below. -->
+            <Button x:Name="AddHostButton" Grid.Column="1" Content="Add Host..." Click="OnAddHostClick" />
+        </Grid>
 
         <DataGrid x:Name="HostsGrid"
                   Grid.Row="1"

@@ -1,0 +1,128 @@
+<Window x:Class="Bosun.UI.HostEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Host" Width="480" MinWidth="420" SizeToContent="Height" MinHeight="200"
+        MaxHeight="820"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResizeWithGrip"
+        Icon="pack://application:,,,/Assets/bosun.ico">
+    <Window.Resources>
+        <Style x:Key="FieldErrorStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#C0392B" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Margin" Value="0,2,0,0" />
+            <Setter Property="Visibility" Value="Collapsed" />
+        </Style>
+    </Window.Resources>
+    <!--
+        bs-ww9.8 / ADR-019: add/edit one host. Chrome only: every field's parsing, defaulting,
+        the I6/I7 floors, and the dependent-field enable rules live in HostEditorController, which
+        is unit-tested without this window (CLAUDE.md: no default-suite test constructs a WPF
+        Window). This file wires named controls to that controller and does no logic of its own
+        beyond enabling/disabling controls, which is why it is left untested per the XAML/layout
+        carve-out.
+    -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4">
+        <StackPanel Margin="16">
+
+            <TextBlock x:Name="ErrorSummaryTextBlock"
+                       Foreground="#C0392B" TextWrapping="Wrap" Margin="0,0,0,12"
+                       Visibility="Collapsed" />
+
+            <TextBlock Text="Identity" FontWeight="Bold" Margin="0,0,0,4" />
+
+            <TextBlock Text="Key (must match a Host alias in ~/.ssh/config -- ADR-013; this is what 'ssh &lt;key&gt;' will run)"
+                       TextWrapping="Wrap" Foreground="Gray" Margin="0,0,0,2" FontSize="11" />
+            <TextBox x:Name="KeyTextBox" Margin="0,0,0,2" />
+            <TextBlock x:Name="KeyError" Style="{StaticResource FieldErrorStyle}" />
+
+            <TextBlock Text="Display name" Margin="0,8,0,2" />
+            <TextBox x:Name="DisplayNameTextBox" />
+            <TextBlock x:Name="DisplayNameError" Style="{StaticResource FieldErrorStyle}" />
+
+            <TextBlock Text="Hostname" Margin="0,8,0,2" />
+            <TextBox x:Name="HostnameTextBox" />
+            <TextBlock x:Name="HostnameError" Style="{StaticResource FieldErrorStyle}" />
+
+            <TextBlock Text="Port" Margin="0,8,0,2" />
+            <TextBox x:Name="PortTextBox" />
+            <TextBlock x:Name="PortError" Style="{StaticResource FieldErrorStyle}" />
+
+            <TextBlock Text="User" Margin="0,8,0,2" />
+            <TextBox x:Name="UserTextBox" />
+            <TextBlock x:Name="UserError" Style="{StaticResource FieldErrorStyle}" />
+
+            <TextBlock Text="Identity file (must exist on disk -- Invariant I10)" Margin="0,8,0,2" />
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="IdentityFileTextBox" Grid.Column="0" />
+                <Button x:Name="BrowseIdentityFileButton" Grid.Column="1" Content="Browse..." Margin="6,0,0,0" Click="OnBrowseIdentityFileClick" />
+            </Grid>
+            <TextBlock x:Name="IdentityFileError" Style="{StaticResource FieldErrorStyle}" />
+
+            <Separator Margin="0,16,0,8" />
+            <TextBlock Text="Mount" FontWeight="Bold" Margin="0,0,0,4" />
+
+            <TextBlock Text="Mode" Margin="0,4,0,2" />
+            <ComboBox x:Name="ModeComboBox" SelectionChanged="OnModeSelectionChanged" />
+
+            <StackPanel x:Name="MountDetailPanel">
+                <TextBlock Text="Drive (D:-Z:; A-C are reserved)" Margin="0,8,0,2" />
+                <TextBox x:Name="DriveTextBox" />
+                <TextBlock x:Name="DriveError" Style="{StaticResource FieldErrorStyle}" />
+
+                <TextBlock Text="Remote path" Margin="0,8,0,2" />
+                <TextBox x:Name="RemotePathTextBox" />
+                <TextBlock x:Name="RemotePathError" Style="{StaticResource FieldErrorStyle}" />
+
+                <TextBlock Text="VFS cache mode (never weaker than 'writes' -- Invariant I6)" Margin="0,8,0,2" />
+                <ComboBox x:Name="VfsCacheModeComboBox" />
+                <TextBlock x:Name="VfsCacheModeError" Style="{StaticResource FieldErrorStyle}" />
+
+                <TextBlock Text="Network mode: always on (Invariant I7 -- not offerable as off)"
+                           Margin="0,8,0,2" Foreground="Gray" FontSize="11" />
+
+                <TextBlock Text="Idle unmount seconds (0 = never)" Margin="0,8,0,2" />
+                <TextBox x:Name="IdleUnmountSecondsTextBox" />
+                <TextBlock x:Name="IdleUnmountSecondsError" Style="{StaticResource FieldErrorStyle}" />
+            </StackPanel>
+
+            <Separator Margin="0,16,0,8" />
+            <TextBlock Text="Session" FontWeight="Bold" Margin="0,0,0,4" />
+
+            <CheckBox x:Name="AutostartCheckBox" Content="Autostart a terminal session at login" Margin="0,4,0,0" />
+            <CheckBox x:Name="ReconnectCheckBox" Content="Reconnect on a dropped SSH connection" Margin="0,4,0,0" />
+            <CheckBox x:Name="TmuxCheckBox" Content="Attach to tmux" Margin="0,4,0,0" Checked="OnTmuxCheckedChanged" Unchecked="OnTmuxCheckedChanged" />
+
+            <StackPanel x:Name="TmuxSessionPanel">
+                <TextBlock Text="Tmux session name" Margin="0,8,0,2" />
+                <TextBox x:Name="TmuxSessionTextBox" />
+                <TextBlock x:Name="TmuxSessionError" Style="{StaticResource FieldErrorStyle}" />
+            </StackPanel>
+
+            <TextBlock Text="Tab colour (#RRGGBB)" Margin="0,8,0,2" />
+            <TextBox x:Name="TabColorTextBox" />
+
+            <TextBlock Text="Colour scheme" Margin="0,8,0,2" />
+            <TextBox x:Name="ColorSchemeTextBox" />
+
+            <Separator Margin="0,16,0,8" />
+            <TextBlock Text="Probe" FontWeight="Bold" Margin="0,0,0,4" />
+
+            <TextBlock Text="Interval seconds while idle (0 = never poll while idle)" Margin="0,4,0,2" />
+            <TextBox x:Name="ProbeIntervalSecondsTextBox" />
+            <TextBlock x:Name="ProbeIntervalSecondsError" Style="{StaticResource FieldErrorStyle}" />
+
+            <CheckBox x:Name="DeepProbeCheckBox" Content="Deep probe (verifies the SSH channel itself, not just TCP -- ADR-016)" Margin="0,8,0,0" />
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+                <Button x:Name="CancelButton" Content="Cancel" Width="90" Margin="0,0,8,0" Click="OnCancelClick" IsCancel="True" />
+                <Button x:Name="SaveButton" Content="Save" Width="90" Click="OnSaveClick" IsDefault="True" />
+            </StackPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</Window>
