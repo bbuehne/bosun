@@ -25,9 +25,9 @@ Python. That framing changed once the persistent-mount supervisor entered scope.
    `PowerModeChanged`, `NetworkAddressChanged`, and `SessionSwitch`. In .NET
    these are in-box, a handful of lines each. In Python, receiving
    `WM_POWERBROADCAST` requires a hidden Win32 window and a message pump via
-   ctypes — fragile exactly where fragility is least affordable. For a laptop
-   tool used many hours a day, closing the lid at one location and opening it at
-   another is the central use case, not an edge case.
+   ctypes — fragile exactly where fragility is least affordable. The events a
+   mount must survive are power transitions and network changes, and a mount that
+   is up when one arrives is the case that wedges Explorer.
 2. *Hosting model.* The supervisor is a long-running service with cancellation,
    structured logging, config binding, and DI. `BackgroundService` provides this
    as a base class; in Python it is hand-rolled.
@@ -43,6 +43,29 @@ becomes one contained class in C#.
 **Rejected alternatives.** Python (above). Rust — `windows-rs` is excellent but
 there is no payoff: not compute-bound, weaker native UI story, and the maintainer
 loses the ability to read the code, which is a stated requirement.
+
+**Amendment (`bs-7mb`): the hardware this actually runs on.** Reason 1 above
+originally read *"For a laptop tool used many hours a day, closing the lid at one
+location and opening it at another is the central use case, not an edge case."*
+That premise is false for the only deployment. Bosun runs on a Windows **desktop**;
+the maintainer's laptop is a Mac and cannot run it at all. The dock/undock scenario
+named as central does not occur.
+
+The decision stands. Reasons 2–4 are untouched, and reason 1 survives on its own
+terms — the events still matter, they are simply *different* events. A desktop
+sleeps overnight, and a network still drops. Those two are the real failure modes,
+and both are harder than docking, because in both the host is typically still
+reachable afterwards: the shallow TCP probe passes while the SSH channel under the
+mount is dead. That is `bs-2eg` / ADR-016, and ADR-017 extends it to the transition
+itself.
+
+What the false premise actually cost was emphasis, not the choice: it is why
+`docs/OPERATIONS.md` T2 was written as an unrunnable "move to a different network"
+test (`bs-aya` rewrites T1–T3), and why the README described someone else's machine.
+Recorded because it was repeated across four documents and restated many times
+before anyone checked it against the machine the code was being built on — the
+class of error worth a note is an unverified premise that propagates, not the
+premise itself.
 
 ---
 
@@ -618,7 +641,7 @@ on *probe failure* and says nothing about undoing a deliberate instruction.
 *And it is what the click means.* Clicking "unmount" and watching the drive
 reappear a minute later reads as the tool ignoring you. There are ordinary
 reasons to want a letter released: copying a large file locally, a flaky link,
-handing the laptop over, or running a backup that should not traverse a network
+maintenance on the far end, or running a backup that should not traverse a network
 mount. Without this there is no in-app way to achieve any of them short of
 editing `hosts.toml`.
 
