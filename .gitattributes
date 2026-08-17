@@ -1,0 +1,3 @@
+# Installed by `graphify hook install` (CLAUDE.md section 3). Inert while
+# graphify-out/ is gitignored; kept so the driver is registered if that changes.
+graphify-out/graph.json merge=graphify

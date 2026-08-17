@@ -21,9 +21,10 @@ supervised SFTP drive mounts.
 - **Session monitoring** — which hosts have live `ssh.exe` sessions, and their
   connection state.
 - **Sleep and network awareness** — mounts are dropped before the machine
-  suspends and re-established after it resumes on whatever network it wakes up
-  on. Closing the lid at the office and opening it at home should leave nothing
-  wedged.
+  suspends and re-established after it resumes, on whatever network it wakes up
+  on. Sleeping overnight, or losing the network for a while, should leave nothing
+  wedged: after any such transition Bosun re-derives what is actually mounted
+  rather than trusting what it believed beforehand.
 
 Drive letters mean drag-and-drop with real Explorer windows, in both directions.
 
