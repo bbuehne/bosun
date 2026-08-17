@@ -99,10 +99,14 @@ Owns the state machine in §4. The only component permitted to call
 `mount/mount` and `mount/unmount`.
 
 ### `IFragmentWriter`
-Serialises the host list to Windows Terminal's fragment schema under
-`...\Windows Terminal\Fragments\Bosun\bosun.json`. **Verify the exact path
-against current Terminal documentation before implementing** — it differs
-between Store and unpackaged installs.
+Serialises the host list to Windows Terminal's fragment schema at
+`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Bosun\bosun.json`.
+
+The path was verified against Microsoft Learn and is recorded in full — with the
+all-users alternative, the UUIDv5 profile-GUID derivation, and Terminal's silent
+fragment-failure behaviour — in ADR-006's amendment. Note the `Microsoft\`
+segment. The Store-vs-unpackaged distinction an earlier version of this section
+warned about does not apply to Bosun; ADR-006 explains why.
 
 Each host becomes a profile whose `commandline` is either:
 

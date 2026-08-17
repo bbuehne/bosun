@@ -49,7 +49,7 @@ produces a tool that hangs the user's File Explorer.
 | I2 | **Unmount on failure; do not retry through failure.** After N consecutive probe failures (default 3), unmount immediately and mark the host unreachable. Remount only after a fresh successful probe. |
 | I3 | **The supervisor runs in the user's interactive session.** Never a Windows Service running as `SYSTEM` — drive letters are per-logon-session and a `SYSTEM` mount is invisible to the user's Explorer. |
 | I4 | **All mount operations go through `rclone rc` HTTP calls**, never by spawning and tracking `rclone mount` processes. One code path serves both persistent and on-demand tiers. |
-| I5 | **Windows Terminal profiles are written as a fragment**, under `...\Windows Terminal\Fragments\Bosun\`. Never read, write, or merge the user's `settings.json` — Terminal rewrites it from its own UI and you will clobber each other. |
+| I5 | **Windows Terminal profiles are written as a fragment**, at `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Bosun\bosun.json` (note the `Microsoft\` segment — see ADR-006's amendment). Never read, write, or merge the user's `settings.json` — Terminal rewrites it from its own UI and you will clobber each other. |
 | I6 | **`--vfs-cache-mode writes` is the minimum** for every mount. Without it, applications that open files for random read-write (editors, Office) fail outright. |
 | I7 | **`--network-mode` on every mount.** Windows optimises fixed and network drives differently; presenting an SFTP mount as a fixed disk produces pathological Explorer behaviour. |
 | I8 | **On power suspend, unmount everything** before the machine sleeps. On resume, re-probe immediately rather than waiting out the backoff timer. |
