@@ -43,7 +43,25 @@ public sealed class BitviseProfileParser : IBitviseProfileParser
     /// nothing Bosun cares about in a Bitvise profile is anywhere near this long.</summary>
     private const int MaxPlausibleStringLength = 4096;
 
-    private const string LoopbackAddress = "127.0.0.1";
+    /// <summary>
+    /// Addresses that appear in a profile as port-forwarding endpoints rather than as the host
+    /// being connected to, and must never be imported as a hostname.
+    /// </summary>
+    /// <remarks>
+    /// <c>127.0.0.1</c> was the only entry until the parser was run against 22 real profiles:
+    /// two of them (a listening forward with no loopback rule) yielded <c>0.0.0.0</c> as the
+    /// hostname and <c>::</c> as the username — both are bind addresses for a forwarding rule.
+    /// Hand-built test fixtures could not have surfaced that, because the fixtures only contained
+    /// the shapes already known about. <c>0.0.0.0</c> is the IPv4 any-address; <c>::</c> and
+    /// <c>::1</c> are its IPv6 equivalents and appear in the same records.
+    /// </remarks>
+    private static readonly HashSet<string> NonHostAddresses = new(StringComparer.Ordinal)
+    {
+        "127.0.0.1",
+        "0.0.0.0",
+        "::",
+        "::1",
+    };
 
     /// <summary>Dotted hostname (each label alphanumeric/hyphen, TLD-like final label) or IPv4
     /// literal. Deliberately does not validate octet ranges for the IPv4 branch -- this is a
@@ -55,6 +73,10 @@ public sealed class BitviseProfileParser : IBitviseProfileParser
 
     /// <summary>Matches the header's self-reported version, e.g. "Tunnelier 9.51". Informational
     /// only.</summary>
+    /// <summary>An IPv4 literal, used only to disqualify a username that is really an address.</summary>
+    private static readonly Regex IpAddressPattern = new(
+        @"^(?:\d{1,3}\.){3}\d{1,3}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private static readonly Regex VersionPattern = new(
         @"^\S+ \d+\.\d+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -94,19 +116,47 @@ public sealed class BitviseProfileParser : IBitviseProfileParser
             }
 
             var usernameEntry = i + 1 < strings.Count ? strings[i + 1] : null;
+
+            // The string after the hostname is USUALLY the username, but not always -- on real
+            // profiles whose only forwarding entries are any-address bindings it was the peer
+            // address instead. An obviously-wrong username pre-filled into the form looks
+            // deliberate and gets saved; leaving it blank makes the user supply it.
+            if (usernameEntry is not null && !LooksLikeUsername(usernameEntry.Value))
+            {
+                usernameEntry = null;
+            }
+
             var port = DetectPort(data, usernameEntry) ?? 22;
 
             return BitviseImportResult.Ok(candidate.Value, usernameEntry?.Value, port, detectedVersion);
         }
 
         return BitviseImportResult.Failed(
-            "Found data in this file, but no usable hostname -- only loopback port-forwarding "
-            + "entries, or a layout this heuristic does not recognize.");
+            "Found data in this file, but no usable hostname -- only port-forwarding endpoints, "
+            + "or a layout this heuristic does not recognize.");
     }
 
     private static bool LooksLikeHostname(string candidate) =>
-        !string.Equals(candidate, LoopbackAddress, StringComparison.Ordinal)
+        !NonHostAddresses.Contains(candidate)
         && HostnamePattern.IsMatch(candidate);
+
+    /// <summary>
+    /// Rejects a username that is plainly an address rather than an account. When a profile's
+    /// only forwarding entries are any-address bindings, the string following the chosen hostname
+    /// can be the peer address rather than a user — observed as <c>::</c> on real profiles. Better
+    /// to import no username, and leave the field for the user to fill, than to pre-fill a wrong
+    /// one that looks deliberate.
+    /// </summary>
+    /// <remarks>
+    /// Rejects ADDRESSES, deliberately not everything matching <see cref="HostnamePattern"/>:
+    /// that pattern also matches ordinary <c>first.last</c> usernames, and using it here silently
+    /// dropped a real username ("barry.buehne") from one of the maintainer's own profiles.
+    /// </remarks>
+    private static bool LooksLikeUsername(string candidate) =>
+        !NonHostAddresses.Contains(candidate)
+        && !IpAddressPattern.IsMatch(candidate)
+        && candidate.Length > 0
+        && candidate.All(c => char.IsLetterOrDigit(c) || c is '_' or '-' or '.' or '@' or '\\');
 
     /// <summary>Reads the raw int32 immediately after <paramref name="username"/>'s bytes, if
     /// there is room for one and it falls in the valid TCP port range. Returns

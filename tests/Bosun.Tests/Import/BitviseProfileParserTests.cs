@@ -45,6 +45,75 @@ public sealed class BitviseProfileParserTests
         return stream.ToArray();
     }
 
+    /// <summary>
+    /// Found by running this parser against 22 real profiles, which hand-built fixtures could not
+    /// have surfaced: two of them yielded <c>0.0.0.0</c> as the hostname and <c>::</c> as the
+    /// username. Both are bind addresses for a port-forwarding rule, not the host being connected
+    /// to. Only <c>127.0.0.1</c> was skipped before.
+    /// </summary>
+    [Theory]
+    [InlineData("0.0.0.0")]
+    [InlineData("::")]
+    [InlineData("::1")]
+    [InlineData("127.0.0.1")]
+    public void Parse_SkipsPortForwardingBindAddresses_NotJustLoopback(string bindAddress)
+    {
+        var data = BuildProfile(
+            "Tunnelier 9.51",
+            bindAddress,
+            "realhost.example.com",
+            "someuser");
+
+        var result = _parser.Parse(data);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("realhost.example.com", result.Hostname);
+    }
+
+    /// <summary>
+    /// The string after the hostname is usually the username, but on a profile whose forwarding
+    /// entries are any-address bindings it was the peer address instead. Importing an obviously
+    /// wrong username is worse than importing none: pre-filled, it looks deliberate and gets
+    /// saved, whereas a blank field makes the user supply it.
+    /// </summary>
+    [Fact]
+    public void Parse_LeavesTheUsernameBlank_RatherThanImportingAnAddressAsOne()
+    {
+        var data = BuildProfile(
+            "Tunnelier 9.51",
+            "realhost.example.com",
+            "::");
+
+        var result = _parser.Parse(data);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("realhost.example.com", result.Hostname);
+        Assert.Null(result.Username);
+    }
+
+    /// <summary>
+    /// A first.last username must survive. Rejecting anything that matched the HOSTNAME pattern
+    /// looked like a reasonable way to keep addresses out of the username field, and it silently
+    /// dropped "barry.buehne" from one of the maintainer's own profiles -- caught only by running
+    /// the parser over real files. Only addresses disqualify a username.
+    /// </summary>
+    [Theory]
+    [InlineData("barry.buehne")]
+    [InlineData("barry_buehne")]
+    [InlineData("first.last.name")]
+    public void Parse_KeepsADottedUsername_WhichIsNotAnAddress(string username)
+    {
+        var data = BuildProfile(
+            "Tunnelier 9.51",
+            "realhost.example.com",
+            username);
+
+        var result = _parser.Parse(data);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(username, result.Username);
+    }
+
     [Fact]
     public void Parse_ExtractsHostnameAndUsername_SkippingTheLoopbackPortForwardingEntry()
     {
