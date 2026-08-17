@@ -7,6 +7,7 @@ using Bosun.Rclone.Process;
 using Bosun.SessionMonitor;
 using Bosun.SessionMonitor.Interop;
 using Bosun.Supervisor;
+using Bosun.SystemEventIntegration;
 using Bosun.Terminal;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -195,6 +196,15 @@ public static class BosunHostFactory
             TimeProvider.System,
             sp.GetRequiredService<ILogger<MountSupervisor>>()));
         builder.Services.AddSingleton<IMountSupervisor>(sp => sp.GetRequiredService<MountSupervisor>());
+
+        // E6 (bs-0wz/bs-ohk): constructing a Win32SystemEventSource does no I/O and subscribes to
+        // nothing -- Start() is the only method that touches the real static
+        // SystemEvents/NetworkChange classes, and only StartupOrchestrator calls it, after the
+        // mount supervisor is already running (ADR-012, this class's registration order note
+        // above). Safe to build a host from a worktree unconditionally, matching every other
+        // registration in this factory.
+        builder.Services.AddSingleton<ISystemEventSource>(sp => new Win32SystemEventSource(
+            TimeProvider.System, sp.GetRequiredService<ILogger<Win32SystemEventSource>>()));
 
         // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
         // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without
