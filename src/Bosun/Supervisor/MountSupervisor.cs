@@ -1457,7 +1457,9 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 host.LastTransitionTrigger = "startup: adopted existing mount";
                 // Bypasses SetState (see remarks above) but is a real, logged transition -- T6's
                 // crash-recovery scenario (docs/OPERATIONS.md) is exactly what the transition
-                // history needs to show, so record it here the same way SetState would.
+                // history needs to show, so record it here the same way SetState would. Pinned by
+                // TransitionHistoryTests.Startup_adoption_of_an_existing_mount_is_recorded_in_the_transition_history
+                // -- deleting this call fails that test, not just a comment's say-so.
                 RecordTransition(host.Key, MountState.Disabled, MountState.Mounted, "startup: adopted existing mount", adoptTimestamp);
                 host.ConsecutiveMountedFailures = 0;
                 host.ConsecutiveDeepProbeFailures = 0;

@@ -131,4 +131,33 @@ public sealed class TransitionHistoryTests
         // first one, identified by reference, that must be gone.)
         Assert.DoesNotContain(history, e => e == firstEverEntry);
     }
+
+    /// <summary>
+    /// docs/ARCHITECTURE.md §6 crash recovery / docs/OPERATIONS.md's T6 manual test: a mount found
+    /// already up at startup is adopted via the one documented <c>SetState</c> bypass in
+    /// <c>MountSupervisor.AdoptOrClearExistingMountsAsync</c>, not through <c>SetState</c> itself
+    /// -- see <c>RecordTransition</c>'s remarks for why that bypass still records into the
+    /// transition history. This is the test that pins that call: it is the only thing standing
+    /// between "user restarts Bosun after a crash, opens the window to see what came back up" and
+    /// a blank history for precisely that moment. Setup mirrors
+    /// <c>ReconciliationAndCrashRecoveryTests.Startup_adopts_a_mount_matching_a_configured_host_without_probing_it_first</c>.
+    /// </summary>
+    [Fact]
+    public async Task Startup_adoption_of_an_existing_mount_is_recorded_in_the_transition_history()
+    {
+        var host = HostFixtures.Persistent("prod", drive: "P:");
+        var harness = new SupervisorHarness(HostFixtures.Build(HostFixtures.Global(), host));
+        harness.Rclone.SeedExistingMount("P:", "bosun-prod:/srv/share");
+
+        await harness.StartAsync();
+
+        Assert.Equal(MountState.Mounted, harness.Snapshot("prod").State);
+
+        var history = harness.Supervisor.GetTransitionHistory();
+        Assert.Contains(history, e =>
+            e.HostKey == "prod" &&
+            e.From == MountState.Disabled &&
+            e.To == MountState.Mounted &&
+            e.Trigger == "startup: adopted existing mount");
+    }
 }
