@@ -19,10 +19,12 @@ internal sealed class FakeRcloneMountClient : IRcloneClient
     private readonly Dictionary<string, int> unmountCallCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> confirmUnmountAfterCall = new(StringComparer.OrdinalIgnoreCase);
     private Exception? listMountsThrowsOnce;
+    private Exception? getVersionThrowsOnce;
 
     public List<RcloneMountRequest> MountCalls { get; } = [];
     public List<string> UnmountCalls { get; } = [];
     public int ListMountsCallCount { get; private set; }
+    public int GetVersionCallCount { get; private set; }
 
     /// <summary>Seeds the fake as if a mount already existed before the test started -- for
     /// startup adopt-or-clear and reconciliation-drift tests.</summary>
@@ -45,11 +47,29 @@ internal sealed class FakeRcloneMountClient : IRcloneClient
 
     public void MakeListMountsThrowOnce(Exception exception) => listMountsThrowsOnce = exception;
 
+    /// <summary>The next <see cref="GetVersionAsync"/> call throws <paramref name="exception"/> --
+    /// an <c>rclone rcd</c> that has not answered <c>core/version</c> yet (bs-brv/ADR-017's rcd-health
+    /// gate on re-derivation after a resume or network change). One-shot, same shape as
+    /// <see cref="MakeListMountsThrowOnce"/>: call again before a subsequent call if the test needs
+    /// rcd to stay down across more than one gate check.</summary>
+    public void MakeGetVersionThrowOnce(Exception exception) => getVersionThrowsOnce = exception;
+
     public int UnmountCallCountFor(string mountPoint) =>
         unmountCallCounts.TryGetValue(mountPoint, out var count) ? count : 0;
 
-    public Task<RcloneVersionInfo> GetVersionAsync(CancellationToken cancellationToken) =>
-        Task.FromResult(new RcloneVersionInfo { Version = "v1.71.2" });
+    public Task<RcloneVersionInfo> GetVersionAsync(CancellationToken cancellationToken)
+    {
+        GetVersionCallCount++;
+
+        if (getVersionThrowsOnce is not null)
+        {
+            var exception = getVersionThrowsOnce;
+            getVersionThrowsOnce = null;
+            return Task.FromException<RcloneVersionInfo>(exception);
+        }
+
+        return Task.FromResult(new RcloneVersionInfo { Version = "v1.71.2" });
+    }
 
     public Task CreateConfigAsync(
         string remoteName, string type, IReadOnlyDictionary<string, string> parameters, CancellationToken cancellationToken) =>

@@ -139,13 +139,29 @@ Wraps three .NET event sources:
 | Event | Reaction |
 |---|---|
 | `PowerModeChanged` → `Suspend` | Unmount all, enter `Suspended` |
-| `PowerModeChanged` → `Resume` | Re-probe all immediately, bypassing backoff |
-| `NetworkAddressChanged` | Re-probe all immediately; force-probe mounted hosts |
+| `PowerModeChanged` → `Resume` | **Re-derive** (below) |
+| `NetworkAddressChanged` | **Re-derive** (below) |
 | `SessionSwitch` → `SessionLock` | No action (v1); reserved |
+
+**Re-derive**, per ADR-017: after any power or network transition the supervisor
+does not trust its own mounted state. It reconciles against `mount/listmounts`
+first, then force-probes every host still `Mounted` with **both** the shallow and
+the deep probe, then re-probes everything else immediately, bypassing backoff.
+
+Resume and network change take the *same* path. An earlier version of this table
+gave resume the weaker treatment; that asymmetry was backwards — a network change
+means the path to the host may have altered, a resume means everything may have,
+including `rclone rcd` and WinFsp themselves — and it is what let `bs-brv` look
+correct in review.
+
+Re-derivation is gated on `rclone rcd` answering `core/version`. If it does not,
+nothing is reconciled or drained; the supervisor waits for the ordinary cadence
+rather than acting on state it cannot verify.
 
 The suspend handler must complete quickly. Windows does not wait indefinitely.
 Issue unmounts with a short timeout and accept that a forced unmount may be
-needed on resume.
+needed on resume — that is what re-derivation is for, and it is now implemented
+rather than aspirational.
 
 ## 4. The mount state machine
 
@@ -242,7 +258,14 @@ right before building any UI.
    timeout, escalate to a forced unmount, then verify against `mount/listmounts`.
    Never leave the state machine believing a drive is gone when it is not.
 5. On suspend, every host in `Mounted` or `Mounting` goes to `Draining`, then
-   `Disabled`. On resume, everything previously enabled goes to `Probing`.
+   `Disabled`.
+
+   On resume, the supervisor **does not assume suspend succeeded** — it is
+   best-effort by design, bounded by a budget that can elapse. It reconciles
+   against `mount/listmounts` first; any host still `Mounted` is force-probed
+   shallow *and* deep, and drains on a single deep failure once `rclone rcd` has
+   answered `core/version`. Everything else previously enabled goes to `Probing`.
+   A network address change takes the identical path. See ADR-017.
 6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount.
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
    `Mounted → Draining` after that period without filesystem activity.

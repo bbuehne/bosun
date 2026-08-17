@@ -118,9 +118,27 @@ public sealed class SystemEventSupervisorAdapter : IDisposable
 
         if (ReferenceEquals(winner, supervisorTask))
         {
-            await supervisorTask.ConfigureAwait(false); // observe/rethrow any fault
-            logger.LogInformation(
-                "Trigger: system suspend event -- drain confirmed within the {BudgetSeconds}s budget", budgetSeconds);
+            // Observe the outcome WITHOUT letting a fault propagate: this method is called
+            // synchronously from OnSuspend, which runs on Microsoft.Win32.SystemEvents' dedicated
+            // notification thread in production. There is no catch above that call -- an unhandled
+            // exception there terminates the process (bs-3al), and a dead process never runs
+            // resume-side reconciliation, which is the exact wedged-drive outcome I8 exists to
+            // prevent. The sibling handlers (OnResume, OnNetworkAddressChanged) already log faults
+            // instead of throwing via FireAndForget; this brings suspend in line with them rather
+            // than being the one path that still propagates.
+            if (supervisorTask.IsFaulted)
+            {
+                logger.LogError(
+                    supervisorTask.Exception,
+                    "Trigger: system suspend event -- the drain faulted within the {BudgetSeconds}s budget",
+                    budgetSeconds);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "Trigger: system suspend event -- drain confirmed within the {BudgetSeconds}s budget", budgetSeconds);
+            }
+
             return true;
         }
 
