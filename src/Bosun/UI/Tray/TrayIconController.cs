@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using Bosun.Supervisor;
+using Bosun.UI.Autostart;
 using H.NotifyIcon;
 using H.NotifyIcon.Core;
 using Microsoft.Extensions.Logging;
@@ -44,6 +45,7 @@ public sealed class TrayIconController : IDisposable
     private readonly IMountSupervisor _supervisor;
     private readonly HostActionDispatcher _actionDispatcher;
     private readonly MainWindowController _windowController;
+    private readonly IAutostartRegistration _autostart;
     private readonly ILogger<TrayIconController>? _logger;
     private readonly DispatcherTimer _refreshTimer;
 
@@ -57,17 +59,20 @@ public sealed class TrayIconController : IDisposable
         IMountSupervisor supervisor,
         HostActionDispatcher actionDispatcher,
         MainWindowController windowController,
+        IAutostartRegistration autostart,
         ILogger<TrayIconController>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(statusReadModel);
         ArgumentNullException.ThrowIfNull(supervisor);
         ArgumentNullException.ThrowIfNull(actionDispatcher);
         ArgumentNullException.ThrowIfNull(windowController);
+        ArgumentNullException.ThrowIfNull(autostart);
 
         _statusReadModel = statusReadModel;
         _supervisor = supervisor;
         _actionDispatcher = actionDispatcher;
         _windowController = windowController;
+        _autostart = autostart;
         _logger = logger;
 
         _taskbarIcon = new TaskbarIcon();
@@ -147,11 +152,60 @@ public sealed class TrayIconController : IDisposable
         }
 
         menu.Items.Add(new Separator());
+
+        // bs-ojc.1: checked state is re-read from IAutostartRegistration every rebuild (this
+        // whole method already re-runs on RefreshInterval), never cached across ticks -- a toggle
+        // that remembered its own belief instead of reality is precisely the bug the acceptance
+        // criteria call out.
+        var autostartItem = new MenuItem
+        {
+            Header = "Start with Windows",
+            IsCheckable = true,
+            IsChecked = IsAutostartEnabledSafe(),
+        };
+        autostartItem.Click += (_, _) => ToggleAutostart(autostartItem.IsChecked);
+        menu.Items.Add(autostartItem);
+
         var exitItem = new MenuItem { Header = "Exit" };
         exitItem.Click += (_, _) => Application.Current?.Shutdown();
         menu.Items.Add(exitItem);
 
         _taskbarIcon.ContextMenu = menu;
+    }
+
+    private bool IsAutostartEnabledSafe()
+    {
+        try
+        {
+            return _autostart.IsEnabled();
+        }
+        catch (Exception ex)
+        {
+            // Defense in depth: IAutostartRegistration's own contract already guarantees it never
+            // throws (ADR-012 fail-soft), but this class wraps every other call into its
+            // collaborators the same way (see Refresh() and CheckForUnexpectedUnmounts) rather
+            // than trusting a contract silently -- a stale, unchecked toggle is a far smaller
+            // problem than a WPF ContextMenu rebuild throwing out of a DispatcherTimer.Tick.
+            _logger?.LogWarning(ex, "Failed to read autostart registration state for the tray menu");
+            return false;
+        }
+    }
+
+    private void ToggleAutostart(bool wantEnabled)
+    {
+        try
+        {
+            var result = wantEnabled ? _autostart.Enable() : _autostart.Disable();
+            if (result == AutostartResult.Failed)
+            {
+                _logger?.LogWarning(
+                    "Failed to {Action} autostart from the tray menu", wantEnabled ? "enable" : "disable");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to toggle autostart from the tray menu");
+        }
     }
 
     /// <summary>

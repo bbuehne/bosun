@@ -6,6 +6,7 @@ using Bosun.SessionMonitor;
 using Bosun.Status;
 using Bosun.Supervisor;
 using Bosun.UI;
+using Bosun.UI.Autostart;
 using Bosun.UI.Tray;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -191,11 +192,16 @@ public partial class App : Application
             new WpfVirtualScreenProvider(),
             services.GetRequiredService<ILogger<MainWindowController>>());
 
+        var autostart = new AutostartRegistration(
+            new RegistryAutostartStore(),
+            logger: services.GetRequiredService<ILogger<AutostartRegistration>>());
+
         _trayIconController = new TrayIconController(
             statusReadModel,
             supervisor,
             actionDispatcher,
             _mainWindowController,
+            autostart,
             services.GetRequiredService<ILogger<TrayIconController>>());
 
         // bs-2wa / ADR-018 Decision 6: a second launch is a user asking to see Bosun. Raised on
