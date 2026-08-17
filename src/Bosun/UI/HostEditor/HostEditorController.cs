@@ -1,5 +1,6 @@
 using System.Globalization;
 using Bosun.Configuration;
+using Bosun.Import;
 using Bosun.Supervisor;
 using Microsoft.Extensions.Logging;
 
@@ -84,6 +85,42 @@ public sealed class HostEditorController
     {
         ArgumentNullException.ThrowIfNull(existing);
         return ToFormModel(existing, isNewHost: false);
+    }
+
+    /// <summary>Builds a new-host form pre-filled from a successful Bitvise/Tunnelier import
+    /// (bs-ww9.9, ADR-019). Starts from exactly the same <see cref="NewHostDefaults.Create"/>
+    /// baseline as <see cref="CreateNewHostForm"/>, then overlays whatever the parse found on top
+    /// -- hostname always (that is what made <see cref="BitviseImportResult.Succeeded"/> true),
+    /// username only when one was found, and port always (it already defaults to 22 on the result
+    /// itself when the parser could not identify one).</summary>
+    /// <remarks>
+    /// Deliberately never touches <see cref="HostFormModel.IdentityFile"/>. ADR-019's "import
+    /// cannot supply the key" is not a detail this method chooses to skip -- there is no field on
+    /// <see cref="BitviseImportResult"/> that could carry it, because Bitvise keeps keypairs in its
+    /// own store (<c>HKCU\Software\Bitvise\Keypairs</c>), not as files, so nothing was ever
+    /// extracted to overlay. The identity file stays at <see cref="NewHostDefaults"/>'s empty
+    /// default, and the caller (<c>HostEditorWindow</c>) is responsible for saying so plainly near
+    /// the field rather than leaving it mysteriously blank.
+    /// </remarks>
+    public HostFormModel CreateImportedHostForm(string hostKey, BitviseImportResult imported)
+    {
+        ArgumentNullException.ThrowIfNull(imported);
+        if (!imported.Succeeded)
+        {
+            throw new ArgumentException(
+                "Cannot build a form from a failed import -- the caller must check " +
+                $"{nameof(BitviseImportResult.Succeeded)} first.", nameof(imported));
+        }
+
+        var form = CreateNewHostForm(hostKey);
+        form.Hostname = imported.Hostname ?? form.Hostname;
+        if (!string.IsNullOrWhiteSpace(imported.Username))
+        {
+            form.User = imported.Username;
+        }
+
+        form.Port = imported.Port.ToString(CultureInfo.InvariantCulture);
+        return form;
     }
 
     private static HostFormModel ToFormModel(HostConfig host, bool isNewHost) => new()
