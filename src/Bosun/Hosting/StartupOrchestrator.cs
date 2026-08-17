@@ -189,6 +189,11 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         // exiting either way) but cheap and symmetric with every other subscription torn down here.
         fragmentRewriteCoordinator?.Dispose();
 
+        if (configStore is not null)
+        {
+            configStore.ConfigChanged -= OnConfigStoreChanged;
+        }
+
         if (rcloneProcessService is not null)
         {
             rcloneProcessService.StatusChanged -= OnRcloneProcessStatusChanged;
@@ -365,6 +370,17 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         if (rcloneProcessService is not null)
         {
             rcloneProcessService.StatusChanged += OnRcloneProcessStatusChanged;
+        }
+
+        // bs-7ck: subscribe the mount supervisor to LATER config reloads -- the initial host set it
+        // already built inside StartAsync above covers the config as of THIS load. Gated on
+        // mountSupervisor being non-null, not on supervisorStarted, for the identical reason step 7
+        // below is: as long as MountSupervisor was constructed and its RunAsync loop launched (see
+        // StartMountSupervisorAsync), the command channel this posts to is being pumped, even if
+        // the one initial StartAsync call itself happened to fail.
+        if (mountSupervisor is not null)
+        {
+            configStore!.ConfigChanged += OnConfigStoreChanged;
         }
 
         // Step 7: subscribe to system events (bs-ohk). Deliberately the LAST step of the ordered
@@ -578,6 +594,42 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "Failed to reconcile after rclone rcd became healthy again");
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // bs-7ck: IHostConfigStore.ConfigChanged -> IMountSupervisor.ConfigChangedAsync
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// <see cref="IHostConfigStore.ConfigChanged"/> fires synchronously, from whichever thread
+    /// triggered the reload (the debounce timer for an external edit, or the caller of
+    /// <c>IHostConfigWriter.SaveHostAsync</c>/<c>DeleteHostAsync</c> for a GUI edit -- see
+    /// <see cref="FragmentRewriteCoordinator.OnConfigChanged"/> for the identical constraint on
+    /// that other subscriber). This handler must not block on the resulting work and must not touch
+    /// supervisor state itself -- <see cref="IMountSupervisor.ConfigChangedAsync"/> is the only
+    /// path, and it posts to the supervisor's own serialised command channel, exactly like
+    /// <see cref="OnRcloneProcessStatusChanged"/>'s identical fire-and-forget shape above.
+    /// </summary>
+    private void OnConfigStoreChanged(object? sender, ConfigChangedEventArgs e)
+    {
+        if (mountSupervisor is null)
+        {
+            return;
+        }
+
+        _ = HandleConfigChangedAsync(e.Config);
+    }
+
+    private async Task HandleConfigChangedAsync(BosunConfig config)
+    {
+        try
+        {
+            await mountSupervisor!.ConfigChangedAsync(config, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Failed to apply a config change to the mount supervisor");
         }
     }
 

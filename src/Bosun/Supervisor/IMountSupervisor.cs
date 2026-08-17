@@ -132,6 +132,48 @@ public interface IMountSupervisor
     /// so recovery (e.g. <c>rclone rcd</c> restarting) does not require an app restart.
     /// </summary>
     Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reacts to a new, already-validated <see cref="Configuration.BosunConfig"/> from
+    /// <see cref="Configuration.IHostConfigStore.ConfigChanged"/> (bs-7ck). Posted through the same
+    /// serialised command channel as every other entry point on this interface -- callers (e.g.
+    /// <see cref="Hosting.StartupOrchestrator"/>, subscribing a synchronous event handler) must not
+    /// block on it and must not touch host state themselves; this method is the only path.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The classification (bs-7ck's DESIGN field) is exact, not a guideline:</b> a per-host diff
+    /// against the field the host's config actually used to be decides what happens, never "any
+    /// change re-arms everything" and never "nothing changes without a restart".
+    /// </para>
+    /// <list type="bullet">
+    /// <item><b>Mount-affecting</b> (<c>mount.drive</c>, <c>mount.remote_path</c>,
+    /// <c>mount.vfs_cache_mode</c>, <c>mount.network_mode</c>, <c>hostname</c>, <c>port</c>,
+    /// <c>user</c>, <c>identity_file</c>): a live mount no longer matches intent, so it drains and
+    /// the normal path remounts it -- never directly, always re-probed first (Invariant I1).</item>
+    /// <item><b>Tier change</b> (<c>mount.mode</c>): persistent to on-demand keeps any live mount
+    /// and just stops auto-remounting; on-demand to persistent mounts immediately if idle and
+    /// reachable; anything to <c>none</c> drains and stops supervising; <c>none</c> to anything
+    /// begins supervising from <c>Disabled</c>, exactly as at startup.</item>
+    /// <item><b>Scheduling-affecting</b> (<c>probe.interval_seconds</c>, <c>probe.deep_probe</c>,
+    /// <c>mount.idle_unmount_seconds</c>): timers re-arm; nothing drains.</item>
+    /// <item><b>Cosmetic/session-only</b> (<c>display_name</c>, every <c>session.*</c> field):
+    /// untouched. These already flow through their own Terminal-fragment rewrite path.</item>
+    /// </list>
+    /// <para>
+    /// A host present in the new config but not the old one begins supervision exactly as at
+    /// startup. A host present in the old config but not the new one drains first if it is
+    /// Mounting/Mounted, then stops being supervised entirely -- never left mounted with nothing in
+    /// <see cref="GetSnapshot"/> describing it (Invariant I2).
+    /// </para>
+    /// <para>
+    /// Global settings (backoff ladder, probe timeout, <c>failures_before_unmount</c>, mounted probe
+    /// intervals) are adopted for FUTURE scheduling only. Nothing here re-arms a timer or resets a
+    /// failure counter for a host whose own definition did not change -- a config save must never
+    /// look like a successful probe for some other host.
+    /// </para>
+    /// </remarks>
+    Task ConfigChangedAsync(Configuration.BosunConfig newConfig, CancellationToken cancellationToken = default);
 }
 
 /// <summary>The seven states of docs/ARCHITECTURE.md §4, one instance per configured host.</summary>

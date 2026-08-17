@@ -186,6 +186,18 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         /// docs/ARCHITECTURE.md §6 "drive letter already in use: refuse the mount... do not retry
         /// forever").</summary>
         MountFailure,
+
+        /// <summary>A host removed entirely from config while Mounting/Mounted (bs-7ck, Invariant
+        /// I2). Drains exactly like <see cref="Automatic"/>, but <see cref="CompleteDrainAsync"/>
+        /// additionally evicts the host from <see cref="hosts"/> once it settles rather than
+        /// re-enabling it -- nothing in config describes this host any more, so nothing should keep
+        /// probing or remounting it. Deliberately distinct from a host reconfigured to
+        /// <c>mount.mode = "none"</c> (which stays in <see cref="hosts"/>, parked
+        /// <see cref="MountState.Disabled"/>, exactly like a <c>mode = "none"</c> host at startup --
+        /// see <see cref="ApplyHostConfigChangeAsync"/>): that host's KEY still exists in config, so
+        /// it still belongs in the snapshot as an administratively-disabled entry, whereas a REMOVED
+        /// key has nothing left to describe.</summary>
+        ConfigRemoved,
     }
 
     /// <summary>Mutable per-host runtime state. Deliberately a private nested class: nothing
@@ -265,6 +277,17 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         public string? DrainReason;
         public DateTimeOffset? LastTransitionUtc;
         public string? LastTransitionTrigger;
+
+        /// <summary>A newer <see cref="Config"/> queued by a mount-affecting
+        /// <see cref="ConfigChangedAsync"/> diff while this host is Mounting/Mounted/Draining
+        /// (bs-7ck). Deliberately NOT applied to <see cref="Config"/> immediately: every drain-retry
+        /// read of <c>Config.Mount.Drive</c> (<see cref="AttemptDrainStepAsync"/>) must keep
+        /// targeting the mount point that is ACTUALLY live until the drain confirms -- applying a
+        /// new drive letter or remote path mid-drain would make a retry try to unmount the WRONG
+        /// mount point. Applied by <see cref="CompleteDrainAsync"/> the instant the drain confirms,
+        /// before whatever comes next (a paced remount, an immediate re-enable, or eviction), so
+        /// that next step already sees the new definition.</summary>
+        public HostConfig? PendingConfig;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -578,6 +601,10 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 logger.LogWarning("Mounting became unavailable: {Reason}", availability.Reason);
             }
         }, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task ConfigChangedAsync(BosunConfig newConfig, CancellationToken cancellationToken = default) =>
+        EnqueueAndWait(ct => ApplyConfigChangeAsync(newConfig, ct), cancellationToken);
 
     public async ValueTask DisposeAsync()
     {
@@ -1367,6 +1394,24 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
         SetState(host, MountState.Disabled, $"drain completed: {host.DrainReason}");
 
+        // bs-7ck: a mount-affecting config change queued a newer definition while this host was
+        // still Mounting/Mounted/Draining -- applied now, the moment the drain is confirmed, so
+        // everything downstream (a paced remount, an immediate re-enable, or eviction below) already
+        // sees it. See PendingConfig's remarks for why this could not simply be applied eagerly.
+        if (host.PendingConfig is not null)
+        {
+            host.Config = host.PendingConfig;
+            host.PendingConfig = null;
+        }
+
+        if (host.DrainCause == DrainCause.ConfigRemoved)
+        {
+            // bs-7ck / Invariant I2: the host's key no longer exists in config at all -- unlike
+            // every other drain cause, there is no "re-enable" to pace or skip here, only eviction.
+            RemoveFromSupervision(host);
+            return Task.CompletedTask;
+        }
+
         if (host.AdministrativelyEnabled && !suspended)
         {
             if (host.DrainCause == DrainCause.MountFailure)
@@ -1694,6 +1739,322 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             DrainCause.Automatic,
             ct).ConfigureAwait(false);
     }
+
+    // ------------------------------------------------------------------------------------------
+    // Config reload (bs-7ck): IMountSupervisor.ConfigChangedAsync's implementation. See that
+    // interface method's remarks for the classification this whole section implements.
+    // ------------------------------------------------------------------------------------------
+
+    private async Task ApplyConfigChangeAsync(BosunConfig newConfig, CancellationToken ct)
+    {
+        if (!started)
+        {
+            // Nothing is running yet -- StartAsync will build the host set straight from
+            // configStore.Current whenever it eventually runs. Diffing against an empty host set
+            // here would make every host look "added", for no benefit.
+            logger.LogDebug(
+                "Config changed before the supervisor started; ignoring (StartAsync will read the " +
+                "current config directly when it runs)");
+            return;
+        }
+
+        // GLOBAL CHANGES: adopted for FUTURE scheduling only. Every consumer (ProbeTimeout,
+        // EffectiveFailuresBeforeUnmount, ArmIdleProbeTimer's backoff ladder,
+        // EffectiveMountedProbeIntervalSeconds, ...) reads this field live at the moment it acts, so
+        // simply swapping it is enough -- nothing here re-arms a timer or resets a counter for any
+        // host, which is exactly the "a config save must never look like a successful probe"
+        // requirement for a host whose own definition did not change.
+        global = newConfig.Global;
+
+        // HOST REMOVED: drain first if live, then stop being supervised entirely (Invariant I2).
+        // Done before the per-host diff below so a key present in both old and new config is never
+        // confused with one that just disappeared.
+        foreach (var host in hosts.Values.Where(h => !newConfig.Hosts.ContainsKey(h.Key)).ToList())
+        {
+            await RemoveHostAsync(host, ct).ConfigureAwait(false);
+        }
+
+        var addedHosts = new List<HostRuntime>();
+        foreach (var (key, newHostConfig) in newConfig.Hosts)
+        {
+            if (hosts.TryGetValue(key, out var host))
+            {
+                await ApplyHostConfigChangeAsync(host, newHostConfig, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                // HOST ADDED: recorded now, begins supervision below -- exactly the same
+                // Disabled-with-AdministrativelyEnabled construction StartAsync uses.
+                var added = new HostRuntime
+                {
+                    Key = key,
+                    Config = newHostConfig,
+                    State = MountState.Disabled,
+                    AdministrativelyEnabled = newHostConfig.Mount.Mode != MountMode.None,
+                };
+                hosts[key] = added;
+                addedHosts.Add(added);
+            }
+        }
+
+        foreach (var host in addedHosts)
+        {
+            if (host.AdministrativelyEnabled)
+            {
+                await EnableHostAsync(host, "config change: host added", ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The per-host diff for a key present in both the old and new config -- the actual
+    /// classification work <see cref="ConfigChangedAsync"/>'s DESIGN field specifies. See that
+    /// interface method's remarks for the four categories this implements.
+    /// </summary>
+    private async Task ApplyHostConfigChangeAsync(HostRuntime host, HostConfig newHostConfig, CancellationToken ct)
+    {
+        var oldHostConfig = host.Config;
+        var oldMode = oldHostConfig.Mount.Mode;
+        var newMode = newHostConfig.Mount.Mode;
+
+        if (newMode == MountMode.None && oldMode != MountMode.None)
+        {
+            // TIER CHANGE, anything -> none: drain (if live) and stop supervising -- but the host's
+            // KEY still exists in config, so unlike a genuinely removed host it stays in `hosts`,
+            // parked Disabled/administratively-disabled, exactly like a mode = "none" host at
+            // startup (StartAsync's own `!host.AdministrativelyEnabled` skip).
+            await DisableForModeNoneAsync(host, newHostConfig, ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (oldMode == MountMode.None)
+        {
+            // Covers both none -> none (nothing to do besides the Config swap -- an unreachable
+            // combination of "mount fields changed" anyway, since ConfigValidator requires them
+            // absent when mode = none) and none -> anything (begin supervising from Disabled,
+            // exactly as at startup).
+            host.Config = newHostConfig;
+            if (newMode != MountMode.None)
+            {
+                host.AdministrativelyEnabled = true;
+                if (host.State == MountState.Disabled)
+                {
+                    await EnableHostAsync(host, "config change: mount.mode changed from none", ct).ConfigureAwait(false);
+                }
+            }
+
+            return;
+        }
+
+        // From here on, neither the old nor the new mode is "none".
+        var mountAffecting = IsMountAffectingChange(oldHostConfig, newHostConfig);
+
+        if (mountAffecting)
+        {
+            // MOUNT-AFFECTING: the live mount (if any) no longer matches intent -- drain and let
+            // the normal re-enable/auto-mount path remount it, never directly (Invariant I1: it is
+            // re-probed from Ready, same as any other arrival there).
+            switch (host.State)
+            {
+                case MountState.Mounting:
+                case MountState.Mounted:
+                    // PendingConfig, not an immediate Config swap -- see its remarks: the drain
+                    // (and any retry) must keep targeting the mount point that is ACTUALLY live.
+                    host.PendingConfig = newHostConfig;
+                    await BeginDrainAsync(host, "config change: mount-affecting field changed", DrainCause.Automatic, ct)
+                        .ConfigureAwait(false);
+                    return;
+                case MountState.Draining:
+                    // Already draining for some other reason (probe failures, idle timeout, ...) --
+                    // let that drain run its course; apply the new definition once it confirms.
+                    host.PendingConfig = newHostConfig;
+                    return;
+                default:
+                    // Ready / Unreachable / Disabled: no live mount to disturb. Nothing was
+                    // draining, so it is safe to apply the new definition immediately. Force a
+                    // fresh probe against the NEW identity now, rather than silently continuing to
+                    // probe (or sitting on a stale Unreachable against) the OLD one until the next
+                    // scheduled tick -- this is a genuine new probe, not a fabricated success, so
+                    // resetting Backoff here does not violate "a config save must never look like a
+                    // successful probe" (that protects hosts whose OWN definition did not change).
+                    host.Config = newHostConfig;
+                    if (host.State is MountState.Ready or MountState.Unreachable)
+                    {
+                        host.Backoff = BackoffState.Initial;
+                        await ForceImmediateIdleProbeAsync(host, "config change: mount-affecting field changed", ct)
+                            .ConfigureAwait(false);
+                    }
+
+                    return;
+            }
+        }
+
+        // Not mount-affecting: no live mount depends on whatever changed, so it is always safe to
+        // apply the new definition immediately.
+        host.Config = newHostConfig;
+
+        if (newMode != oldMode)
+        {
+            // TIER CHANGE, persistent <-> on-demand.
+            if (newMode == MountMode.Persistent && host.State == MountState.Ready)
+            {
+                // on-demand -> persistent, not currently mounted, currently reachable: mount now.
+                // TryBeginMountAsync's own success path already arms (or leaves unarmed, correctly
+                // for the new persistent tier) the idle-unmount timer -- see the branch below.
+                await TryBeginMountAsync(host, "config change: tier changed to persistent", ct).ConfigureAwait(false);
+            }
+            else if (host.State == MountState.Mounted)
+            {
+                // Already mounted through the flip, in EITHER direction -- no drain either way
+                // (DESIGN: "keep any live mount"), but the idle-unmount timer is an on-demand-only
+                // mechanic (rule 7) and must be re-evaluated for the NEW tier: persistent ->
+                // on-demand needs one armed now (it never had one while persistent, so idle-unmount
+                // could otherwise never fire until some later full mount cycle); on-demand ->
+                // persistent needs any existing one disarmed (a persistent host must never
+                // auto-unmount on an idle timeout). ArmIdleUnmountTimer disposes whatever is
+                // already there before deciding, so one call is correct for both directions.
+                ArmIdleUnmountTimer(host);
+            }
+
+            // persistent -> on-demand while NOT mounted, or any other combination: nothing further.
+            // The Config swap above already means OnEnteredReadyAsync's tier check will not
+            // auto-mount a persistent-turned-on-demand host on the NEXT arrival at Ready.
+            return;
+        }
+
+        if (IsSchedulingAffectingChange(oldHostConfig, newHostConfig))
+        {
+            // SCHEDULING-AFFECTING: re-arm timers for the new cadence. Never drain, never touch a
+            // failure counter or Backoff.
+            switch (host.State)
+            {
+                case MountState.Ready:
+                case MountState.Unreachable:
+                    ArmIdleProbeTimer(host);
+                    break;
+                case MountState.Mounted:
+                    ArmMountedProbeTimer(host);
+                    ArmIdleUnmountTimer(host);
+                    break;
+            }
+
+            return;
+        }
+
+        // COSMETIC / SESSION-ONLY: host.Config is already updated above; nothing else to do. These
+        // fields already flow through their own Terminal-fragment rewrite path
+        // (FragmentRewriteCoordinator), independently of the mount supervisor.
+    }
+
+    /// <summary>TIER CHANGE, anything -&gt; none, for a host whose key still exists in config
+    /// (see <see cref="ApplyHostConfigChangeAsync"/>). Mirrors <see cref="RemoveHostAsync"/>'s
+    /// Mounting/Mounted/Draining handling exactly, except the host stays in <see cref="hosts"/>
+    /// afterward -- parked Disabled/administratively-disabled -- rather than being evicted.</summary>
+    private async Task DisableForModeNoneAsync(HostRuntime host, HostConfig newHostConfig, CancellationToken ct)
+    {
+        host.AdministrativelyEnabled = false;
+
+        switch (host.State)
+        {
+            case MountState.Mounting:
+            case MountState.Mounted:
+                host.PendingConfig = newHostConfig;
+                await BeginDrainAsync(host, "config change: mount.mode set to none", DrainCause.Automatic, ct)
+                    .ConfigureAwait(false);
+                return;
+            case MountState.Draining:
+                host.PendingConfig = newHostConfig;
+                return;
+            case MountState.Ready:
+            case MountState.Unreachable:
+                host.Config = newHostConfig;
+                host.ProbeTimer?.Dispose();
+                host.ProbeTimer = null;
+                SetState(host, MountState.Disabled, "config change: mount.mode set to none");
+                return;
+            default:
+                // Disabled already (and, defensively, Probing -- never actually observable here:
+                // every arrival into Probing runs to completion, Ready or Unreachable, within the
+                // single channel continuation that started it, and ConfigChangedAsync's own
+                // continuation cannot interleave with that one -- see the class remarks on global
+                // channel serialisation).
+                host.Config = newHostConfig;
+                return;
+        }
+    }
+
+    /// <summary>HOST REMOVED (bs-7ck, Invariant I2): drains first if the host is currently
+    /// Mounting/Mounted, then evicts it from <see cref="hosts"/> -- either immediately (nothing was
+    /// live) or once the drain confirms (via <see cref="DrainCause.ConfigRemoved"/>,
+    /// <see cref="CompleteDrainAsync"/>).</summary>
+    private async Task RemoveHostAsync(HostRuntime host, CancellationToken ct)
+    {
+        host.AdministrativelyEnabled = false;
+
+        switch (host.State)
+        {
+            case MountState.Mounting:
+            case MountState.Mounted:
+                await BeginDrainAsync(host, "config change: host removed", DrainCause.ConfigRemoved, ct).ConfigureAwait(false);
+                return;
+            case MountState.Draining:
+                // Already draining for some other reason (a user unmount, probe failures, ...) --
+                // upgrade the cause so CompleteDrainAsync evicts the host once it confirms, instead
+                // of parking or re-enabling a host nothing in config describes any more.
+                host.DrainCause = DrainCause.ConfigRemoved;
+                return;
+            case MountState.Ready:
+            case MountState.Unreachable:
+                host.ProbeTimer?.Dispose();
+                host.ProbeTimer = null;
+                SetState(host, MountState.Disabled, "config change: host removed");
+                RemoveFromSupervision(host);
+                return;
+            default:
+                // Disabled already (and, defensively, Probing -- see DisableForModeNoneAsync's
+                // identical remark for why that is not actually reachable here).
+                RemoveFromSupervision(host);
+                return;
+        }
+    }
+
+    /// <summary>Disposes every timer a <see cref="HostRuntime"/> can be holding and evicts it from
+    /// <see cref="hosts"/>. The only place a host ever leaves <see cref="hosts"/> once added --
+    /// called from <see cref="RemoveHostAsync"/> directly (nothing was live) and from
+    /// <see cref="CompleteDrainAsync"/> (a live mount just finished draining because the host was
+    /// removed from config).</summary>
+    private void RemoveFromSupervision(HostRuntime host)
+    {
+        host.ProbeTimer?.Dispose();
+        host.ProbeTimer = null;
+        host.DeepProbeTimer?.Dispose();
+        host.DeepProbeTimer = null;
+        host.IdleUnmountTimer?.Dispose();
+        host.IdleUnmountTimer = null;
+        hosts.Remove(host.Key);
+    }
+
+    /// <summary>MOUNT-AFFECTING, per <see cref="ConfigChangedAsync"/>'s DESIGN classification: the
+    /// live mount (if any) no longer matches intent, so it must drain and be re-probed before it can
+    /// remount. Deliberately excludes <see cref="MountConfig.Mode"/> and
+    /// <see cref="MountConfig.IdleUnmountSeconds"/> -- those are their own categories (tier change,
+    /// scheduling), checked separately.</summary>
+    private static bool IsMountAffectingChange(HostConfig oldConfig, HostConfig newConfig) =>
+        oldConfig.Mount.Drive != newConfig.Mount.Drive ||
+        oldConfig.Mount.RemotePath != newConfig.Mount.RemotePath ||
+        oldConfig.Mount.VfsCacheMode != newConfig.Mount.VfsCacheMode ||
+        oldConfig.Mount.NetworkMode != newConfig.Mount.NetworkMode ||
+        oldConfig.Hostname != newConfig.Hostname ||
+        oldConfig.Port != newConfig.Port ||
+        oldConfig.User != newConfig.User ||
+        oldConfig.IdentityFile != newConfig.IdentityFile;
+
+    /// <summary>SCHEDULING-AFFECTING, per <see cref="ConfigChangedAsync"/>'s DESIGN classification:
+    /// re-arms timers for the new cadence, never drains, never touches a failure counter.</summary>
+    private static bool IsSchedulingAffectingChange(HostConfig oldConfig, HostConfig newConfig) =>
+        oldConfig.Probe.IntervalSeconds != newConfig.Probe.IntervalSeconds ||
+        oldConfig.Probe.DeepProbe != newConfig.Probe.DeepProbe ||
+        oldConfig.Mount.IdleUnmountSeconds != newConfig.Mount.IdleUnmountSeconds;
 
     // ------------------------------------------------------------------------------------------
     // Shared helpers

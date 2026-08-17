@@ -46,4 +46,7 @@ internal sealed class FakeMountSupervisorSnapshotSource : IMountSupervisor
 
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException();
+
+    public Task ConfigChangedAsync(Bosun.Configuration.BosunConfig newConfig, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
 }
