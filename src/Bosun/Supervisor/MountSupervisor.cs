@@ -412,6 +412,14 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     {
         suspended = false;
 
+        // ADR-017: resume does not trust its own Mounted state -- it is at least as strong as a
+        // network change, never weaker (an earlier asymmetry here is exactly what let bs-brv look
+        // correct in review). This reconciles against mount/listmounts and force-probes (shallow
+        // *and* deep) every host still Mounted, BEFORE the per-state switch below runs -- so a host
+        // found here is either no longer Mounted (handled, falls through the switch's default case)
+        // or has already received its one forced shallow probe (must not be probed again below).
+        await ReDeriveAfterTransitionAsync("resume", ct).ConfigureAwait(false);
+
         foreach (var host in hosts.Values.Where(h => h.AdministrativelyEnabled).ToList())
         {
             switch (host.State)
@@ -437,8 +445,16 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                     await ForceImmediateIdleProbeAsync(host, "resume: bypass backoff", ct).ConfigureAwait(false);
                     break;
                 default:
-                    // Mounting/Mounted should not exist here (suspend already drained them);
-                    // Draining is left alone to keep retrying on its own schedule.
+                    // Mounted was already handled above by ReDeriveAfterTransitionAsync (ADR-017),
+                    // including its one forced shallow probe -- probing it again here would violate
+                    // "one forced shallow probe, not two". A host that drained during that
+                    // re-derivation is no longer Mounted, so it does not land here either; it will
+                    // be picked up as Disabled the NEXT time resume or startup runs, same as any
+                    // other drain. Mounting cannot practically be observed here: every transition out
+                    // of Ready into Mounting runs to completion (Mounted or Draining) within the
+                    // single channel continuation that started it (see the class remarks on global
+                    // serialisation), so no other command -- including this one -- is ever dequeued
+                    // mid-Mounting. Draining is left alone to keep retrying on its own schedule.
                     break;
             }
         }
@@ -446,6 +462,11 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
     public Task NetworkChangedAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
     {
+        // ADR-017: identical re-derivation to ResumeAsync -- reconcile against mount/listmounts,
+        // then force-probe (shallow and deep) every host still Mounted, gated on rcd answering
+        // core/version. This replaces the old shallow-only force-probe loop.
+        await ReDeriveAfterTransitionAsync("network change", ct).ConfigureAwait(false);
+
         foreach (var host in hosts.Values.Where(h => h.State is MountState.Ready or MountState.Unreachable).ToList())
         {
             // No tier split -- same reasoning as ResumeAsync above. ADR-014 splits the recurring
@@ -454,13 +475,6 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             // ADR-008's "unknown until acted on", because it is confidently wrong rather than blank.
             host.Backoff = BackoffState.Initial;
             await ForceImmediateIdleProbeAsync(host, "network change: bypass backoff", ct).ConfigureAwait(false);
-        }
-
-        foreach (var host in hosts.Values.Where(h => h.State == MountState.Mounted).ToList())
-        {
-            host.ProbeTimer?.Dispose();
-            host.ProbeTimer = null;
-            await HandleMountedProbeDueAsync(host, "network change: force-probe mounted host", ct).ConfigureAwait(false);
         }
     }, cancellationToken);
 
@@ -1442,6 +1456,112 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // ADR-017: re-derivation after a power or network transition
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// bs-mk4 / bs-brv / ADR-017: after any power or network transition, the supervisor does not
+    /// trust its own <c>Mounted</c> state. Shared by <see cref="ResumeAsync"/> and
+    /// <see cref="NetworkChangedAsync"/> so both call the exact same sequence instead of each
+    /// hand-rolling a subset of it -- that gap (resume skipping <c>Mounted</c> hosts entirely, a
+    /// network change force-probing shallow only) is what let the three defects this ADR closes
+    /// look locally reasonable in review. See docs/DECISIONS.md ADR-017 and
+    /// docs/ARCHITECTURE.md §3/§4 rule 5.
+    /// </summary>
+    /// <remarks>
+    /// Order is fixed by the ADR and matters:
+    /// <list type="number">
+    /// <item>Gate on <c>rclone rcd</c> answering <c>core/version</c>. Without it, a failed deep probe
+    /// cannot be told apart from "rcd has not finished coming back yet" -- acting on the second
+    /// unmounts a healthy drive on every resume. Same posture as Invariant I1: no action on
+    /// unverified state. If the gate fails, nothing below runs; the ordinary cadence retries later.</item>
+    /// <item>Reconcile against <c>mount/listmounts</c> (reusing <see cref="ReconcileAsync"/> --
+    /// no second copy of that logic) -- ground truth before any probe result is interpreted.</item>
+    /// <item>Force both the shallow and the deep probe on every host still <c>Mounted</c> after
+    /// reconciliation. The shallow probe uses its ordinary accumulating threshold
+    /// (<see cref="HandleMountedProbeDueAsync"/>, unchanged); a forced deep-probe failure here is
+    /// conclusive at a single failure, not ADR-016's ordinary threshold of 2 -- the rcd gate above is
+    /// what makes that safe, and a transition is corroborating evidence (see
+    /// <see cref="ForceDeepProbeAfterTransitionAsync"/>).</item>
+    /// </list>
+    /// Each host's armed timers are disposed before its forced probe runs, so the forced probe and
+    /// the host's own periodic timer can never both be in flight for the same probe kind.
+    /// </remarks>
+    private async Task ReDeriveAfterTransitionAsync(string trigger, CancellationToken ct)
+    {
+        try
+        {
+            await rcloneClient.GetVersionAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                ex,
+                "Re-derivation after {Trigger} skipped: rclone rcd did not answer core/version. Cannot " +
+                "distinguish a dead SSH channel from rcd still coming back, so nothing is reconciled or " +
+                "drained this time -- the ordinary probe/reconciliation cadence will retry (ADR-017)",
+                trigger);
+            return;
+        }
+
+        await ReconcileAsync(ct).ConfigureAwait(false);
+
+        foreach (var host in hosts.Values.Where(h => h.State == MountState.Mounted).ToList())
+        {
+            host.ProbeTimer?.Dispose();
+            host.ProbeTimer = null;
+            await HandleMountedProbeDueAsync(host, $"{trigger}: force-probe mounted host (shallow, ADR-017)", ct)
+                .ConfigureAwait(false);
+
+            if (host.State != MountState.Mounted)
+            {
+                // The forced shallow probe just drained it via the ordinary accumulating threshold --
+                // nothing left in Mounted to deep-probe.
+                continue;
+            }
+
+            host.DeepProbeTimer?.Dispose();
+            host.DeepProbeTimer = null;
+            await ForceDeepProbeAfterTransitionAsync(host, trigger, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// ADR-017's settled sub-decision: a deep-probe failure forced immediately after a power/network
+    /// transition is conclusive on its own -- it drains on a SINGLE failure, unlike the recurring
+    /// periodic deep probe (<see cref="HandleMountedDeepProbeDueAsync"/>), which still needs
+    /// <see cref="MountedDeepProbeFailureThreshold"/> (2) consecutive failures. Only reachable from
+    /// <see cref="ReDeriveAfterTransitionAsync"/>, which has already gated on <c>rclone rcd</c>
+    /// answering <c>core/version</c> -- that gate is what makes a single failure here safe to act on.
+    /// </summary>
+    private async Task ForceDeepProbeAfterTransitionAsync(HostRuntime host, string trigger, CancellationToken ct)
+    {
+        var result = await probe.ProbeDeepAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
+
+        if (result.Outcome == DeepProbeOutcome.Success)
+        {
+            host.ConsecutiveDeepProbeFailures = 0;
+            ArmMountedDeepProbeTimer(host);
+            return;
+        }
+
+        host.ConsecutiveDeepProbeFailures++;
+        logger.LogWarning(
+            "Forced deep probe failed for mounted host {HostKey} immediately after {Trigger} ({Outcome}: " +
+            "{Detail}): conclusive at a single failure with rclone rcd confirmed live -- draining " +
+            "(ADR-017; the periodic deep probe would ordinarily need {Threshold} consecutive failures, " +
+            "see ADR-016)",
+            host.Key, trigger, result.Outcome, result.Detail, MountedDeepProbeFailureThreshold);
+
+        await BeginDrainAsync(
+            host,
+            $"deep probe failed immediately after {trigger}: SSH channel confirmed dead post-transition " +
+            "(ADR-017 -- conclusive at 1 failure with rclone rcd confirmed live)",
+            DrainCause.Automatic,
+            ct).ConfigureAwait(false);
     }
 
     // ------------------------------------------------------------------------------------------
