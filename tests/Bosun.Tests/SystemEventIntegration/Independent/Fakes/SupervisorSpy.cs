@@ -135,4 +135,13 @@ internal sealed class SupervisorSpy : IMountSupervisor
         Calls.Add(nameof(SetMountingAvailabilityAsync));
         return Task.CompletedTask;
     }
+
+    // Mechanical addition only (bs-7ck added this member to IMountSupervisor) -- this file is
+    // otherwise untouched. Follows the exact same record-and-complete pattern as every other member
+    // above; SystemEventSupervisorAdapter never calls it, so it is never expected to appear in Calls.
+    public Task ConfigChangedAsync(Bosun.Configuration.BosunConfig newConfig, CancellationToken cancellationToken = default)
+    {
+        Calls.Add(nameof(ConfigChangedAsync));
+        return Task.CompletedTask;
+    }
 }

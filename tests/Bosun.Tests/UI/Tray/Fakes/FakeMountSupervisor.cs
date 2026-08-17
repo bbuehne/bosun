@@ -59,4 +59,7 @@ internal sealed class FakeMountSupervisor : IMountSupervisor
 
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
+
+    public Task ConfigChangedAsync(Bosun.Configuration.BosunConfig newConfig, CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
 }
