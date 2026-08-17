@@ -180,6 +180,32 @@ public sealed record HostMountSnapshot
     /// about this particular host's own reachability; see <see cref="MountingAvailability"/>.
     /// </summary>
     public string? MountUnavailableReason { get; init; }
+
+    /// <summary>
+    /// Consecutive MOUNT-ATTEMPT failures -- a deep probe failing while entering
+    /// <see cref="MountState.Mounting"/>, or <c>mount/mount</c> itself failing (bs-ww9.4;
+    /// docs/ARCHITECTURE.md §4 "A failed mount attempt is paced too, on its own ladder"). This is
+    /// a THIRD, distinct signal from <see cref="ConsecutiveMountedFailures"/> (the shallow probe's
+    /// failure count while already <c>Mounted</c>) and <see cref="ConsecutiveIdleFailures"/> (the
+    /// idle-probe backoff ladder for a host that will not even answer TCP) -- it counts failures
+    /// to reach <c>Mounted</c> AT ALL from a host that answers TCP fine. Before bs-ww9.4 this was
+    /// only <c>MountSupervisor.HostRuntime.MountRetryBackoff</c>, private supervisor state: a host
+    /// with an expired key, a disabled SFTP subsystem, or a drive letter already claimed by
+    /// something else never goes <see cref="MountState.Unreachable"/> (it answers TCP), so it
+    /// cycled the retry ladder out to its slowest rung forever with nothing on this snapshot
+    /// explaining why. Reset to zero on a successful mount, exactly as
+    /// <c>MountSupervisor.HostRuntime.MountRetryBackoff</c> already resets.
+    /// </summary>
+    public int ConsecutiveMountFailures { get; init; }
+
+    /// <summary>
+    /// The reason the most recent mount attempt failed (bs-ww9.4), captured verbatim from the
+    /// failure site -- <c>"deep probe failed entering Mounting: {outcome}"</c> or
+    /// <c>"mount/mount failed: {ex.Message}"</c>. <see langword="null"/> once
+    /// <see cref="ConsecutiveMountFailures"/> is reset to zero by a successful mount, and
+    /// <see langword="null"/> if no mount attempt has ever failed for this host.
+    /// </summary>
+    public string? LastMountFailureReason { get; init; }
 }
 
 /// <summary>
