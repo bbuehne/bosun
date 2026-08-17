@@ -1,5 +1,6 @@
 using Bosun.SystemEventIntegration;
 using Bosun.Tests.Configuration.Fakes;
+using Bosun.Tests.Rclone.Process.Fakes;
 using Bosun.Tests.SessionMonitor.Fakes;
 using Bosun.Tests.Supervisor.Support;
 using Bosun.Tests.SystemEventIntegration.Fakes;
@@ -165,30 +166,45 @@ public sealed class SystemEventSupervisorAdapterTests
     }
 
     /// <summary>
-    /// The in-flight call left running past the budget (see the adapter's class remarks) is
-    /// deliberately observed via a continuation so a later fault logs rather than crashing the
-    /// process as an unobserved task exception. Asserting the continuation actually RAN would
-    /// require waiting on a real thread-pool scheduling hop with no deterministic signal to await
-    /// (CLAUDE.md forbids sleeps in the default suite), so this test instead proves the narrower,
-    /// fully deterministic half of that claim: setting the exception on the still-referenced task
-    /// after the budget has elapsed does not throw synchronously and does not go unobserved by the
-    /// .NET runtime's own unobserved-task-exception detector, which only fires once the
-    /// <see cref="Task"/> is garbage-collected -- i.e. proving <c>TrySetException</c> itself is
-    /// harmless is the deterministic half; that the adapter's <c>ContinueWith</c> attaches a
-    /// consuming continuation (so the exception IS observed, not merely delayed) is a direct
-    /// reading of <see cref="SystemEventSupervisorAdapter.WaitForSuspendDrainAsync"/>'s source.
+    /// bs-box: the previous version of this test only asserted that
+    /// <c>TaskCompletionSource.TrySetException</c> does not throw -- a property of
+    /// <see cref="TaskCompletionSource"/> itself, true regardless of whether the adapter attaches
+    /// any continuation at all. It would pass identically if the adapter's <c>ContinueWith</c> in
+    /// <see cref="SystemEventSupervisorAdapter.WaitForSuspendDrainAsync"/> were deleted outright.
+    /// This version proves the thing that actually matters: the late fault reaches the logger, i.e.
+    /// the adapter's continuation is a real consumer of the exception, not just something that
+    /// happens not to throw.
     /// </summary>
+    /// <remarks>
+    /// The <see cref="TaskCompletionSource"/> here is deliberately created WITHOUT
+    /// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/> (unlike every other TCS in
+    /// this file/the adversarial suite). The adapter's <c>ContinueWith</c> requests
+    /// <see cref="TaskContinuationOptions.ExecuteSynchronously"/>; without the creation-side
+    /// "always run continuations asynchronously" override, the runtime honours that request and
+    /// runs the adapter's logging continuation inline, on this thread, the moment
+    /// <c>TrySetException</c> is called below -- so the assertions that follow are fully
+    /// deterministic with no polling, no sleep, and no thread-pool race.
+    /// </remarks>
     [Fact]
-    public async Task A_late_fault_after_the_budget_elapsed_can_be_set_without_throwing()
+    public async Task A_late_fault_after_the_budget_elapsed_is_logged_not_silently_dropped()
     {
-        var (_, supervisor, _, time, adapter) = CreateHarness(suspendUnmountTimeoutSeconds: 1);
-        supervisor.PendingSuspend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var eventSource = new FakeSystemEventSource();
+        var supervisor = new FakeMountSupervisor { PendingSuspend = new TaskCompletionSource() };
+        var configStore = new FakeHostConfigStore(HostFixtures.Build(HostFixtures.Global(suspendUnmountTimeoutSeconds: 1)));
+        var time = new FakeTimeProvider();
+        var logger = new RecordingLogger<SystemEventSupervisorAdapter>();
+        var adapter = new SystemEventSupervisorAdapter(eventSource, supervisor, configStore, time, logger);
 
         var waitTask = adapter.WaitForSuspendDrainAsync();
         time.Advance(TimeSpan.FromSeconds(1));
-        await waitTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(await waitTask.WaitAsync(TimeSpan.FromSeconds(5)));
 
-        var exception = Record.Exception(() => supervisor.PendingSuspend.TrySetException(new InvalidOperationException("boom")));
+        var exception = Record.Exception(
+            () => supervisor.PendingSuspend.TrySetException(new InvalidOperationException("rclone rcd went away mid-drain")));
         Assert.Null(exception);
+
+        Assert.Contains(logger.CapturedText, text => text.Contains("eventually faulted", StringComparison.Ordinal));
+        Assert.Contains(
+            logger.CapturedText, text => text.Contains("rclone rcd went away mid-drain", StringComparison.Ordinal));
     }
 }
