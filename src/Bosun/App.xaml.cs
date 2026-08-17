@@ -185,7 +185,11 @@ public partial class App : Application
             configStore,
             supervisor,
             services.GetRequiredService<ILogger<HostEditorController>>());
-        _mainWindow.ConfigureHostEditor(hostEditorController, configStore, new Win32IdentityFilePicker());
+        _mainWindow.ConfigureHostEditor(
+            hostEditorController,
+            configStore,
+            new Win32IdentityFilePicker(),
+            new Win32DriveLetterInspector());
 
         // ADR-018 rule 3: closing the window hides it to tray, never exits. The only way to exit
         // is the tray's "Exit" item (TrayIconController) or a future explicit Exit command, both

@@ -29,18 +29,18 @@
                        Foreground="#C0392B" TextWrapping="Wrap" Margin="0,0,0,12"
                        Visibility="Collapsed" />
 
-            <TextBlock Text="Identity" FontWeight="Bold" Margin="0,0,0,4" />
+            <TextBlock Text="Connection" FontWeight="Bold" Margin="0,0,0,4" />
 
-            <TextBlock Text="Key (must match a Host alias in ~/.ssh/config -- ADR-013; this is what 'ssh &lt;key&gt;' will run)"
+            <TextBlock Text="Short name"
                        TextWrapping="Wrap" Foreground="Gray" Margin="0,0,0,2" FontSize="11" />
             <TextBox x:Name="KeyTextBox" Margin="0,0,0,2" />
             <TextBlock x:Name="KeyError" Style="{StaticResource FieldErrorStyle}" />
 
-            <TextBlock Text="Display name" Margin="0,8,0,2" />
+            <TextBlock Text="Display name (shown in Bosun and as the Terminal profile name)" Margin="0,8,0,2" />
             <TextBox x:Name="DisplayNameTextBox" />
             <TextBlock x:Name="DisplayNameError" Style="{StaticResource FieldErrorStyle}" />
 
-            <TextBlock Text="Hostname" Margin="0,8,0,2" />
+            <TextBlock Text="Hostname or IP address" Margin="0,8,0,2" />
             <TextBox x:Name="HostnameTextBox" />
             <TextBlock x:Name="HostnameError" Style="{StaticResource FieldErrorStyle}" />
 
@@ -48,11 +48,11 @@
             <TextBox x:Name="PortTextBox" />
             <TextBlock x:Name="PortError" Style="{StaticResource FieldErrorStyle}" />
 
-            <TextBlock Text="User" Margin="0,8,0,2" />
+            <TextBlock Text="Username on that host" Margin="0,8,0,2" />
             <TextBox x:Name="UserTextBox" />
             <TextBlock x:Name="UserError" Style="{StaticResource FieldErrorStyle}" />
 
-            <TextBlock Text="Identity file (must exist on disk -- Invariant I10)" Margin="0,8,0,2" />
+            <TextBlock Text="Private key file (must already exist — Bosun does not create keys)" Margin="0,8,0,2" />
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -66,26 +66,34 @@
             <Separator Margin="0,16,0,8" />
             <TextBlock Text="Mount" FontWeight="Bold" Margin="0,0,0,4" />
 
-            <TextBlock Text="Mode" Margin="0,4,0,2" />
+            <TextBlock Text="When to mount" Margin="0,4,0,2" />
             <ComboBox x:Name="ModeComboBox" SelectionChanged="OnModeSelectionChanged" />
 
             <StackPanel x:Name="MountDetailPanel">
-                <TextBlock Text="Drive (D:-Z:; A-C are reserved)" Margin="0,8,0,2" />
-                <TextBox x:Name="DriveTextBox" />
+                <TextBlock Text="Drive letter (D: to Z:)" Margin="0,8,0,2" />
+                <ComboBox x:Name="DriveComboBox" DisplayMemberPath="Label">
+                    <ComboBox.ItemContainerStyle>
+                        <Style TargetType="ComboBoxItem">
+                            <!-- Taken letters are shown but not selectable: hiding them makes a
+                                 missing letter look like a bug, and the label says who has it. -->
+                            <Setter Property="IsEnabled" Value="{Binding IsAvailable}" />
+                        </Style>
+                    </ComboBox.ItemContainerStyle>
+                </ComboBox>
                 <TextBlock x:Name="DriveError" Style="{StaticResource FieldErrorStyle}" />
 
-                <TextBlock Text="Remote path" Margin="0,8,0,2" />
+                <TextBlock Text="Folder on the host to mount (e.g. /home/you)" Margin="0,8,0,2" />
                 <TextBox x:Name="RemotePathTextBox" />
                 <TextBlock x:Name="RemotePathError" Style="{StaticResource FieldErrorStyle}" />
 
-                <TextBlock Text="VFS cache mode (never weaker than 'writes' -- Invariant I6)" Margin="0,8,0,2" />
+                <TextBlock Text="Write caching" Margin="0,8,0,2" />
                 <ComboBox x:Name="VfsCacheModeComboBox" />
                 <TextBlock x:Name="VfsCacheModeError" Style="{StaticResource FieldErrorStyle}" />
 
-                <TextBlock Text="Network mode: always on (Invariant I7 -- not offerable as off)"
+                <TextBlock Text="Mounted as a network drive (always — Windows mishandles SFTP shown as a local disk)"
                            Margin="0,8,0,2" Foreground="Gray" FontSize="11" />
 
-                <TextBlock Text="Idle unmount seconds (0 = never)" Margin="0,8,0,2" />
+                <TextBlock Text="Unmount after idle, in seconds (0 = never; on-demand hosts only)" Margin="0,8,0,2" />
                 <TextBox x:Name="IdleUnmountSecondsTextBox" />
                 <TextBlock x:Name="IdleUnmountSecondsError" Style="{StaticResource FieldErrorStyle}" />
             </StackPanel>
@@ -93,8 +101,8 @@
             <Separator Margin="0,16,0,8" />
             <TextBlock Text="Session" FontWeight="Bold" Margin="0,0,0,4" />
 
-            <CheckBox x:Name="AutostartCheckBox" Content="Autostart a terminal session at login" Margin="0,4,0,0" />
-            <CheckBox x:Name="ReconnectCheckBox" Content="Reconnect on a dropped SSH connection" Margin="0,4,0,0" />
+            <CheckBox x:Name="AutostartCheckBox" Content="Open a terminal for this host at login" Margin="0,4,0,0" />
+            <CheckBox x:Name="ReconnectCheckBox" Content="Reconnect automatically if the SSH connection drops" Margin="0,4,0,0" />
             <CheckBox x:Name="TmuxCheckBox" Content="Attach to tmux" Margin="0,4,0,0" Checked="OnTmuxCheckedChanged" Unchecked="OnTmuxCheckedChanged" />
 
             <StackPanel x:Name="TmuxSessionPanel">
@@ -103,20 +111,41 @@
                 <TextBlock x:Name="TmuxSessionError" Style="{StaticResource FieldErrorStyle}" />
             </StackPanel>
 
-            <TextBlock Text="Tab colour (#RRGGBB)" Margin="0,8,0,2" />
-            <TextBox x:Name="TabColorTextBox" />
+            <TextBlock Text="Terminal tab color (pick one, or type any #RRGGBB)" Margin="0,8,0,2" />
+            <ItemsControl x:Name="TabColorPaletteItems" Margin="0,0,0,6">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Button Width="26" Height="26" Margin="0,0,4,4" Padding="0"
+                                Background="{Binding Swatch}" ToolTip="{Binding Name}"
+                                Tag="{Binding Hex}" Click="OnPaletteSwatchClick" />
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="28" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="TabColorSwatch" Grid.Column="0" Width="20" Height="20"
+                        BorderBrush="#888888" BorderThickness="1" Margin="0,0,8,0"
+                        HorizontalAlignment="Left" VerticalAlignment="Center" />
+                <TextBox x:Name="TabColorTextBox" Grid.Column="1" TextChanged="OnTabColorTextChanged" />
+            </Grid>
 
-            <TextBlock Text="Colour scheme" Margin="0,8,0,2" />
-            <TextBox x:Name="ColorSchemeTextBox" />
+            <TextBlock Text="Terminal color scheme" Margin="0,8,0,2" />
+            <ComboBox x:Name="ColorSchemeComboBox" IsEditable="True" />
 
             <Separator Margin="0,16,0,8" />
-            <TextBlock Text="Probe" FontWeight="Bold" Margin="0,0,0,4" />
+            <TextBlock Text="Health checks" FontWeight="Bold" Margin="0,0,0,4" />
 
-            <TextBlock Text="Interval seconds while idle (0 = never poll while idle)" Margin="0,4,0,2" />
+            <TextBlock Text="Check the host every N seconds while unmounted (0 = only when you ask)" Margin="0,4,0,2" />
             <TextBox x:Name="ProbeIntervalSecondsTextBox" />
             <TextBlock x:Name="ProbeIntervalSecondsError" Style="{StaticResource FieldErrorStyle}" />
 
-            <CheckBox x:Name="DeepProbeCheckBox" Content="Deep probe (verifies the SSH channel itself, not just TCP -- ADR-016)" Margin="0,8,0,0" />
+            <CheckBox x:Name="DeepProbeCheckBox" Content="Verify SFTP really works, not just that the host answers" Margin="0,8,0,0" />
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
                 <Button x:Name="CancelButton" Content="Cancel" Width="90" Margin="0,0,8,0" Click="OnCancelClick" IsCancel="True" />

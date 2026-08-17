@@ -1,7 +1,7 @@
 <Window x:Class="Bosun.UI.HostKeyPromptWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="New host" Width="420" SizeToContent="Height"
+        Title="New host — name it" Width="440" SizeToContent="Height"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Icon="pack://application:,,,/Assets/bosun.ico">
     <!--
@@ -12,12 +12,26 @@
         window.
     -->
     <StackPanel Margin="16">
-        <TextBlock TextWrapping="Wrap" Margin="0,0,0,8">
-            The key is the ~/.ssh/config Host alias Bosun's generated Terminal profile will run
-            (ssh &lt;key&gt;, ADR-013). A key with no matching Host block will fail to launch with
-            no explanation from Bosun.
+    <!--
+        NOT called "key" anywhere the user can see it. In an SSH tool "key" means a private key,
+        and this is a short name/identifier; the private key is a completely separate field on the
+        next screen. The word leaked out of the config file's own terminology (hosts.KEY in TOML)
+        into a UI where it reads as something else entirely, and it was read as a security key on
+        first use. The MODEL still calls it Key, which is right for TOML; only the label changes.
+    -->
+        <TextBlock TextWrapping="Wrap" Margin="0,0,0,4" FontWeight="Bold">
+            Short name for this host
+        </TextBlock>
+        <TextBlock TextWrapping="Wrap" Margin="0,0,0,8" Foreground="#555555" FontSize="11">
+            Lowercase, no spaces — e.g. "mediaserver". This is an identifier, not a security key;
+            the private key is the Identity file field on the next screen.
         </TextBlock>
         <TextBox x:Name="KeyTextBox" TextChanged="OnKeyTextChanged" />
+        <TextBlock TextWrapping="Wrap" Margin="0,6,0,0" Foreground="#555555" FontSize="11">
+            Bosun's Windows Terminal profile for this host runs "ssh &lt;this name&gt;", so it
+            should match a Host alias in ~/.ssh/config. The drive mount does not depend on that
+            file and will work either way — only the terminal profile needs it.
+        </TextBlock>
         <TextBlock x:Name="ErrorTextBlock" Foreground="#C0392B" FontSize="11" TextWrapping="Wrap"
                    Margin="0,4,0,0" Visibility="Collapsed" />
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">

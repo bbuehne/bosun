@@ -43,7 +43,7 @@
                 <DataGridTextColumn Header="Host" Binding="{Binding DisplayName}" Width="180" />
                 <DataGridTextColumn Header="State" Binding="{Binding State}" Width="110" />
                 <DataGridTextColumn Header="Drive" Binding="{Binding Drive}" Width="60" />
-                <DataGridTextColumn Header="Status" Binding="{Binding StatusText}" Width="*" />
+                <DataGridTextColumn Header="Details" Binding="{Binding StatusText}" Width="*" />
             </DataGrid.Columns>
         </DataGrid>
     </Grid>

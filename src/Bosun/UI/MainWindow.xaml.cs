@@ -48,6 +48,7 @@ public partial class MainWindow : Window, IAppWindow
     private HostEditorController? _hostEditorController;
     private IHostConfigStore? _hostConfigStore;
     private IIdentityFilePicker? _identityFilePicker;
+    private IDriveLetterInspector? _driveLetterInspector;
 
     public ILogger<MainWindow>? Logger { get; set; }
 
@@ -74,11 +75,15 @@ public partial class MainWindow : Window, IAppWindow
     /// <summary>Wires host create/edit/delete (bs-ww9.8, ADR-019). Separate from <see cref="Configure"/>
     /// rather than folded into it, to keep that method's existing signature/callers stable.</summary>
     public void ConfigureHostEditor(
-        HostEditorController hostEditorController, IHostConfigStore hostConfigStore, IIdentityFilePicker identityFilePicker)
+        HostEditorController hostEditorController,
+        IHostConfigStore hostConfigStore,
+        IIdentityFilePicker identityFilePicker,
+        IDriveLetterInspector driveLetterInspector)
     {
         _hostEditorController = hostEditorController;
         _hostConfigStore = hostConfigStore;
         _identityFilePicker = identityFilePicker;
+        _driveLetterInspector = driveLetterInspector;
     }
 
     private void OnAddHostClick(object sender, RoutedEventArgs e)
@@ -95,7 +100,14 @@ public partial class MainWindow : Window, IAppWindow
         }
 
         var form = _hostEditorController.CreateNewHostForm(prompt.HostKey);
-        new HostEditorWindow(_hostEditorController, _identityFilePicker, form) { Owner = this }.ShowDialog();
+        new HostEditorWindow(
+            _hostEditorController,
+            _identityFilePicker!,
+            HostEditorController.BuildDriveLetterOptions(
+                _hostConfigStore!.Current,
+                _driveLetterInspector!.InUseLetters(),
+                form.IsNewHost ? null : form.Key),
+            form) { Owner = this }.ShowDialog();
     }
 
     private void OpenEditHostDialog(string hostKey)
@@ -112,7 +124,14 @@ public partial class MainWindow : Window, IAppWindow
         }
 
         var form = HostEditorController.CreateEditForm(existing);
-        new HostEditorWindow(_hostEditorController, _identityFilePicker, form) { Owner = this }.ShowDialog();
+        new HostEditorWindow(
+            _hostEditorController,
+            _identityFilePicker!,
+            HostEditorController.BuildDriveLetterOptions(
+                _hostConfigStore!.Current,
+                _driveLetterInspector!.InUseLetters(),
+                form.IsNewHost ? null : form.Key),
+            form) { Owner = this }.ShowDialog();
     }
 
     private async void ConfirmAndDeleteHost(string hostKey, string displayName, bool isMounted)

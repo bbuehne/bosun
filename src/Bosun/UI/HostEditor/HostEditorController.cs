@@ -110,6 +110,107 @@ public sealed class HostEditorController
         DeepProbe = host.Probe.DeepProbe,
     };
 
+    /// <summary>
+    /// The color schemes Windows Terminal ships with, verified against Microsoft Learn's
+    /// "Included color schemes" list rather than recalled — Solarized, for instance, is commonly
+    /// assumed to be built in and is not.
+    /// </summary>
+    /// <remarks>
+    /// This list is deliberately NOT exhaustive of what the user has available, and the control
+    /// bound to it must stay editable. A scheme can also come from the user's own
+    /// <c>settings.json</c> or from another app's fragment (the WSL fragment ships "Ubuntu", for
+    /// example), and Invariant I5 forbids Bosun reading <c>settings.json</c> to find out. So this
+    /// offers the names that are always present and lets anything else be typed.
+    /// </remarks>
+    public static readonly IReadOnlyList<string> BuiltInColorSchemes =
+    [
+        "Campbell",
+        "Campbell Powershell",
+        "Vintage",
+        "One Half Dark",
+        "One Half Light",
+        "Tango Dark",
+        "Tango Light",
+    ];
+
+    /// <summary>
+    /// Builds the drive-letter choices for a host, marking letters that are already taken.
+    /// </summary>
+    /// <param name="config">Current configuration — used to find letters other hosts have claimed.</param>
+    /// <param name="inUseOnMachine">Bare uppercase letters currently mounted on this machine.</param>
+    /// <param name="editingHostKey">The host being edited, or <see langword="null"/> for a new
+    /// host. Its OWN letter must stay selectable: a mounted host's drive shows as in-use on the
+    /// machine precisely because that host is using it, and excluding it would make its current
+    /// setting unpickable — the field would silently reset the moment the user opened the form.</param>
+    /// <remarks>
+    /// Unavailable letters are listed and disabled rather than hidden, because a letter silently
+    /// missing from the list reads as a bug. Another Bosun host's claim is a hard conflict
+    /// (<see cref="ConfigValidator"/> rejects duplicate drives outright); a letter merely in use on
+    /// the machine is advisory, since it may be a USB stick that will be gone tomorrow.
+    /// </remarks>
+    public static IReadOnlyList<DriveLetterOption> BuildDriveLetterOptions(
+        BosunConfig config,
+        IReadOnlySet<string> inUseOnMachine,
+        string? editingHostKey)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(inUseOnMachine);
+
+        var claimedByOtherHost = config.Hosts.Values
+            .Where(h => editingHostKey is null || !string.Equals(h.Key, editingHostKey, StringComparison.Ordinal))
+            .Where(h => !string.IsNullOrWhiteSpace(h.Mount.Drive))
+            .ToDictionary(
+                h => h.Mount.Drive!.TrimEnd(':').ToUpperInvariant(),
+                h => h.DisplayName,
+                StringComparer.OrdinalIgnoreCase);
+
+        var ownLetter = editingHostKey is not null
+            && config.Hosts.TryGetValue(editingHostKey, out var own)
+            && !string.IsNullOrWhiteSpace(own.Mount.Drive)
+                ? own.Mount.Drive!.TrimEnd(':').ToUpperInvariant()
+                : null;
+
+        var options = new List<DriveLetterOption>();
+
+        foreach (var letter in "DEFGHIJKLMNOPQRSTUVWXYZ")
+        {
+            var bare = letter.ToString();
+            var drive = $"{letter}:";
+
+            if (claimedByOtherHost.TryGetValue(bare, out var otherHost))
+            {
+                options.Add(new DriveLetterOption
+                {
+                    Letter = drive,
+                    IsAvailable = false,
+                    Label = $"{drive}  — already used by {otherHost}",
+                });
+                continue;
+            }
+
+            if (string.Equals(bare, ownLetter, StringComparison.OrdinalIgnoreCase))
+            {
+                options.Add(new DriveLetterOption
+                {
+                    Letter = drive,
+                    IsAvailable = true,
+                    Label = $"{drive}  — this host's current drive",
+                });
+                continue;
+            }
+
+            var busy = inUseOnMachine.Contains(bare);
+            options.Add(new DriveLetterOption
+            {
+                Letter = drive,
+                IsAvailable = !busy,
+                Label = busy ? $"{drive}  — in use on this PC" : drive,
+            });
+        }
+
+        return options;
+    }
+
     /// <summary>Whether the mount-detail fields (drive, remote path, vfs cache mode, idle
     /// unmount) should be enabled -- mirrors <see cref="ConfigValidator"/>'s own "required when
     /// mode != none" rule, so the form never lets you fill in fields a <c>none</c>-mode host would
@@ -133,7 +234,9 @@ public sealed class HostEditorController
         {
             errors.Add(new HostFormValidationError(
                 HostFormFieldId.Key,
-                "Key is required. This is the ~/.ssh/config Host alias the generated Terminal profile runs (ADR-013) -- a key with no matching Host block will fail to launch with no explanation from Bosun."));
+                "A short name is required -- an identifier for this host, not a security key. "
+                + "Bosun's Terminal profile runs \"ssh <this name>\", so it should match a Host alias in "
+                + "~/.ssh/config; the drive mount works either way."));
         }
 
         var displayName = model.DisplayName.Trim();
