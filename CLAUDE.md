@@ -73,15 +73,30 @@ Markdown task lists are forbidden; do not create a `TODO.md`, a `PLAN.md`, or a
 - When you finish a unit of work, close its issue and commit
   `.beads/issues.jsonl` so the issue graph lands in git alongside the code.
   **If it conflicts on a merge, do not hand-merge it.** It is a generated export
-  of the Dolt database, which is the source of truth — take either side and run
-  `bd export`, which rewrites it authoritatively. `.beads/interactions.jsonl` is
-  an audit trail and is gitignored for the same reason.
-  `export.auto` is enabled, so bd refreshes that file after write commands
-  (throttled); `bd export` forces it immediately. There is **no `bd sync`
-  command** — it shipped only in the withdrawn v1.2.0/v1.2.1 releases, and
-  v1.2.2 is a re-release of the 1.1 line that deliberately excludes it. The
-  Dolt database in `.beads/embeddeddolt/` is gitignored, so without that commit
-  the issue graph does not survive a clone.
+  of the Dolt database, which is the source of truth — take either side and
+  regenerate it. `.beads/interactions.jsonl` is an audit trail and is gitignored
+  for the same reason.
+
+  **`bd export` writes to STDOUT. It does not touch the file.** Forcing a
+  refresh requires the output flag:
+
+  ```
+  bd export -o .beads/issues.jsonl        # correct — rewrites the file
+  bd export                               # prints to stdout, file unchanged
+  ```
+
+  This bites silently. `export.auto` is enabled, so bd refreshes the file after
+  write commands on a *throttle* — which means a bare `bd export` appears to
+  work, because the file is usually roughly current for unrelated reasons. It
+  is not a substitute. Verify rather than assume: `bd stats` reports the total
+  issue count, and the export is one line per issue, so the line count of
+  `.beads/issues.jsonl` must equal it. If it does not, issues you filed are not
+  in git.
+
+  There is **no `bd sync` command** — it shipped only in the withdrawn
+  v1.2.0/v1.2.1 releases, and v1.2.2 is a re-release of the 1.1 line that
+  deliberately excludes it. The Dolt database in `.beads/embeddeddolt/` is
+  gitignored, so without that commit the issue graph does not survive a clone.
 
 **Do not assume `bd` flag syntax from this document.** Beads is under active
 development. Run `bd quickstart` and `bd --help` and use the syntax the installed
