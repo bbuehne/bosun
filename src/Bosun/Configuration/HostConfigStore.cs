@@ -31,6 +31,12 @@ public sealed class HostConfigStore : IHostConfigStore, IDisposable
     private ITimer? _pendingTimer;
     private bool _disposed;
 
+    // Set by AdoptSelfWrite immediately after HostConfigWriter atomically writes this store's
+    // file; consumed (and cleared) by the first AttemptReload whose freshly-read text matches it
+    // exactly. See AdoptSelfWrite's remarks -- this is what makes the self-write hazard (ADR-019)
+    // a text comparison, never a timing assumption.
+    private string? _pendingSelfWriteText;
+
     public event EventHandler<ConfigChangedEventArgs>? ConfigChanged;
     public event EventHandler<ConfigReloadFailedEventArgs>? ConfigReloadFailed;
 
@@ -139,6 +145,54 @@ public sealed class HostConfigStore : IHostConfigStore, IDisposable
         }
     }
 
+    /// <summary>
+    /// Called by <see cref="HostConfigWriter"/> immediately after it atomically writes
+    /// <paramref name="writtenText"/> to the file this store watches (bs-ww9.8, ADR-019: "Bosun's
+    /// own write must not be reprocessed as an external change"). Two things happen here,
+    /// together and synchronously, so neither depends on the debounce timer's timing:
+    /// </summary>
+    /// <remarks>
+    /// <list type="number">
+    /// <item><see cref="Current"/> becomes <paramref name="config"/> immediately, and
+    /// <see cref="ConfigChanged"/> fires exactly once, right here. A caller that just awaited
+    /// <c>IHostConfigWriter.SaveHostAsync</c>/<c>DeleteHostAsync</c> and re-reads
+    /// <see cref="Current"/> sees the change without waiting out
+    /// <see cref="HostConfigStoreOptions.DebounceDelay"/> for the watcher to catch up.</item>
+    /// <item>The store is armed to recognize the watcher's own eventual notice of this exact
+    /// write. <see cref="AttemptReload"/> compares the raw text it reads against
+    /// <paramref name="writtenText"/> -- a TEXT comparison, not a timing one: whichever reload
+    /// next reads content equal to <paramref name="writtenText"/> (on any real
+    /// <see cref="FileSystemWatcher"/>, this could be the very next event or, if the OS coalesces
+    /// notifications, several events later) is treated as already-applied and silently skipped --
+    /// no re-parse, no re-validate, no second <see cref="ConfigChanged"/>. Content that differs (a
+    /// genuine external edit racing this write, or a later legitimate change) is processed
+    /// normally, exactly as any other reload. The armed text is consumed on its first match, so it
+    /// never suppresses a later, unrelated change that happens to be re-armed by a subsequent
+    /// self-write.</item>
+    /// </list>
+    /// <paramref name="config"/> is trusted to already be <see cref="ConfigValidator"/>-clean --
+    /// <see cref="HostConfigWriter"/> validates before ever writing a byte -- so this method does
+    /// not validate again.
+    /// </remarks>
+    internal void AdoptSelfWrite(BosunConfig config, string writtenText)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(writtenText);
+
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _current = config;
+            _pendingSelfWriteText = writtenText;
+        }
+
+        ConfigChanged?.Invoke(this, new ConfigChangedEventArgs(config));
+    }
+
     private void OnFileChanged()
     {
         lock (_gate)
@@ -171,6 +225,26 @@ public sealed class HostConfigStore : IHostConfigStore, IDisposable
         {
             RetryOrSurface(attempt, ["file could not be read (locked or mid-write)"]);
             return;
+        }
+
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            // AdoptSelfWrite armed this with the exact text HostConfigWriter just wrote. An exact
+            // match means the watcher is only now catching up to a write this store already
+            // adopted synchronously -- consume the arming and stop, rather than re-parsing,
+            // re-validating and re-firing ConfigChanged for a change that already happened. Text
+            // that does NOT match (an external edit) falls through to the normal path below,
+            // exactly like any other reload.
+            if (_pendingSelfWriteText is not null && string.Equals(text, _pendingSelfWriteText, StringComparison.Ordinal))
+            {
+                _pendingSelfWriteText = null;
+                return;
+            }
         }
 
         // A editor's truncate-then-write can be observed as an empty file mid-save. That is

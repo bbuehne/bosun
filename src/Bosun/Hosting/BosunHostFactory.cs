@@ -89,11 +89,21 @@ public static class BosunHostFactory
         // CreateHost_ResolvesTheServicesTheApplicationActuallyUses).
         builder.Services.AddSingleton(TimeProvider.System);
 
-        builder.Services.AddSingleton<IHostConfigStore>(sp => HostConfigStore.Load(
+        // Registered as both its concrete type and the interface (same pattern as MountSupervisor
+        // below): HostConfigWriter (bs-ww9.8, ADR-019) needs the concrete HostConfigStore to
+        // coordinate the self-write hazard via its internal AdoptSelfWrite -- see that class's
+        // remarks for why this could not be expressed through IHostConfigStore without forcing
+        // every existing fake of that interface (including ones under tests/.../Independent/) to
+        // grow a new member.
+        builder.Services.AddSingleton(sp => HostConfigStore.Load(
             path: options.ConfigPath,
             reader: new FileConfigReader(),
             watcher: new FileSystemConfigWatcher(options.ConfigPath),
             timeProvider: TimeProvider.System));
+        builder.Services.AddSingleton<IHostConfigStore>(sp => sp.GetRequiredService<HostConfigStore>());
+        builder.Services.AddSingleton<IHostConfigWriter>(sp => new HostConfigWriter(
+            options.ConfigPath,
+            sp.GetRequiredService<HostConfigStore>()));
 
         // E8 (bs-gme/bs-8dr/bs-8je): all Windows interop stays behind ISessionMonitor. Every
         // constructor here is inert -- no process enumeration, no CIM, no P/Invoke call happens
