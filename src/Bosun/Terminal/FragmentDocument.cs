@@ -45,6 +45,12 @@ public sealed record FragmentProfile
     [JsonPropertyName("startingDirectory")]
     public required string StartingDirectory { get; init; }
 
+    /// <summary>Deliberately never populated (bs-9fs). Per-host icons were considered and
+    /// declined: tab colour already differentiates hosts, and CLAUDE.md §5 says not to add
+    /// options this tool's one user has not asked for. Kept on the model because it is part of
+    /// Terminal's profile schema and omitting it from the type would be a lie about the format
+    /// rather than about Bosun; the serialiser drops it when null, so nothing is emitted.
+    /// Terminal accepts either a file path or an emoji here if this is ever revisited.</summary>
     [JsonPropertyName("icon")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Icon { get; init; }

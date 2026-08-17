@@ -72,9 +72,11 @@ Dependency notation: `E3 ← E2` means E3 is blocked by E2.
 ## E7 — Windows Terminal fragment writer ← E2
 
 - Verify the current fragment directory for Store vs unpackaged Terminal against
-  Microsoft documentation before implementing
+  Microsoft documentation before implementing — done, recorded in ADR-006's
+  amendment
 - Serialise host list to fragment schema: name, commandline, colour scheme, tab
-  colour, icon
+  colour. **Not icon** — declined (`bs-9fs`); tab colour already differentiates
+  hosts and no config field exists for it
 - tmux variant: `ssh -t <host> tmux new -A -s <session>`
 - Optional reconnect wrapper script generation
 - Rewrite on config change; never touch `settings.json`
