@@ -6,7 +6,19 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>Bosun</RootNamespace>
     <AssemblyName>Bosun</AssemblyName>
+
+    <!--
+      The exe's own icon: Explorer, Alt-Tab, the taskbar button, and the Start menu. Built from
+      assets/bosun-icon-source.png by scripts/build-icon.ps1, which explains why the mark changes
+      below 48px and why it sits on a navy square rather than being transparent.
+    -->
+    <ApplicationIcon>..\..\assets\bosun.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Same file again as a WPF resource, so MainWindow can set Icon= from it. -->
+    <Resource Include="..\..\assets\bosun.ico" Link="Assets\bosun.ico" />
+  </ItemGroup>
 
   <!--
     Publish shape (E10). Kept HERE rather than only on release.yml's command line so that a local
