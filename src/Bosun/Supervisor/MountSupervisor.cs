@@ -210,6 +210,21 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         /// <see cref="TryBeginMountAsync"/>.</summary>
         public BackoffState MountRetryBackoff = BackoffState.Initial;
 
+        /// <summary>Consecutive mount-ATTEMPT failures (bs-ww9.4) -- incremented alongside
+        /// <see cref="MountRetryBackoff"/>.<c>RecordFailure()</c> at both failure sites in
+        /// <see cref="TryBeginMountAsync"/> (deep probe failure, <c>mount/mount</c> failure), and
+        /// reset to zero in the exact same place <see cref="MountRetryBackoff"/> resets to
+        /// <see cref="BackoffState.Initial"/> -- a successful mount. Surfaced on
+        /// <see cref="HostMountSnapshot.ConsecutiveMountFailures"/> so a host that answers TCP fine
+        /// but cannot be mounted is no longer invisible to the UI (see that property's remarks).</summary>
+        public int ConsecutiveMountFailures;
+
+        /// <summary>The reason the most recent mount attempt failed (bs-ww9.4), set alongside
+        /// <see cref="ConsecutiveMountFailures"/> at the same two failure sites, and cleared back to
+        /// <see langword="null"/> at the same successful-mount reset. Surfaced verbatim on
+        /// <see cref="HostMountSnapshot.LastMountFailureReason"/>.</summary>
+        public string? LastMountFailureReason;
+
         /// <summary>True once an explicit user unmount (<see cref="RequestUnmountAsync"/>) has
         /// completed its drain. Suppresses the persistent tier's auto-mount-on-Ready
         /// (<see cref="OnEnteredReadyAsync"/>) until an explicit user mount request clears it
@@ -330,6 +345,8 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 LastTransitionTrigger = h.LastTransitionTrigger,
                 UserParked = h.UserParked,
                 MountUnavailableReason = mountingAvailability.IsAvailable ? null : mountingAvailability.Reason,
+                ConsecutiveMountFailures = h.ConsecutiveMountFailures,
+                LastMountFailureReason = h.LastMountFailureReason,
             })
             .ToList();
 
@@ -915,7 +932,10 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 "than mounting (Invariant I1 -- deep probe failure never reaches Mounted)",
                 host.Key, deep.Outcome, deep.Detail);
             host.MountRetryBackoff = host.MountRetryBackoff.RecordFailure();
-            await BeginDrainAsync(host, $"deep probe failed entering Mounting: {deep.Outcome}", DrainCause.MountFailure, ct)
+            var deepProbeFailureReason = $"deep probe failed entering Mounting: {deep.Outcome}";
+            host.ConsecutiveMountFailures++;
+            host.LastMountFailureReason = deepProbeFailureReason;
+            await BeginDrainAsync(host, deepProbeFailureReason, DrainCause.MountFailure, ct)
                 .ConfigureAwait(false);
             return;
         }
@@ -933,13 +953,18 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         {
             logger.LogError(ex, "mount/mount failed for {HostKey} at {Drive}", host.Key, drive);
             host.MountRetryBackoff = host.MountRetryBackoff.RecordFailure();
-            await BeginDrainAsync(host, $"mount/mount failed: {ex.Message}", DrainCause.MountFailure, ct).ConfigureAwait(false);
+            var mountFailureReason = $"mount/mount failed: {ex.Message}";
+            host.ConsecutiveMountFailures++;
+            host.LastMountFailureReason = mountFailureReason;
+            await BeginDrainAsync(host, mountFailureReason, DrainCause.MountFailure, ct).ConfigureAwait(false);
             return;
         }
 
         host.ConsecutiveMountedFailures = 0;
         host.ConsecutiveDeepProbeFailures = 0;
         host.MountRetryBackoff = BackoffState.Initial;
+        host.ConsecutiveMountFailures = 0;
+        host.LastMountFailureReason = null;
         SetState(host, MountState.Mounted, "mount/mount succeeded");
         ArmMountedProbeTimer(host);
         ArmMountedDeepProbeTimer(host);
