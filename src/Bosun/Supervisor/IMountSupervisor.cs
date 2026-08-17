@@ -45,6 +45,25 @@ public interface IMountSupervisor
     IReadOnlyList<HostMountSnapshot> GetSnapshot();
 
     /// <summary>
+    /// A point-in-time, read-only, <b>newest-first</b> copy of the supervisor's bounded in-memory
+    /// transition history (bs-ww9.2, ADR-018 -- "why a window at all": the transition log is one
+    /// of the two moments the window exists for). Same read-only seam and thread-safety discipline
+    /// as <see cref="GetSnapshot"/> -- never mutate through this, and see
+    /// <c>MountSupervisor.transitionHistory</c>'s remarks for why it is safe to call from any
+    /// thread without going through the supervisor's serialised channel.
+    /// </summary>
+    /// <remarks>
+    /// Bounded, deliberately (see <c>MountSupervisor.TransitionHistoryCapacity</c>): this is NOT
+    /// the complete record. Once the capacity is exceeded, the oldest entries fall off and are
+    /// gone from this method's view forever -- the rolling Serilog file
+    /// (docs/OPERATIONS.md "Logs") remains the complete, durable history. This exists only so the
+    /// window can answer "what happened while I was asleep" without the UI ever parsing Bosun's
+    /// own log files (which would couple it to a format written for humans and show nothing until
+    /// a file flushes).
+    /// </remarks>
+    IReadOnlyList<MountTransitionEntry> GetTransitionHistory();
+
+    /// <summary>
     /// User- or persistent-tier-triggered mount request. No-op (logged) unless the host is
     /// currently <see cref="MountState.Ready"/> or <see cref="MountState.Unreachable"/> -- Invariant
     /// I1, docs/ARCHITECTURE.md §4 rule 1: nothing here bypasses "Mounting only from Ready".
@@ -161,4 +180,22 @@ public sealed record HostMountSnapshot
     /// about this particular host's own reachability; see <see cref="MountingAvailability"/>.
     /// </summary>
     public string? MountUnavailableReason { get; init; }
+}
+
+/// <summary>
+/// One immutable entry in the bounded in-memory transition history
+/// (<see cref="IMountSupervisor.GetTransitionHistory"/>, bs-ww9.2). All five fields are captured
+/// verbatim from what <c>MountSupervisor.SetState</c> already computes for its own log line --
+/// nothing here is derived or inferred.
+/// </summary>
+public sealed record MountTransitionEntry
+{
+    /// <summary>From the supervisor's injected <see cref="TimeProvider"/>, never wall-clock time
+    /// directly -- keeps this deterministic under test.</summary>
+    public required DateTimeOffset TimestampUtc { get; init; }
+
+    public required string HostKey { get; init; }
+    public required MountState From { get; init; }
+    public required MountState To { get; init; }
+    public required string Trigger { get; init; }
 }

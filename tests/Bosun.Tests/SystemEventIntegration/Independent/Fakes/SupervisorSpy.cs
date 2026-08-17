@@ -94,6 +94,12 @@ internal sealed class SupervisorSpy : IMountSupervisor
         return [];
     }
 
+    public IReadOnlyList<MountTransitionEntry> GetTransitionHistory()
+    {
+        Calls.Add(nameof(GetTransitionHistory));
+        return [];
+    }
+
     public Task RequestMountAsync(string hostKey, CancellationToken cancellationToken = default)
     {
         Calls.Add(nameof(RequestMountAsync));
