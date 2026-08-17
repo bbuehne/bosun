@@ -40,6 +40,9 @@ internal sealed class GlobalConfigRaw
     [TomlPropertyName("mounted_probe_interval_seconds")]
     public int? MountedProbeIntervalSeconds { get; set; }
 
+    [TomlPropertyName("mounted_deep_probe_interval_seconds")]
+    public int? MountedDeepProbeIntervalSeconds { get; set; }
+
     [TomlPropertyName("suspend_unmount_timeout_seconds")]
     public int? SuspendUnmountTimeoutSeconds { get; set; }
 

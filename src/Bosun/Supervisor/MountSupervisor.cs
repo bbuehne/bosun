@@ -178,7 +178,29 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         public bool UserParked;
 
         public int ConsecutiveMountedFailures;
+
+        /// <summary>Consecutive DEEP-probe failures while <see cref="MountState.Mounted"/> (bs-2eg
+        /// / ADR-016). Deliberately a separate counter from <see cref="ConsecutiveMountedFailures"/>
+        /// -- see the remarks on <see cref="HandleMountedDeepProbeDueAsync"/> for why sharing one
+        /// counter between the two independently-timed probes is an order-dependent race, not a
+        /// simplification. Reset to zero by a deep-probe success, and whenever the host leaves
+        /// <c>Mounted</c> (<see cref="CompleteDrainAsync"/>, mirroring
+        /// <see cref="ConsecutiveMountedFailures"/>'s own reset) so a fresh mount never starts life
+        /// partway toward the threshold.</summary>
+        public int ConsecutiveDeepProbeFailures;
         public ITimer? ProbeTimer;
+
+        /// <summary>The recurring DEEP probe while <see cref="MountState.Mounted"/> (bs-2eg /
+        /// ADR-016). Deliberately a SEPARATE timer field from <see cref="ProbeTimer"/> -- unlike
+        /// every other use of <see cref="ProbeTimer"/> (idle probe, mounted shallow probe, drain
+        /// retry, mount retry), which are mutually exclusive across states and safely share one
+        /// field, the mounted deep probe runs CONCURRENTLY with the mounted shallow probe on its
+        /// own independent cadence (<see cref="GlobalConfig.MountedDeepProbeIntervalSeconds"/>).
+        /// Armed alongside <see cref="ProbeTimer"/> everywhere a host lands in <c>Mounted</c>
+        /// (<see cref="TryBeginMountAsync"/>, <see cref="AdoptOrClearExistingMountsAsync"/>);
+        /// disposed alongside it everywhere a host leaves <c>Mounted</c>
+        /// (<see cref="BeginDrainAsync"/>, <see cref="StopAsync"/>, <see cref="DisposeAsync"/>).</summary>
+        public ITimer? DeepProbeTimer;
         public ITimer? IdleUnmountTimer;
         public DateTimeOffset? DrainStartedUtc;
         public bool DrainEscalated;
@@ -241,6 +263,8 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         {
             host.ProbeTimer?.Dispose();
             host.ProbeTimer = null;
+            host.DeepProbeTimer?.Dispose();
+            host.DeepProbeTimer = null;
             host.IdleUnmountTimer?.Dispose();
             host.IdleUnmountTimer = null;
         }
@@ -258,6 +282,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 Drive = h.Config.Mount.Drive,
                 AdministrativelyEnabled = h.AdministrativelyEnabled,
                 ConsecutiveMountedFailures = h.ConsecutiveMountedFailures,
+                ConsecutiveDeepProbeFailures = h.ConsecutiveDeepProbeFailures,
                 ConsecutiveIdleFailures = h.Backoff.ConsecutiveFailures,
                 LastTransitionUtc = h.LastTransitionUtc,
                 LastTransitionTrigger = h.LastTransitionTrigger,
@@ -479,6 +504,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         foreach (var host in hosts.Values)
         {
             host.ProbeTimer?.Dispose();
+            host.DeepProbeTimer?.Dispose();
             host.IdleUnmountTimer?.Dispose();
         }
 
@@ -799,9 +825,11 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         }
 
         host.ConsecutiveMountedFailures = 0;
+        host.ConsecutiveDeepProbeFailures = 0;
         host.MountRetryBackoff = BackoffState.Initial;
         SetState(host, MountState.Mounted, "mount/mount succeeded");
         ArmMountedProbeTimer(host);
+        ArmMountedDeepProbeTimer(host);
         ArmIdleUnmountTimer(host);
     }
 
@@ -852,6 +880,97 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         host.ProbeTimer = CreateOneShotTimer(
             TimeSpan.FromSeconds(seconds),
             () => Enqueue(ct => HandleMountedProbeDueAsync(host, "periodic mounted probe", ct)));
+    }
+
+    /// <summary>Hardcoded, not config-driven (docs/CONFIG-SCHEMA.md's validation-audit principle
+    /// applies only to VALUES fed a safety decision from config -- this is an internal tuning
+    /// constant, same category as <see cref="DrainRetryInterval"/>/<see cref="ReconciliationInterval"/>
+    /// above). See ADR-016's "Reasoning for a fixed threshold of 2, not 1 and not
+    /// <c>failures_before_unmount</c>" for why this is neither.</summary>
+    private const int MountedDeepProbeFailureThreshold = 2;
+
+    /// <summary>
+    /// bs-2eg / ADR-016: the recurring DEEP probe for a host in <c>Mounted</c>, on its own
+    /// slower cadence (<c>global.mounted_deep_probe_interval_seconds</c>), alongside -- never
+    /// instead of -- <see cref="HandleMountedProbeDueAsync"/>'s shallow probe. Exists because a
+    /// shallow (TCP) probe continuing to succeed is not evidence the mount is alive: the SSH
+    /// channel underneath a mount can die while the TCP-level host stays reachable (sleep/resume,
+    /// a network blip too brief to trip the shallow-failure threshold but long enough to kill the
+    /// channel) -- see docs/DECISIONS.md ADR-016 for the two scenarios this closes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately uses its OWN counter (<see cref="HostRuntime.ConsecutiveDeepProbeFailures"/>),
+    /// never <see cref="HostRuntime.ConsecutiveMountedFailures"/> (the shallow probe's counter).
+    /// An earlier version of this method shared the counter -- a deep-probe success reset it, a
+    /// deep-probe failure jumped it straight to <see cref="EffectiveFailuresBeforeUnmount"/> -- and
+    /// that version broke <c>Independent/FailureAccountingTests</c>: with the shipped defaults
+    /// (60s shallow / 300s deep, an exact 5:1 multiple), the deep timer and the 5th consecutive
+    /// shallow-failure tick land on the SAME instant on every cycle, and depending on which of the
+    /// two same-instant channel continuations happened to run first, a coincidentally-successful
+    /// deep probe could silently erase a shallow-failure streak one tick before it reached
+    /// threshold -- an order-dependent race, not a one-off test artefact, since both timers are
+    /// armed from the same instant every time a host enters <c>Mounted</c> and the default interval
+    /// ratio guarantees recurring exact coincidence. A fully separate counter makes the two probes'
+    /// bookkeeping structurally independent, so no interleaving of the two timers' channel
+    /// continuations can affect the other probe's count -- "exactly N consecutive SHALLOW failures
+    /// unmounts" (the invariant <c>Independent/FailureAccountingTests</c> pins) now holds
+    /// unconditionally, regardless of what the deep probe is doing at the same instant.
+    /// </para>
+    /// <para>
+    /// A failed deep probe is deliberately NOT weighted as one shallow-probe-equivalent failure: it
+    /// needs only <see cref="MountedDeepProbeFailureThreshold"/> (2) consecutive failures, a fixed
+    /// constant independent of the configurable <c>failures_before_unmount</c> ladder, not
+    /// <see cref="EffectiveFailuresBeforeUnmount"/>'s (often larger, e.g. the default 3) value --
+    /// see ADR-016. A successful deep probe resets ITS OWN counter to zero, exactly as a shallow
+    /// success resets the shallow counter, so a single transient loopback-HTTP hiccup against
+    /// <c>rclone rcd</c> does not, by itself, drain a genuinely healthy mount.
+    /// </para>
+    /// </remarks>
+    private async Task HandleMountedDeepProbeDueAsync(HostRuntime host, string trigger, CancellationToken ct)
+    {
+        if (host.State != MountState.Mounted)
+        {
+            // Stale timer: state moved on (drained, or the host was suspended) before this fired.
+            return;
+        }
+
+        var result = await probe.ProbeDeepAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
+
+        if (result.Outcome == DeepProbeOutcome.Success)
+        {
+            host.ConsecutiveDeepProbeFailures = 0;
+        }
+        else
+        {
+            host.ConsecutiveDeepProbeFailures++;
+            logger.LogWarning(
+                "Deep probe failed for mounted host {HostKey} ({Outcome}: {Detail}): {Failures}/{Threshold} " +
+                "consecutive deep-probe failures -- shallow TCP probes may still be succeeding, but the SSH " +
+                "channel underneath the mount is what the deep probe actually verifies (ADR-016)",
+                host.Key, result.Outcome, result.Detail, host.ConsecutiveDeepProbeFailures, MountedDeepProbeFailureThreshold);
+
+            if (host.ConsecutiveDeepProbeFailures >= MountedDeepProbeFailureThreshold)
+            {
+                await BeginDrainAsync(
+                    host,
+                    $"{host.ConsecutiveDeepProbeFailures} consecutive deep-probe failures while mounted " +
+                    $"(threshold {MountedDeepProbeFailureThreshold}): SSH channel confirmed dead (ADR-016)",
+                    DrainCause.Automatic,
+                    ct).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        ArmMountedDeepProbeTimer(host);
+    }
+
+    private void ArmMountedDeepProbeTimer(HostRuntime host)
+    {
+        host.DeepProbeTimer?.Dispose();
+        host.DeepProbeTimer = CreateOneShotTimer(
+            TimeSpan.FromSeconds(global.MountedDeepProbeIntervalSeconds),
+            () => Enqueue(ct => HandleMountedDeepProbeDueAsync(host, "periodic mounted deep probe", ct)));
     }
 
     /// <summary>ADR-011's formula, exactly. <c>interval_seconds == 0</c> -- the documented
@@ -953,6 +1072,8 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
         host.ProbeTimer?.Dispose();
         host.ProbeTimer = null;
+        host.DeepProbeTimer?.Dispose();
+        host.DeepProbeTimer = null;
         host.IdleUnmountTimer?.Dispose();
         host.IdleUnmountTimer = null;
 
@@ -1093,6 +1214,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         host.ProbeTimer?.Dispose();
         host.ProbeTimer = null;
         host.ConsecutiveMountedFailures = 0;
+        host.ConsecutiveDeepProbeFailures = 0;
 
         if (host.DrainCause == DrainCause.UserUnmount)
         {
@@ -1220,7 +1342,9 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 host.LastTransitionUtc = timeProvider.GetUtcNow();
                 host.LastTransitionTrigger = "startup: adopted existing mount";
                 host.ConsecutiveMountedFailures = 0;
+                host.ConsecutiveDeepProbeFailures = 0;
                 ArmMountedProbeTimer(host);
+                ArmMountedDeepProbeTimer(host);
                 ArmIdleUnmountTimer(host);
             }
             else

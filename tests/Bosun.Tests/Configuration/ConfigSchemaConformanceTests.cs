@@ -130,6 +130,44 @@ public sealed class ConfigSchemaConformanceTests
         Assert.Equal("invalid-mounted-probe-interval", error.Rule);
     }
 
+    // -- bs-2eg / ADR-016: the deep-probe cadence, end to end ---------------------------------
+
+    /// <summary>ADR-016's absent case, mirroring the ADR-011 test above: an absent
+    /// <c>mounted_deep_probe_interval_seconds</c> defaults to <c>300</c> and is not an error.</summary>
+    [Fact]
+    public void Toml_MountedDeepProbeIntervalAbsent_IsValidAndDefaultsToThreeHundred()
+    {
+        var toml = """
+            [global]
+            rclone_rc_port = 5572
+
+            """ + Host("remote", probeInterval: 0);
+
+        var config = ConfigParser.Parse(toml);
+
+        Assert.Equal(300, config.Global.MountedDeepProbeIntervalSeconds);
+        Assert.Empty(ConfigValidator.Validate(config, AlwaysExists).Errors);
+    }
+
+    /// <summary>ADR-016's other half, mirroring the ADR-011 test above: an explicit
+    /// <c>mounted_deep_probe_interval_seconds = 0</c> must be rejected, not silently defaulted --
+    /// only an end-to-end test catches a binder that conflates "absent" with "explicit zero".</summary>
+    [Fact]
+    public void Toml_ExplicitZeroMountedDeepProbeInterval_IsRejectedAndNotSilentlyDefaultedToThreeHundred()
+    {
+        var toml = """
+            [global]
+            mounted_deep_probe_interval_seconds = 0
+
+            """ + Host("nas", probeInterval: 60);
+
+        var config = ConfigParser.Parse(toml);
+
+        Assert.Equal(0, config.Global.MountedDeepProbeIntervalSeconds);
+        var error = Assert.Single(ConfigValidator.Validate(config, AlwaysExists).Errors);
+        Assert.Equal("invalid-mounted-deep-probe-interval", error.Rule);
+    }
+
     /// <summary>
     /// ADR-008's zero, end to end and in both directions: <c>probe.interval_seconds = 0</c> is
     /// the documented on-demand default and must survive binding as <c>0</c> and validate, while

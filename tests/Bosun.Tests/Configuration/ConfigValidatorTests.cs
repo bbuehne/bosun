@@ -291,6 +291,42 @@ public sealed class ConfigValidatorTests
         Assert.True(result.IsValid);
     }
 
+    // -- bs-2eg / ADR-016: global.mounted_deep_probe_interval_seconds ------------------------
+
+    [Fact]
+    public void Validate_MountedDeepProbeIntervalSecondsZero_IsRejected()
+    {
+        var config = Build(h => h, global => global with { MountedDeepProbeIntervalSeconds = 0 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-mounted-deep-probe-interval", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_MountedDeepProbeIntervalSecondsNegative_IsRejected()
+    {
+        var config = Build(h => h, global => global with { MountedDeepProbeIntervalSeconds = -300 });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-mounted-deep-probe-interval", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_MountedDeepProbeIntervalSecondsAtDefault_IsAccepted()
+    {
+        // ADR-016: absent-at-parse-time already became 300 (bs-0na); the validator must not
+        // re-reject the default it was just handed.
+        var config = Build(h => h, global => global with { MountedDeepProbeIntervalSeconds = GlobalConfig.DefaultMountedDeepProbeIntervalSeconds });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid);
+    }
+
     // -- bs-z3y: global.failures_before_unmount ----------------------------------------------
 
     [Fact]

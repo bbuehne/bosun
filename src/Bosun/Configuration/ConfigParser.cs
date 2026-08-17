@@ -67,6 +67,7 @@ public static class ConfigParser
         // empty ladder; only a wholly absent key falls back to the documented default.
         BackoffSeconds = raw?.BackoffSeconds is { } list ? list.AsReadOnly() : GlobalConfig.DefaultBackoffSeconds,
         MountedProbeIntervalSeconds = raw?.MountedProbeIntervalSeconds ?? GlobalConfig.DefaultMountedProbeIntervalSeconds,
+        MountedDeepProbeIntervalSeconds = raw?.MountedDeepProbeIntervalSeconds ?? GlobalConfig.DefaultMountedDeepProbeIntervalSeconds,
         SuspendUnmountTimeoutSeconds = raw?.SuspendUnmountTimeoutSeconds ?? GlobalConfig.DefaultSuspendUnmountTimeoutSeconds,
         StartWithWindows = raw?.StartWithWindows ?? GlobalConfig.DefaultStartWithWindows,
     };

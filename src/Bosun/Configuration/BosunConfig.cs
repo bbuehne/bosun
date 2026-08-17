@@ -32,6 +32,7 @@ public sealed record GlobalConfig
     public const int DefaultProbeTimeoutSeconds = 5;
     public const int DefaultFailuresBeforeUnmount = 3;
     public const int DefaultMountedProbeIntervalSeconds = 60; // ADR-011
+    public const int DefaultMountedDeepProbeIntervalSeconds = 300; // ADR-016 (bs-2eg)
     public const int DefaultSuspendUnmountTimeoutSeconds = 8;
     public const bool DefaultStartWithWindows = true;
 
@@ -47,6 +48,22 @@ public sealed record GlobalConfig
     /// TOML is NOT an error — it defaults to 60 (ADR-011). Zero/negative is rejected, but
     /// only by <see cref="ConfigValidator"/>; this type accepts whatever was bound.</summary>
     public int MountedProbeIntervalSeconds { get; init; } = DefaultMountedProbeIntervalSeconds;
+
+    /// <summary>Cadence of the periodic DEEP probe (<c>operations/list</c>, via
+    /// <see cref="Probe.IProbe.ProbeDeepAsync"/>) run for every host in <c>Mounted</c>, on top of
+    /// (never instead of) the shallow probe governed by <see cref="MountedProbeIntervalSeconds"/>
+    /// (bs-2eg / ADR-016). A shallow TCP probe proves only that the host's port answers — it
+    /// cannot detect a mount whose underlying SSH channel died while the TCP-level host stayed
+    /// reachable (a sleep/resume cycle, a brief network blip that outlives the SSH session but not
+    /// the shallow-probe failure threshold). Deliberately slower than the shallow cadence: it is
+    /// bounded by <c>ProbeTimeoutSeconds</c> and goes over loopback HTTP to <c>rclone rcd</c>
+    /// (never the mounted drive letter itself — see <c>MountSupervisor</c>'s class remarks on why
+    /// enumerating the drive is forbidden), but it is still real traffic against the remote host's
+    /// SFTP subsystem and need not run as often as a bare TCP connect. Absent in TOML is NOT an
+    /// error — it defaults to 300 (ADR-016), the same "absent means default, not rejected"
+    /// treatment ADR-011 established for <see cref="MountedProbeIntervalSeconds"/>. Zero/negative
+    /// is rejected by <see cref="ConfigValidator"/>.</summary>
+    public int MountedDeepProbeIntervalSeconds { get; init; } = DefaultMountedDeepProbeIntervalSeconds;
 
     public int SuspendUnmountTimeoutSeconds { get; init; } = DefaultSuspendUnmountTimeoutSeconds;
     public bool StartWithWindows { get; init; } = DefaultStartWithWindows;

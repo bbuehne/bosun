@@ -78,12 +78,21 @@ Two levels:
   recurring liveness check.
 - **Deep** — `operations/list` on the remote root, depth 1. Proves
   authentication and the SFTP subsystem work. Run once before each transition
-  into `Mounting`, not on the recurring timer.
+  into `Mounting`, **and** on its own recurring (slower) cadence for every host
+  already in `Mounted` — see §4 rule 3a and ADR-016.
 
-TCP success does not imply SFTP success. Never mount on a shallow probe alone.
+TCP success does not imply SFTP success. Never mount on a shallow probe alone —
+and, symmetrically, a shallow probe continuing to succeed on a `Mounted` host
+does not imply the mount is still alive: the TCP-level host can stay reachable
+after the SSH channel underneath the mount has died (a sleep/resume cycle, a
+network blip too short to trip the shallow-failure threshold but long enough to
+kill the channel). That is what the deep probe on `Mounted` hosts exists to
+catch, and it is why it is a *second*, independent probe rather than a
+replacement for the shallow one.
 
 Probe scheduling depends on state, not only on configuration: an idle host may
-be left unpolled, a **mounted** host never is. See §4 rule 3 and ADR-011.
+be left unpolled, a **mounted** host never is — for either probe. See §4 rule 3
+/ rule 3a and ADR-011 / ADR-016.
 
 ### `IMountSupervisor`
 Owns the state machine in §4. The only component permitted to call
@@ -200,6 +209,31 @@ right before building any UI.
    failure this project exists to prevent (Invariant I2). The upper clamp exists
    for the same reason: a host configured with a long idle interval must not
    inherit an unbounded unmount latency once mounted. See ADR-011.
+
+3a. While `Mounted`, a host is **also** deep-probed (`operations/list`), on its
+    own cadence: `global.mounted_deep_probe_interval_seconds` (default 300),
+    independent of and slower than the shallow cadence in rule 3. Shallow
+    success alone is not evidence the mount is alive (§3) — only the deep probe
+    proves the SSH channel underneath the mount still works. Deep-probe
+    failures accumulate on their **own counter**, `ConsecutiveDeepProbeFailures`
+    — never the shallow probe's `ConsecutiveMountedFailures` — and drain after
+    a fixed **2** consecutive deep-probe failures, a threshold deliberately
+    smaller than the configurable `failures_before_unmount` (default 3): a
+    dead-mount signal from `operations/list` is stronger evidence than a TCP
+    timeout, so it should not need as many consecutive confirmations. A
+    deep-probe success resets `ConsecutiveDeepProbeFailures` to zero,
+    independently of whatever the shallow counter reads. The two counters are
+    kept structurally separate — not merely started at zero independently —
+    because the two probes fire on independent timers that can land on the
+    same tick (the shipped defaults, 60s shallow / 300s deep, coincide exactly
+    every 5th shallow tick for the life of every mount): sharing one counter
+    between them makes the outcome of that coincidence depend on which of the
+    two timer continuations happens to be processed first, an order-dependent
+    race rather than a deterministic policy. Never implemented by enumerating
+    the drive letter (`DriveInfo`, `Directory.GetFiles`, etc.) — that is
+    precisely the call that can hang, and the supervisor's channel is globally
+    serialised (see `MountSupervisor`'s class remarks), so one hung enumeration
+    would stall every host, not just this one. See ADR-016.
 4. `Draining` calls `mount/unmount`. If unmount does not confirm within the
    timeout, escalate to a forced unmount, then verify against `mount/listmounts`.
    Never leave the state machine believing a drive is gone when it is not.
@@ -275,6 +309,7 @@ state directly, it posts commands to the same channel.
 | Failure | Required behaviour |
 |---|---|
 | Host unreachable while mounted | Unmount within `interval × failures_before_unmount`. Explorer must not hang. |
+| Host stays TCP-reachable but the mount's SSH channel dies (sleep/resume, a network blip too brief to trip the shallow threshold) | Detected by the recurring deep probe, not the shallow one — unmount within `2 × mounted_deep_probe_interval_seconds` (the fixed deep-probe failure threshold). See ADR-016. |
 | `rclone rcd` dies | Detect via health check, restart it, reconcile mounts from scratch. |
 | WinFsp not installed | Detect at startup, show an actionable message, disable all mount features, leave terminal features working. |
 | Drive letter already in use | Refuse the mount, surface the conflict in the tray, do not silently pick another letter. |

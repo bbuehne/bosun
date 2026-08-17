@@ -652,3 +652,164 @@ host until the user remembers to re-enable it, and a forgotten disable is a wors
 failure than a forgotten park — the drive silently never returns, even after a
 restart.
 
+---
+
+## ADR-016 — A mounted host is also deep-probed, on its own cadence
+
+**Status:** Accepted (2026-08-16). Resolves `bs-2eg`. Amends ADR-011.
+
+**Context.** ADR-011 settled *that* a `Mounted` host is always probed; it did
+not revisit *what the probe checks*. `HandleMountedProbeDueAsync` calls only
+`ProbeShallowAsync` — a TCP connect to `host:port`. `docs/ARCHITECTURE.md` §3
+already states the principle this violates: "TCP success does not imply SFTP
+success. Never mount on a shallow probe alone" — but the principle was applied
+only to the transition *into* `Mounting`, never to the recurring check on a host
+already `Mounted`.
+
+That gap is not an edge case for this project's actual deployment (desktop +
+LAN NAS, not the laptop dock/undock scenario the spec was originally framed
+around). It is the maintainer's two most likely failure modes:
+
+1. **Overnight sleep.** The desktop sleeps with a mount up. The NAS stays on the
+   same LAN and keeps answering port 22, but the SSH channel underneath the
+   mount dies — timed out, `sshd` restarted, session reaped. On wake, the
+   shallow probe **succeeds**, `ConsecutiveMountedFailures` resets to zero, and
+   every filesystem call into that drive hangs. Explorer freezes.
+2. **A network interruption** shorter than `failures_before_unmount ×
+   mounted_probe_interval_seconds` never trips the shallow-failure threshold,
+   but is easily long enough to kill the SSH channel underneath the mount.
+   Identical signature once the host returns: probe passes, mount is dead.
+
+Invariant I8 (unmount on suspend) defends case 1 only if the drain completes
+before the machine actually sleeps — §3 already documents it as best-effort,
+and it does not defend case 2 at all. Nothing else in the state machine watches
+for this, because by the only measure ADR-011 established, the host is healthy.
+This is an Invariant I2 hole ADR-005's design did not anticipate: ADR-005
+assumes it is the host becoming *unreachable* that signals trouble, and in both
+scenarios above it never does.
+
+**Decision.**
+
+1. A host in `Mounted` is deep-probed (`operations/list`, via
+   `IProbe.ProbeDeepAsync`) on its own recurring cadence,
+   `global.mounted_deep_probe_interval_seconds` (default 300s), **in addition
+   to**, never instead of, the shallow cadence ADR-011 established. The two
+   probes run independently — a change to one's cadence or outcome must not
+   affect the other's schedule.
+2. The deep probe goes to `rclone rcd` over loopback HTTP, exactly as the
+   pre-mount deep probe does, and is bounded by `probe_timeout_seconds`. It
+   never touches the mounted drive letter directly (`DriveInfo`,
+   `Directory.GetFiles`, a shell enumeration, etc.) — that is precisely the
+   call that can hang, and `MountSupervisor`'s channel is *globally*
+   serialised (see its class remarks), so one hung enumeration would stall
+   every other host's probing and mounting, turning a single dead mount into a
+   total supervisor stall. If drive-letter-level verification is ever wanted,
+   it must be strictly out-of-band with a hard, enforced timeout — not this
+   mechanism.
+3. A failed deep probe accumulates on its **own counter**,
+   `ConsecutiveDeepProbeFailures`, structurally separate from the shallow
+   probe's `ConsecutiveMountedFailures` — never shared, never merged. It drains
+   after a **fixed 2** consecutive deep-probe failures — a hardcoded internal
+   constant, not a new `[global]` field (see Rejected alternatives for why
+   neither "share the shallow counter" nor "make the threshold configurable"
+   survived contact with the actual implementation). A successful deep probe
+   resets its own counter to zero.
+4. `global.mounted_deep_probe_interval_seconds` is a new `[global]` setting,
+   default `300`. Absent means `300`, not a validation error — the same
+   "absent means default" treatment ADR-011 established for
+   `mounted_probe_interval_seconds`, for the same reason (rejecting a whole
+   config for a newly-introduced key would break every existing `hosts.toml`
+   on upgrade). Zero or negative *is* a validation error, because it would
+   disable the cadence this ADR exists to guarantee.
+
+**Reasoning for a fixed threshold of 2, not 1 and not `failures_before_unmount`.**
+A deep probe failure is qualitatively stronger evidence than a shallow one: a
+shallow (TCP) failure could mean the host rebooted, a firewall blipped, or the
+network hiccuped for a moment that says nothing about the mount itself, while a
+deep probe failure means the thing that actually serves the drive letter's I/O
+just failed to list its own root directory over the very channel the mount
+depends on. Treating it as one shallow-probe-equivalent failure against the
+*shallow* threshold (default 3, `+1` per deep failure) would mean the tool has
+strong evidence of a dead mount and chooses to wait for further ticks anyway —
+the "may be too lenient" reading this ADR is scoped to reject — and, worse, the
+implementation this ADR originally specified (`+1` against a *shared* counter,
+jumping straight to `failures_before_unmount` on a single failure) turned out to
+be actively unsafe: see the "Rejected: share the counter" entry below for the
+concrete bug it caused. `2` is not `1` because a single loopback-HTTP hiccup
+against `rclone rcd` — itself possibly momentarily busy, e.g. mid VFS-cache
+flush — should not be instantly fatal to an otherwise healthy mount; the deep
+probe is strong evidence, not infallible. `2` is well short of the shallow
+default of `3` specifically because the underlying signal is stronger, and it
+is a fixed constant rather than a fraction of `failures_before_unmount` so that
+tuning the shallow ladder for an unrelated reason (a flakier network, a stricter
+SLA) cannot silently make the deep-probe path more lenient than intended.
+
+**Consequence.** Worst-case detection latency for a mount whose SSH channel has
+died while the TCP-level host stays reachable is bounded by
+`2 × mounted_deep_probe_interval_seconds` (default 600s / 10 minutes) — not by
+`mounted_probe_interval_seconds × failures_before_unmount`, which never fires in
+this failure mode because the shallow probe keeps succeeding. Ten minutes is
+slower, in raw wall-clock terms, than the shallow ladder's own worst case (three
+minutes with the defaults) — a comparison worth naming explicitly rather than
+glossing over: it is not an apples-to-apples comparison, because two independent
+deep-probe failures are qualitatively stronger evidence of a dead mount than
+three TCP timeouts, and because the prior state of the world was "never
+detected at all." Ten minutes to detect and clear a wedge the tool previously
+could not detect *ever* is the actual trade-off this ADR makes, not "ten minutes
+instead of three." `docs/OPERATIONS.md` should gain a T-series row for this
+scenario once the manual test protocol is next revisited (tracked separately;
+not part of this delivery — see the implementer's report).
+
+**Rejected alternatives.**
+
+*Share `ConsecutiveMountedFailures` with the shallow probe, weighting a deep
+failure heavily (jump straight to `failures_before_unmount`) rather than `+1`.*
+This was the ORIGINAL design for this ADR, and it shipped, briefly, inside this
+delivery before being caught: with the shipped defaults (60s shallow / 300s
+deep — an exact 5:1 ratio), both timers are armed from the same instant every
+time a host enters `Mounted`, so the deep-probe tick and the 5th consecutive
+shallow-probe tick land on the *exact same instant*, every cycle, for the life
+of every mount. `MountSupervisor`'s channel processes same-instant timer
+continuations one at a time, in whichever order they happened to be enqueued —
+and with a shared counter, a coincidentally-successful deep probe processed
+first could silently reset a shallow-failure streak one tick before it reached
+threshold, defeating `docs/ARCHITECTURE.md` §4 rule 3's "exactly N consecutive
+failures unmounts" guarantee. This was caught by
+`Independent/FailureAccountingTests` (`Exactly_N_consecutive_failures_unmount…`
+and `Interleaved_successes_reset_the_count…`) going red against a default
+configuration that is a completely ordinary, recommended one — not a contrived
+adversarial config. It is an order-dependent race baked into the shipped
+defaults, not a one-off test artefact, and no adjustment to the default interval
+values would have been a real fix (a user is free to choose any two intervals
+where one divides the other — 60/120, 30/300, etc. — and hit the identical
+coincidence). Structurally separating the counters removes the race entirely:
+neither probe's bookkeeping can be affected by the other's outcome, regardless
+of instant-level coincidence or channel-processing order.
+
+*Make the deep-probe failure threshold a new configurable `[global]* field.*
+Rejected under this project's "do not add a setting for every knob" style
+(`CLAUDE.md` §5) and the fact that no defensible value range presented itself —
+unlike `mounted_deep_probe_interval_seconds` (a cadence, naturally expressed in
+seconds with an obvious sensible default), a *failure count* threshold's only
+principled values are small integers close to `1`, and the reasoning above
+already picks `2` without needing a knob. If real-world use ever demonstrates
+`2` is wrong, it is a one-line constant to change, not a schema migration.
+
+*Weight a deep failure at the full shallow threshold via a shared counter but
+fix the race some other way (e.g. process same-instant timers in a fixed
+order).* Considered, and rejected: making correctness depend on a specific,
+undocumented processing order for same-instant channel continuations is fragile
+in exactly the way the shared-counter design already proved itself to be —
+it trades one order-dependent behaviour for a different, only slightly less
+fragile one, rather than removing the dependency. Structurally independent
+counters are the fix that makes the *order* of same-instant processing
+irrelevant, which is the actual property wanted.
+
+*Force a deep probe immediately on every shallow-probe cycle instead of a
+separate slower cadence.* Rejected: it would make the deep probe as frequent as
+the shallow one, generating continuous SFTP-level traffic against a host the
+user is not actively touching in most minutes of the day, for a payoff (faster
+detection) that is not actually needed — a 300s cadence with a 2-failure
+threshold is already fast enough that the worst case is "wake the desktop, wait
+up to ten minutes," not the alternative of a wedge that never resolves at all.
+

@@ -60,12 +60,14 @@ internal static class HostFixtures
         int failuresBeforeUnmount = 3,
         IReadOnlyList<int>? backoffSeconds = null,
         int mountedProbeIntervalSeconds = 60,
+        int mountedDeepProbeIntervalSeconds = 300,
         int suspendUnmountTimeoutSeconds = 8) => new()
     {
         ProbeTimeoutSeconds = probeTimeoutSeconds,
         FailuresBeforeUnmount = failuresBeforeUnmount,
         BackoffSeconds = backoffSeconds ?? GlobalConfig.DefaultBackoffSeconds,
         MountedProbeIntervalSeconds = mountedProbeIntervalSeconds,
+        MountedDeepProbeIntervalSeconds = mountedDeepProbeIntervalSeconds,
         SuspendUnmountTimeoutSeconds = suspendUnmountTimeoutSeconds,
     };
 

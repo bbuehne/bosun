@@ -136,6 +136,13 @@ public sealed record HostMountSnapshot
     public string? Drive { get; init; }
     public required bool AdministrativelyEnabled { get; init; }
     public int ConsecutiveMountedFailures { get; init; }
+
+    /// <summary>Consecutive DEEP-probe (<c>operations/list</c>) failures while <c>Mounted</c>
+    /// (bs-2eg / ADR-016) -- a separate signal from <see cref="ConsecutiveMountedFailures"/> (the
+    /// shallow/TCP probe's count). See <c>MountSupervisor.HandleMountedDeepProbeDueAsync</c> for
+    /// why the two are never combined into one counter.</summary>
+    public int ConsecutiveDeepProbeFailures { get; init; }
+
     public int ConsecutiveIdleFailures { get; init; }
     public DateTimeOffset? LastTransitionUtc { get; init; }
     public string? LastTransitionTrigger { get; init; }

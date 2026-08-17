@@ -13,6 +13,7 @@ probe_timeout_seconds   = 5
 failures_before_unmount = 3
 backoff_seconds         = [5, 15, 30, 60, 300]   # holds at last value
 mounted_probe_interval_seconds = 60   # ceiling for probing while Mounted; see ADR-011
+mounted_deep_probe_interval_seconds = 300   # deep (SFTP-level) probe cadence while Mounted; see ADR-016
 suspend_unmount_timeout_seconds = 8   # Windows will not wait forever
 start_with_windows      = true
 ```
@@ -59,6 +60,7 @@ identity_file = "~/.ssh/id_ed25519"
 | `mount.idle_unmount_seconds` | `0` = never (on-demand only). Negative is a validation error. |
 | `probe.interval_seconds` | Polling cadence **while the host is idle** (`Ready` / `Unreachable`). `0` means never poll while idle — the sensible default for on-demand hosts (ADR-008). It does **not** disable probing while the host is `Mounted`; see `mounted_probe_interval_seconds` and ADR-011. |
 | `global.mounted_probe_interval_seconds` | Upper bound on the probe interval for a host in `Mounted`. A mounted host is always probed: at `interval_seconds` when that is greater than zero and smaller than this value, otherwise at this value. Bounds worst-case unmount latency to `mounted_probe_interval_seconds × failures_before_unmount` (default 3 minutes). |
+| `global.mounted_deep_probe_interval_seconds` | Independent, slower cadence at which a `Mounted` host is also DEEP-probed (`operations/list`, over loopback HTTP to `rclone rcd` — never by touching the drive letter itself). A shallow (TCP) probe only proves the host's port answers; it cannot detect a mount whose SSH channel died while the host stayed reachable (sleep/resume, a network blip shorter than `failures_before_unmount × mounted_probe_interval_seconds`). Deep-probe failures accumulate on their own counter (`ConsecutiveDeepProbeFailures`, kept structurally separate from the shallow probe's `ConsecutiveMountedFailures` — see ADR-016) and drain after a fixed 2 consecutive failures, deliberately fewer than `failures_before_unmount`: a dead mount confirmed by `operations/list` is stronger evidence than a TCP timeout. A deep-probe success resets its own counter. |
 | `session.reconnect` | Wraps the ssh invocation in a loop that retries on exit code 255 (dropped) but exits cleanly on 0 (user typed `exit`). Capped at 5 attempts (`FragmentProfileGenerator.MaxReconnectAttempts`, bs-ew1) — an uncapped loop cannot distinguish "connection keeps dropping" from "`ssh.exe` cannot be launched at all" (`cmd.exe`'s own not-recognised exit code, 9009, is ≥ 255 and so satisfies the same retry condition), and would otherwise spin forever with nothing surfaced. After the cap, the tab prints a message with the last exit code and exits. This cap is a maintainer recommendation on an open decision, not settled — easily reverted to unbounded if preferred. |
 | `session.tmux` | Strongly recommended. Reconnect gives a *new shell* otherwise — scrollback and working directory are lost. tmux makes reconnection resume the actual session. |
 
@@ -97,6 +99,10 @@ Reject the whole config, keep the previous one, and surface the error if any of:
 - `global.mounted_probe_interval_seconds` zero or negative — a mounted host must
   always have a probe cadence (ADR-011). Absent is **not** an error: it defaults
   to `60`, consistent with every other `[global]` field.
+- `global.mounted_deep_probe_interval_seconds` zero or negative — a mounted host
+  must always have a deep-probe cadence too, not just a shallow one (ADR-016).
+  Absent is **not** an error: it defaults to `300`, consistent with every other
+  `[global]` field.
 - `global.failures_before_unmount` less than `1` — below `1` a mounted host is
   never unmounted on probe failure (Invariant I2). `1` is the boundary and is
   valid: it means unmount on the very next consecutive failure.
