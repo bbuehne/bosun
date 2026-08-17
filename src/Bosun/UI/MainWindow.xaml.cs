@@ -4,6 +4,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using Bosun.UI.Tray;
 using Microsoft.Extensions.Logging;
+using Bosun.Status;
 
 namespace Bosun.UI;
 
@@ -69,8 +70,8 @@ public partial class MainWindow : Window, IAppWindow
 
         try
         {
-            var rows = _statusReadModel.GetRows();
-            var health = _statusReadModel.GetAggregateHealth();
+            var rows = _statusReadModel.Current.Rows;
+            var health = _statusReadModel.Current.Health;
             HostsGrid.ItemsSource = rows;
             HealthTextBlock.Text = $"Bosun — {health}";
         }

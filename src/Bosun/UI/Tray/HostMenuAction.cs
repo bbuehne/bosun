@@ -1,4 +1,5 @@
 using Bosun.Supervisor;
+using Bosun.Status;
 
 namespace Bosun.UI.Tray;
 
@@ -34,7 +35,7 @@ public static class HostContextMenuBuilder
     /// <para>
     /// <b>Mount doubles as "un-park" (ADR-015).</b> A parked host is not in any special
     /// <see cref="MountState"/> -- it keeps cycling <c>Ready</c>/<c>Unreachable</c> like any other
-    /// idle host, with <see cref="HostStatusRow.IsParked"/> carrying the fact that it will not
+    /// idle host, with <see cref="HostStatusRow.UserParked"/> carrying the fact that it will not
     /// auto-mount. The SAME <c>RequestMountAsync</c> call that mounts an un-parked host also clears
     /// the park (per ADR-015's "explicit user remount"), so no separate action kind is needed --
     /// only a label that tells the user what clicking it will do.
@@ -63,7 +64,7 @@ public static class HostContextMenuBuilder
             new HostMenuAction
             {
                 Kind = HostMenuActionKind.Mount,
-                Label = row.IsParked ? "Mount (un-park)" : "Mount",
+                Label = row.UserParked ? "Mount (un-park)" : "Mount",
                 IsEnabled = canMount,
             },
             new HostMenuAction

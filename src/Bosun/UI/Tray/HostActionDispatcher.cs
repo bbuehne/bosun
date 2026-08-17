@@ -1,5 +1,6 @@
 using Bosun.Supervisor;
 using Microsoft.Extensions.Logging;
+using Bosun.Status;
 
 namespace Bosun.UI.Tray;
 

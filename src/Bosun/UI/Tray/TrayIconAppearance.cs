@@ -1,3 +1,4 @@
+using Bosun.Status;
 namespace Bosun.UI.Tray;
 
 /// <summary>
@@ -52,7 +53,7 @@ public static class TrayIconAppearanceSelector
             Glyph = "!",
             AccessibleName = "Bosun — degraded",
         },
-        AggregateHealth.MountingUnavailable => new TrayIconAppearance
+        AggregateHealth.Error => new TrayIconAppearance
         {
             ColorHex = "#C62828",
             Glyph = "×",

@@ -1,4 +1,5 @@
 using Bosun.UI.Tray;
+using Bosun.Status;
 
 namespace Bosun.Tests.UI.Tray;
 
@@ -11,7 +12,7 @@ public sealed class TrayIconAppearanceSelectorTests
     [Theory]
     [InlineData(AggregateHealth.Healthy)]
     [InlineData(AggregateHealth.Degraded)]
-    [InlineData(AggregateHealth.MountingUnavailable)]
+    [InlineData(AggregateHealth.Error)]
     public void Select_IsDefinedForEveryAggregateHealthValue(AggregateHealth health)
     {
         var appearance = TrayIconAppearanceSelector.Select(health);
@@ -63,6 +64,6 @@ public sealed class TrayIconAppearanceSelectorTests
     {
         // Both fault states must be distinguishable by shape, not just color (accessibility).
         Assert.NotEqual("", TrayIconAppearanceSelector.Select(AggregateHealth.Degraded).Glyph);
-        Assert.NotEqual("", TrayIconAppearanceSelector.Select(AggregateHealth.MountingUnavailable).Glyph);
+        Assert.NotEqual("", TrayIconAppearanceSelector.Select(AggregateHealth.Error).Glyph);
     }
 }

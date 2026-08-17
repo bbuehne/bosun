@@ -5,6 +5,7 @@ using Bosun.Supervisor;
 using H.NotifyIcon;
 using H.NotifyIcon.Core;
 using Microsoft.Extensions.Logging;
+using Bosun.Status;
 
 namespace Bosun.UI.Tray;
 
@@ -89,8 +90,8 @@ public sealed class TrayIconController : IDisposable
 
         try
         {
-            rows = _statusReadModel.GetRows();
-            health = _statusReadModel.GetAggregateHealth();
+            rows = _statusReadModel.Current.Rows;
+            health = _statusReadModel.Current.Health;
         }
         catch (Exception ex)
         {

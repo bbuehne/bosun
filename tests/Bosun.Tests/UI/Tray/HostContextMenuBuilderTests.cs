@@ -1,5 +1,7 @@
+using Bosun.Configuration;
 using Bosun.Supervisor;
 using Bosun.UI.Tray;
+using Bosun.Status;
 
 namespace Bosun.Tests.UI.Tray;
 
@@ -14,8 +16,11 @@ public sealed class HostContextMenuBuilderTests
         DisplayName = "Example",
         State = state,
         Drive = drive,
-        IsParked = isParked,
+        UserParked = isParked,
         StatusText = "irrelevant for these tests",
+        Mode = MountMode.Persistent,
+        SessionCount = 0,
+        Category = StatusCategory.Pending,
     };
 
     private static HostMenuAction Find(IReadOnlyList<HostMenuAction> actions, HostMenuActionKind kind) =>
@@ -112,7 +117,7 @@ public sealed class HostContextMenuBuilderTests
     }
 
     [Fact]
-    public void Mount_Label_MentionsUnParking_WhenTheHostIsParked()
+    public void Mount_Label_MentionsUnParking_WhenTheHostUserParked()
     {
         // ADR-015: a parked host must render as deliberate and offer a way to un-park it. The
         // Mount action IS that way -- see HostContextMenuBuilder's remarks -- so its label must

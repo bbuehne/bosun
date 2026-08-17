@@ -2,10 +2,11 @@ using System.Windows;
 using System.Windows.Threading;
 using Bosun.Configuration;
 using Bosun.Hosting;
+using Bosun.SessionMonitor;
+using Bosun.Status;
 using Bosun.Supervisor;
 using Bosun.UI;
 using Bosun.UI.Tray;
-using Bosun.UI.Tray.Placeholder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -50,6 +51,10 @@ public partial class App : Application
 
     private IHost? _host;
     private ILogger<App>? _logger;
+
+    // Polls the supervisor for the window and tray (bs-ww9.6). Held so OnExit can stop its
+    // timer; null when the UI never got as far as being constructed.
+    private StatusReadModel? _statusReadModel;
 
     // bs-ww9.3 / bs-ww9.5 / ADR-018: constructed in InitializeUserInterface, once the host has
     // started successfully. Null if the host failed to start (nothing to show), or if UI
@@ -134,19 +139,30 @@ public partial class App : Application
     /// <summary>
     /// Constructs the UI layer this epic adds (bs-ww9.3 / bs-ww9.5, ADR-018) and wires it to the
     /// already-running host. Deliberately NOT part of <see cref="Hosting.BosunHostFactory"/> --
-    /// see <see cref="Bosun.UI.Tray.IStatusReadModel"/>'s remarks on why UI composition stays out
-    /// of that file. <see cref="Bosun.UI.Tray.Placeholder.PlaceholderStatusReadModel"/> is a
-    /// TEMPORARY stand-in for bs-ww9.6's real status read-model (built concurrently in a separate
-    /// worktree); swapping it for the real implementation is the one line this method is expected
-    /// to change once bs-ww9.6 lands -- see that class's remarks.
+    /// see <see cref="IStatusReadModel"/>'s remarks on why UI composition stays out of that file.
     /// </summary>
+    /// <remarks>
+    /// The read-model (<see cref="StatusReadModel"/>, bs-ww9.6) is started here and stopped in
+    /// <see cref="OnExit"/>. It polls rather than subscribing, because the supervisor exposes no
+    /// change event -- see its own remarks. Both the window and the tray read from the SAME
+    /// instance, which is what guarantees the tray icon and the window can never disagree about
+    /// aggregate health (ADR-012 Decision 3).
+    /// </remarks>
     private void InitializeUserInterface(string[] args)
     {
         var services = _host!.Services;
         var supervisor = services.GetRequiredService<IMountSupervisor>();
         var configStore = services.GetRequiredService<IHostConfigStore>();
 
-        IStatusReadModel statusReadModel = new PlaceholderStatusReadModel(supervisor, configStore);
+        var readModel = new StatusReadModel(
+            supervisor,
+            configStore,
+            services.GetRequiredService<ISessionMonitor>(),
+            services.GetRequiredService<TimeProvider>(),
+            services.GetRequiredService<ILogger<StatusReadModel>>());
+        readModel.Start();
+        _statusReadModel = readModel;
+        IStatusReadModel statusReadModel = readModel;
         var launcher = new Win32ExternalLauncher(services.GetRequiredService<ILogger<Win32ExternalLauncher>>());
         var actionDispatcher = new HostActionDispatcher(
             supervisor, launcher, services.GetRequiredService<ILogger<HostActionDispatcher>>());
@@ -200,6 +216,11 @@ public partial class App : Application
         // while the window is open (that path never goes through HideToTray).
         _mainWindowController?.PersistCurrentPlacement();
         _trayIconController?.Dispose();
+
+        // Stop polling before the host goes away: the read-model reaches into IMountSupervisor and
+        // ISessionMonitor on a timer, and a tick that fires mid-teardown would be reading from
+        // services that are already shutting down (bs-ww9.6).
+        _statusReadModel?.Stop();
 
         if (_host is not null)
         {

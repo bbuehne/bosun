@@ -1,6 +1,8 @@
+using Bosun.Configuration;
 using Bosun.Supervisor;
 using Bosun.Tests.UI.Tray.Fakes;
 using Bosun.UI.Tray;
+using Bosun.Status;
 
 namespace Bosun.Tests.UI.Tray;
 
@@ -18,8 +20,11 @@ public sealed class HostActionDispatcherTests
         DisplayName = hostKey,
         State = MountState.Ready,
         Drive = drive,
-        IsParked = false,
+        UserParked = false,
         StatusText = "irrelevant",
+        Mode = MountMode.Persistent,
+        SessionCount = 0,
+        Category = StatusCategory.Pending,
     };
 
     [Fact]
