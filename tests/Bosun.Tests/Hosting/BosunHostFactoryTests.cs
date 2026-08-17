@@ -1,5 +1,10 @@
 using Bosun.Configuration;
 using Bosun.Hosting;
+using Bosun.Probe;
+using Bosun.Rclone;
+using Bosun.SessionMonitor;
+using Bosun.Supervisor;
+using Bosun.Terminal;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -184,5 +189,63 @@ public sealed class BosunHostFactoryTests : IDisposable
         var store = host.Services.GetRequiredService<IHostConfigStore>();
 
         Assert.True(store.Current.Hosts.ContainsKey("fixture-host"));
+    }
+
+    /// <summary>
+    /// Resolves the services the running application actually asks for, which the other tests in
+    /// this class did not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this exists.</b> Bosun shipped with <see cref="TimeProvider"/> unregistered.
+    /// <c>HostProbe</c> is registered BY TYPE, so the container constructs it and needs every
+    /// constructor parameter resolvable; without that registration <c>IProbe</c> could not be
+    /// built, <c>MountSupervisor</c> could not be built with it, and the whole supervisor failed
+    /// to start. The application launched, wrote its Terminal fragment, brought up
+    /// <c>rclone rcd</c>, logged "Failed to start the mount supervisor; no host will be probed or
+    /// mounted this session", and then sat there doing nothing.
+    /// </para>
+    /// <para>
+    /// <b>Why the existing tests did not catch it, which is the more useful lesson.</b>
+    /// <c>Host_StartsAndStopsCleanlyWithoutAWindow</c> starts the host and passes -- because
+    /// <c>StartupOrchestrator</c> deliberately CATCHES a supervisor start failure and logs it,
+    /// per ADR-012's fail-soft contract. "The host started cleanly" is therefore not evidence
+    /// that anything inside it works. The fail-soft behaviour that makes Bosun robust in
+    /// production is precisely what made the test suite blind here, so the fix is not to weaken
+    /// the fail-soft: it is to resolve the graph explicitly, which is what this does.
+    /// </para>
+    /// <para>
+    /// Deliberately resolves rather than merely asserting registration: a service can be
+    /// registered and still be unconstructible, which is exactly the bug. Every type here is inert
+    /// to construct -- no probe is issued, no process spawned, no mount attempted -- so this stays
+    /// safe to run from a worktree.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void CreateHost_ResolvesTheServicesTheApplicationActuallyUses()
+    {
+        var configPath = Path.Combine(_logDirectory, "hosts.toml");
+        Directory.CreateDirectory(_logDirectory);
+        File.WriteAllText(configPath, "# no hosts; this test is about the container, not the config");
+
+        using var host = BosunHostFactory.CreateHost(new BosunHostOptions
+        {
+            LogDirectory = _logDirectory,
+            ConfigPath = configPath,
+        });
+
+        // The one that actually broke, and the graph it drags in (IProbe -> TimeProvider).
+        Assert.NotNull(host.Services.GetRequiredService<IMountSupervisor>());
+        Assert.NotNull(host.Services.GetRequiredService<MountSupervisor>());
+        Assert.NotNull(host.Services.GetRequiredService<IProbe>());
+        Assert.NotNull(host.Services.GetRequiredService<TimeProvider>());
+
+        // The rest of what App.InitializeUserInterface and the hosted services reach for.
+        Assert.NotNull(host.Services.GetRequiredService<IHostConfigStore>());
+        Assert.NotNull(host.Services.GetRequiredService<ISessionMonitor>());
+        Assert.NotNull(host.Services.GetRequiredService<IRcloneClient>());
+        Assert.NotNull(host.Services.GetRequiredService<IFragmentWriter>());
+        Assert.NotNull(host.Services.GetRequiredService<IRemoteRootLister>());
+        Assert.NotNull(host.Services.GetRequiredService<IWinFspDetector>());
     }
 }

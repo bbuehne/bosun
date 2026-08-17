@@ -78,6 +78,17 @@ public static class BosunHostFactory
         // (via StartupOrchestrator, the one place allowed to) as its very first step. Tests that
         // start a host without exercising that must pass registerStartupOrchestrator: false --
         // see that parameter's doc above and BosunHostFactoryTests.
+        // Registered as a SERVICE, not only passed by hand into the factory lambdas below.
+        // Anything registered by TYPE -- AddSingleton<IProbe, HostProbe>() and friends -- is
+        // constructed by the container, so every constructor parameter it has must be resolvable.
+        // HostProbe takes a TimeProvider, and without this line the container cannot build it:
+        // IProbe fails, MountSupervisor fails with it, and StartupOrchestrator's own catch turns
+        // that into a logged line and a Bosun that runs happily while probing and mounting
+        // NOTHING. That is exactly what shipped, and no test caught it, because the tests only
+        // ever resolved services they named explicitly (see BosunHostFactoryTests'
+        // CreateHost_ResolvesTheServicesTheApplicationActuallyUses).
+        builder.Services.AddSingleton(TimeProvider.System);
+
         builder.Services.AddSingleton<IHostConfigStore>(sp => HostConfigStore.Load(
             path: options.ConfigPath,
             reader: new FileConfigReader(),
