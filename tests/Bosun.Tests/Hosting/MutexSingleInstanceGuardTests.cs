@@ -112,7 +112,56 @@ public sealed class MutexSingleInstanceGuardTests
 
         // Per bs-2wa: acquiring an abandoned mutex is the correct outcome, not an error -- a
         // crashed previous holder must not permanently lock the user out of running Bosun.
-        Assert.True(guard.TryAcquire());
+        //
+        // ASSERTED ON THE FIRST ATTEMPT, DELIBERATELY. DO NOT "make this robust" by retrying in a
+        // loop -- that was tried and it silently destroys the test (bs-vyj). When WaitOne throws
+        // AbandonedMutexException, ownership HAS been granted to the calling thread; a second
+        // TryAcquire on that same thread then re-acquires recursively and returns true regardless
+        // of what the handler did. Verified: with the AbandonedMutexException handler deliberately
+        // broken, the single-attempt version fails (correct) and the retrying version PASSES.
+        //
+        // This test failed once on CI while passing on the run before it with byte-identical test
+        // code (the commit between them was documentation only). It could not be reproduced
+        // locally in 2000 iterations, nor in a further 2000 with the process pinned to a single
+        // core to force contention. The mechanism is therefore UNKNOWN -- see bs-vyj. The obvious
+        // timing story (the OS marking abandonment fractionally after Thread.Join returns) is
+        // unconfirmed and both experiments argue against it; do not write it down as the cause.
+        var acquired = guard.TryAcquire();
+
+        // Captured only on failure, so that the next CI occurrence reports the MECHANISM instead
+        // of a bare Assert.True failure that tells us nothing (which is all the first one gave).
+        var diagnosis = acquired ? string.Empty : DiagnoseFailedAbandonedAcquire(name);
+
+        Assert.True(
+            acquired,
+            "An abandoned mutex was not acquired. A previous Bosun that crashed while holding the " +
+            $"guard must not lock the user out of starting it again (bs-2wa).{diagnosis}");
+    }
+
+    /// <summary>Runs only when <c>TryAcquire</c> unexpectedly returned false, to record which of
+    /// the two possible causes it was: the mutex still appearing owned by a live thread, or the
+    /// abandonment being reported but mishandled. See bs-vyj.</summary>
+    private static string DiagnoseFailedAbandonedAcquire(string name)
+    {
+        try
+        {
+            using var probe = new Mutex(initiallyOwned: false, name, out var createdNew);
+            try
+            {
+                var signalled = probe.WaitOne(TimeSpan.Zero);
+                return $" DIAGNOSIS: no AbandonedMutexException; WaitOne(0) returned {signalled}, " +
+                       $"createdNew={createdNew} (the mutex appeared {(signalled ? "free" : "held by a live thread")}).";
+            }
+            catch (AbandonedMutexException)
+            {
+                return $" DIAGNOSIS: AbandonedMutexException WAS raised on a fresh handle " +
+                       $"(createdNew={createdNew}) -- so abandonment was observable and TryAcquire mishandled it.";
+            }
+        }
+        catch (Exception ex)
+        {
+            return $" DIAGNOSIS: could not probe the mutex: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     [Fact]
