@@ -153,6 +153,57 @@ public sealed class ConfigChangedTests
         Assert.Equal(unmountCallsBefore, harness.Rclone.UnmountCalls.Count);
     }
 
+    /// <summary>The idle-unmount timer never existed while this host was persistent (rule 7 is
+    /// on-demand-only): without arming it at the moment of the tier flip, it would stay mounted
+    /// forever despite now being on-demand with a configured idle timeout.</summary>
+    [Fact]
+    public async Task Tier_change_persistent_to_on_demand_while_mounted_arms_the_idle_unmount_timer()
+    {
+        var host = HostFixtures.Persistent("prod", drive: "P:", idleUnmountSeconds: 100);
+        var harness = new SupervisorHarness(HostFixtures.Build(HostFixtures.Global(), host));
+        await harness.StartAsync();
+        Assert.Equal(MountState.Mounted, harness.Snapshot("prod").State);
+
+        var changed = host with { Mount = host.Mount with { Mode = MountMode.OnDemand } };
+        var newConfig = HostFixtures.Build(HostFixtures.Global(), changed);
+        await harness.RunAsync(() => harness.Supervisor.ConfigChangedAsync(newConfig));
+        Assert.Equal(MountState.Mounted, harness.Snapshot("prod").State);
+
+        await harness.AdvanceAsync(TimeSpan.FromSeconds(100));
+
+        // Drains on the idle timeout, then -- still administratively enabled -- auto re-enables and
+        // re-probes, resting at Ready (the on-demand tier's resting state, rule 6: on-demand hosts
+        // rest in Ready, they do not auto-mount). The point of this assertion is simply that it is
+        // no longer Mounted -- proving the idle-unmount timer actually fired.
+        Assert.Equal(MountState.Ready, harness.Snapshot("prod").State);
+    }
+
+    /// <summary>The reverse of the previous test: a persistent host must never auto-unmount on an
+    /// idle timeout, so a timer armed while still on-demand must be disarmed by the flip.</summary>
+    [Fact]
+    public async Task Tier_change_on_demand_to_persistent_while_mounted_disarms_the_idle_unmount_timer()
+    {
+        var host = HostFixtures.OnDemand("archive", drive: "Q:", idleUnmountSeconds: 100);
+        var harness = new SupervisorHarness(HostFixtures.Build(HostFixtures.Global(), host));
+        await harness.StartAsync();
+        await harness.RunAsync(() => harness.Supervisor.RequestMountAsync("archive"));
+        Assert.Equal(MountState.Mounted, harness.Snapshot("archive").State);
+
+        var changed = host with { Mount = host.Mount with { Mode = MountMode.Persistent } };
+        var newConfig = HostFixtures.Build(HostFixtures.Global(), changed);
+        await harness.RunAsync(() => harness.Supervisor.ConfigChangedAsync(newConfig));
+        Assert.Equal(MountState.Mounted, harness.Snapshot("archive").State);
+
+        await harness.AdvanceAsync(TimeSpan.FromSeconds(200));
+
+        // Asserting the end state alone is not enough here: a persistent host auto-remounts after
+        // an idle-triggered drain (rule 6), which would mask a leftover on-demand timer by simply
+        // ending up Mounted again anyway. UnmountCalls staying empty is what actually proves the
+        // stale on-demand idle-unmount timer never fired at all.
+        Assert.Empty(harness.Rclone.UnmountCalls);
+        Assert.Equal(MountState.Mounted, harness.Snapshot("archive").State);
+    }
+
     [Fact]
     public async Task Tier_change_on_demand_to_persistent_mounts_immediately_if_ready_and_reachable()
     {

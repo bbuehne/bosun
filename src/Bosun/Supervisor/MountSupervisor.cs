@@ -1899,12 +1899,26 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             if (newMode == MountMode.Persistent && host.State == MountState.Ready)
             {
                 // on-demand -> persistent, not currently mounted, currently reachable: mount now.
+                // TryBeginMountAsync's own success path already arms (or leaves unarmed, correctly
+                // for the new persistent tier) the idle-unmount timer -- see the branch below.
                 await TryBeginMountAsync(host, "config change: tier changed to persistent", ct).ConfigureAwait(false);
             }
+            else if (host.State == MountState.Mounted)
+            {
+                // Already mounted through the flip, in EITHER direction -- no drain either way
+                // (DESIGN: "keep any live mount"), but the idle-unmount timer is an on-demand-only
+                // mechanic (rule 7) and must be re-evaluated for the NEW tier: persistent ->
+                // on-demand needs one armed now (it never had one while persistent, so idle-unmount
+                // could otherwise never fire until some later full mount cycle); on-demand ->
+                // persistent needs any existing one disarmed (a persistent host must never
+                // auto-unmount on an idle timeout). ArmIdleUnmountTimer disposes whatever is
+                // already there before deciding, so one call is correct for both directions.
+                ArmIdleUnmountTimer(host);
+            }
 
-            // persistent -> on-demand: nothing further. Any live mount is untouched (no drain), and
-            // the Config swap above already means OnEnteredReadyAsync's tier check will not
-            // auto-mount on the NEXT arrival at Ready.
+            // persistent -> on-demand while NOT mounted, or any other combination: nothing further.
+            // The Config swap above already means OnEnteredReadyAsync's tier check will not
+            // auto-mount a persistent-turned-on-demand host on the NEXT arrival at Ready.
             return;
         }
 
