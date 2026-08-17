@@ -813,3 +813,120 @@ detection) that is not actually needed — a 300s cadence with a 2-failure
 threshold is already fast enough that the worst case is "wake the desktop, wait
 up to ten minutes," not the alternative of a wedge that never resolves at all.
 
+
+---
+
+## ADR-017 — State that survived a transition is not trusted
+
+**Status:** **PROPOSED** — awaiting the maintainer's decision. Nothing is
+implemented against it. Resolves `bs-mk4`, `bs-brv`, and item 1 of `bs-u4a`.
+Extends ADR-016.
+
+**Context.** Three defects were filed independently, by three different agents,
+against three different components:
+
+- `bs-mk4` — a network change force-probes mounted hosts with the **shallow**
+  probe only. The deep probe added by ADR-016 keeps its own timer and is not
+  forced.
+- `bs-brv` — `ResumeAsync` drops `Mounted`/`Mounting` into a `default:` case
+  commented *"suspend already drained them"*, and never calls `mount/listmounts`
+  at all.
+- `bs-u4a` item 1 — `docs/ARCHITECTURE.md` §3's event table gives **network
+  change** the stronger treatment ("re-probe all immediately; force-probe mounted
+  hosts") and **resume** the weaker one ("re-probe all immediately").
+
+Each was locally reasonable. `bs-brv`'s comment is a correct reading of rule 5 in
+isolation. `bs-mk4` is a defensible scope boundary for the epic that introduced
+the deep probe. §3's asymmetry was written before either existed.
+
+Together they are one defect wearing three costumes: **the supervisor trusts
+mounted state that has just survived a power or network transition.**
+
+That state is the least trustworthy state the application ever holds. Across a
+suspend, `rclone rcd`'s child process, the WinFsp driver, the TCP stack and the
+SSH channel underneath every mount have all been through a power transition. The
+supervisor's belief about what is mounted was formed before all of that and has
+been verified against nothing since.
+
+The specification already says so, in the row that matters most —
+`docs/ARCHITECTURE.md` §6: *"Machine sleeps with mounts up | Unmount on suspend.
+**If we missed it, force-unmount and reconcile on resume.**"* — and §3 agrees from
+the other side: *"accept that a forced unmount may be needed on resume."* No
+component implements it.
+
+**Decision.**
+
+After **any** power or network transition — resume, or a network address change —
+the supervisor does not trust its own mounted state. It re-derives it:
+
+1. **Reconcile against `mount/listmounts` first.** Ground truth before anything
+   else. A mount the supervisor believes in that is absent, or present and
+   unknown, is corrected before any probe result is interpreted.
+2. **Force both probes for hosts that are still `Mounted`** — shallow *and* deep.
+   ADR-016's deep probe is the only check that can see a dead channel under a live
+   host, and a transition is precisely when that becomes likely.
+3. **Resume is at least as strong as a network change**, never weaker. §3's event
+   table is corrected accordingly.
+
+**Reasoning.**
+
+*Why the asymmetry was backwards.* A network change means the path to the host may
+have altered. A resume means **everything** may have altered — including the local
+components doing the mounting. Giving resume the weaker treatment inverts the risk
+ordering, and it is what let `bs-brv` look correct in review.
+
+*Why reconciliation comes before probing.* A probe answers "is the host
+reachable"; `listmounts` answers "what is actually mounted". After a transition the
+second question is the one whose answer we have no basis for, and interpreting
+probe results against a stale mount table is how a host gets marked healthy while
+its drive letter points at nothing. Since `bs-ka9`, adoption is `Fs`-aware, so
+reconciliation is also where a mount pointing at the *wrong host* gets caught.
+
+*Why this costs almost nothing.* Transitions are rare — a sleep/wake cycle a day,
+network changes occasionally, and those are now debounced. The cost is one
+`listmounts` plus one deep probe per mounted host per transition. Against that: the
+current periodic cadence means a dead mount can persist roughly ten minutes after
+an event that explicitly told us to look.
+
+*Why a principle rather than three patches.* Three agents independently produced
+three locally-sound decisions that combined into a hole. A rule stated once —
+*after a transition, re-derive; do not trust* — is checkable in review, and the
+next transition-like event added to the system inherits it instead of re-deriving
+it badly.
+
+**Consequences.**
+
+- `ResumeAsync` and `NetworkChangedAsync` converge on a shared "re-derive" path
+  rather than each hand-rolling a subset.
+- `docs/ARCHITECTURE.md` §3's event table and §4 rule 5 both need amending; §6's
+  failure row finally becomes implemented rather than aspirational.
+- ADR-016's deep probe becomes reachable by force, not only by its timer.
+- More probe traffic immediately after a transition. That is the intended trade
+  and is bounded by the number of mounted hosts.
+
+**A sub-decision this leaves open, deliberately.**
+
+Is a forced deep-probe failure *immediately after a transition* conclusive enough
+to drain, or must it still meet ADR-016's threshold of two?
+
+Arguments both ways are real. The transition is corroborating evidence, so one
+failure means more than it would mid-session — but `rclone rcd` may itself still be
+recovering in the seconds after a resume, and draining on a probe that failed for
+that reason would unmount a healthy drive. The safe order is to confirm rcd health
+first and only then treat a deep failure as conclusive; that is mechanism, and it
+should be settled when this is implemented rather than guessed at here.
+
+**Rejected alternatives.**
+
+*Fix the three issues separately.* Cheaper now, and it leaves the underlying rule
+unstated — so the fourth instance arrives with the next transition-like event.
+
+*Rely on the 30-second periodic reconciliation.* It already exists and did not
+prevent any of this. A cadence is not a guarantee tied to an event, and the whole
+point of a transition is that it tells you exactly when to look.
+
+*Unmount everything on resume, unconditionally.* Simple, and defensible given the
+drives-disappear-and-reappear posture of ADR-005. Rejected because it discards
+working mounts that survived a sleep perfectly well, and the daily cost of that
+lands on the one user this tool exists for.
+
