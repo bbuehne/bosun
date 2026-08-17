@@ -8,6 +8,27 @@
     <AssemblyName>Bosun</AssemblyName>
   </PropertyGroup>
 
+  <!--
+    Publish shape (E10). Kept HERE rather than only on release.yml's command line so that a local
+    `dotnet publish` produces the same artifact CI does — otherwise the thing the maintainer tests
+    by hand is not the thing that ships.
+
+    PublishTrimmed is deliberately ABSENT and must stay that way: trimming is unsupported for WPF
+    and fails at runtime in non-obvious ways (CLAUDE.md §4). Do not add it to shrink the output.
+
+    EnableCompressionInSingleFile roughly halves the artifact — measured 136 MB -> 63 MB on
+    net10.0-windows win-x64. It costs some startup time (the bundle is decompressed on launch),
+    which is the right trade for a tray app that starts once at login and then runs all day.
+  -->
+  <PropertyGroup>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="H.NotifyIcon.Wpf" Version="2.4.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />

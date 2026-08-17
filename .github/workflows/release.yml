@@ -19,17 +19,21 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # NOTE: PublishTrimmed is deliberately absent.
-      # Trimming is not supported for WPF and produces runtime failures.
+      # The publish shape (single-file, self-contained, win-x64, compressed) lives in
+      # src/Bosun/Bosun.csproj, NOT here — so that a local `dotnet publish` produces exactly what
+      # ships. Duplicating the switches on this command line is how the two drift apart and the
+      # maintainer ends up hand-testing something other than the release artifact.
+      #
+      # PublishTrimmed is deliberately absent there and must stay absent: trimming is unsupported
+      # for WPF and fails at runtime in non-obvious ways.
       - name: Publish
-        run: >
-          dotnet publish src/Bosun/Bosun.csproj
-          -c Release
-          -r win-x64
-          --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -o publish
+        run: dotnet publish src/Bosun/Bosun.csproj -c Release -o publish
+
+      - name: Report artifact size
+        shell: pwsh
+        run: |
+          $exe = Get-Item publish/Bosun.exe
+          "Bosun.exe: {0:N0} bytes ({1:N0} MB)" -f $exe.Length, ($exe.Length / 1MB)
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
