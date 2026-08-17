@@ -229,10 +229,23 @@ Bosun is v1 when, on the maintainer's machine:
    drag-and-drop with Explorer in both directions.
 3. On-demand hosts mount and unmount from the tray menu, and auto-unmount after
    their configured idle timeout.
-4. Closing the laptop lid and reopening it on a different network leaves **no
-   wedged drive letters** and results in all reachable hosts remounted without
-   user intervention.
-5. Killing a host mid-mount results in the drive disappearing within the probe
+4. Sleeping the machine overnight with mounts up, and waking it the next
+   morning, leaves **no wedged drive letters** and results in all reachable hosts
+   remounted without user intervention.
+5. A network interruption shorter than `failures_before_unmount × interval` —
+   long enough to kill the SSH channel, too short to trip the unmount threshold —
+   leaves no wedged drive letter either.
+6. Killing a host mid-mount results in the drive disappearing within the probe
    window rather than Explorer hanging.
 
-Item 4 is the acceptance test that matters. Everything else is table stakes.
+Items 4 and 5 are the acceptance tests that matter. Everything else is table
+stakes.
+
+Both are harder than they look, and harder than the dock/undock scenario an
+earlier version of this list named (see ADR-001's amendment — that scenario cannot
+occur on this hardware). In a dock/undock the host goes away, which is the case
+Bosun was originally built to notice. In these two the host is typically *still
+reachable* afterwards: the shallow TCP probe keeps succeeding while the SSH channel
+underneath the mount is already dead. Detecting that needs the deep probe
+(ADR-016), and detecting it *at the transition* rather than up to ten minutes later
+needs re-derivation (ADR-017).
