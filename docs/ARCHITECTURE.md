@@ -363,7 +363,12 @@ probe ladder.
 a condition the user must be able to *see*; retrying it quietly forever is the
 failure ADR-012 Decision 3 exists to prevent, and it is worse here than the
 missing-WinFsp case, because the host looks healthy and only one drive is affected.
-Surfacing it is tracked as `bs-ww9.4` and is not yet implemented.
+
+`HostMountSnapshot` therefore carries `ConsecutiveMountFailures` and
+`LastMountFailureReason` (`bs-ww9.4`), captured at the failure sites and reset on a
+successful mount, and `Bosun.Status` derives the user-facing sentence from them —
+*"`P:` is not mounted — mount failed 4 times; last error: …"*. Rendering it is E9's
+job.
 
 ### Reconciliation
 
