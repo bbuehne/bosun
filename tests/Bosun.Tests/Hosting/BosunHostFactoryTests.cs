@@ -242,6 +242,7 @@ public sealed class BosunHostFactoryTests : IDisposable
 
         // The rest of what App.InitializeUserInterface and the hosted services reach for.
         Assert.NotNull(host.Services.GetRequiredService<IHostConfigStore>());
+        Assert.NotNull(host.Services.GetRequiredService<IHostConfigWriter>());
         Assert.NotNull(host.Services.GetRequiredService<ISessionMonitor>());
         Assert.NotNull(host.Services.GetRequiredService<IRcloneClient>());
         Assert.NotNull(host.Services.GetRequiredService<IFragmentWriter>());

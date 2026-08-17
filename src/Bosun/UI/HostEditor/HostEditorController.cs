@@ -1,5 +1,6 @@
 using System.Globalization;
 using Bosun.Configuration;
+using Bosun.Supervisor;
 using Microsoft.Extensions.Logging;
 
 namespace Bosun.UI.HostEditor;
@@ -44,11 +45,16 @@ public sealed class HostEditorController
 
     private readonly IHostConfigWriter _writer;
     private readonly IHostConfigStore _configStore;
+
+    /// <summary>Used only to unmount a host before deleting it (Invariant I2). Optional:
+    /// null skips the drain, which is correct for tests that are not exercising delete.</summary>
+    private readonly IMountSupervisor? _supervisor;
     private readonly ILogger<HostEditorController>? _logger;
 
     public HostEditorController(
         IHostConfigWriter writer,
         IHostConfigStore configStore,
+        IMountSupervisor? supervisor = null,
         ILogger<HostEditorController>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(writer);
@@ -56,6 +62,7 @@ public sealed class HostEditorController
 
         _writer = writer;
         _configStore = configStore;
+        _supervisor = supervisor;
         _logger = logger;
     }
 
@@ -310,13 +317,58 @@ public sealed class HostEditorController
         return new HostEditorSaveResult { Succeeded = false, GeneralError = result.Error ?? "Save failed." };
     }
 
-    /// <summary>Deletes a host. Confirmation is the caller's job (a WPF concern); this method
-    /// assumes the user has already agreed. Whether a mounted host is drained first is
-    /// <see cref="IHostConfigWriter.DeleteHostAsync"/>'s contract to keep (Invariant I2) -- this
-    /// method only surfaces whatever it reports.</summary>
+    /// <summary>Deletes a host, unmounting it first if it is currently mounted. Confirmation is
+    /// the caller's job (a WPF concern); this method assumes the user has already agreed.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The drain belongs HERE, and this is the seam where it was missed.</b>
+    /// <see cref="IHostConfigWriter.DeleteHostAsync"/> deliberately does not drain -- it has no
+    /// access to mount state, which lives in <see cref="IMountSupervisor"/> and not in
+    /// <c>BosunConfig</c> -- and its contract says the caller must drain first. An earlier version
+    /// of this method asserted the opposite, that draining was the writer's job. Both halves were
+    /// individually reasonable and neither drained: deleting a mounted host removed it from
+    /// <c>hosts.toml</c> and left the drive letter live with nothing describing it, which is the
+    /// orphaned-mount case Invariant I2 exists to prevent. The confirmation dialog even promised
+    /// the user "its drive will be unmounted first".
+    /// </para>
+    /// <para>
+    /// The UI is allowed to call <see cref="IMountSupervisor"/> -- that is the only permitted route
+    /// to a mount operation (Invariant I4), and the tray's own unmount action already uses it. What
+    /// the UI may not do is touch <c>IRcloneClient</c> directly.
+    /// </para>
+    /// <para>
+    /// The unmount is requested and awaited before the config write. If it fails the delete is
+    /// abandoned rather than proceeding: leaving a configured-but-unmountable host is recoverable,
+    /// whereas a live drive letter with no configuration is the state that wedges Explorer.
+    /// </para>
+    /// </remarks>
     public async Task<HostEditorDeleteResult> DeleteAsync(string hostKey, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hostKey);
+
+        if (_supervisor is not null)
+        {
+            var snapshot = _supervisor.GetSnapshot().FirstOrDefault(h =>
+                string.Equals(h.HostKey, hostKey, StringComparison.Ordinal));
+
+            if (snapshot is not null &&
+                snapshot.State is MountState.Mounted or MountState.Mounting or MountState.Draining)
+            {
+                try
+                {
+                    await _supervisor.RequestUnmountAsync(hostKey, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger?.LogError(ex, "Could not unmount {HostKey} before deleting it; delete abandoned", hostKey);
+                    return new HostEditorDeleteResult
+                    {
+                        Succeeded = false,
+                        Error = $"'{hostKey}' could not be unmounted, so it was not deleted: {ex.Message}",
+                    };
+                }
+            }
+        }
 
         var result = await _writer.DeleteHostAsync(hostKey, cancellationToken).ConfigureAwait(false);
         if (result.Succeeded)
