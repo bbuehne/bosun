@@ -1,6 +1,11 @@
 using System.Windows;
 using System.Windows.Threading;
+using Bosun.Configuration;
 using Bosun.Hosting;
+using Bosun.Supervisor;
+using Bosun.UI;
+using Bosun.UI.Tray;
+using Bosun.UI.Tray.Placeholder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -9,8 +14,10 @@ namespace Bosun;
 
 /// <summary>
 /// Interaction logic for App.xaml. Owns the <see cref="IHost"/> lifetime: built and started in
-/// <see cref="OnStartup"/>, stopped with a bounded timeout in <see cref="OnExit"/>. There is no
-/// main window — see App.xaml.
+/// <see cref="OnStartup"/>, stopped with a bounded timeout in <see cref="OnExit"/>. Also the
+/// composition root for the UI layer (bs-ww9.3 / bs-ww9.5, ADR-018) -- see
+/// <see cref="InitializeUserInterface"/> -- constructed once the host has started successfully,
+/// never declared via <c>StartupUri</c>; see App.xaml.
 /// </summary>
 public partial class App : Application
 {
@@ -31,8 +38,8 @@ public partial class App : Application
     // of OnStartup, before _bootstrap.TryCreateHost() below -- BosunHostFactory.CreateHost's first
     // line is Directory.CreateDirectory(options.LogDirectory), so this MUST run first or a second
     // launch would have already touched the log directory by the time it discovers it should
-    // exit. Exposed so the window layer (bs-ww9.3, not yet built) can subscribe to
-    // ActivationRequested without this class needing to know anything about windows.
+    // exit. Exposed so InitializeUserInterface can subscribe to ActivationRequested without
+    // SingleInstanceOrchestrator itself needing to know anything about windows.
     internal readonly SingleInstanceOrchestrator SingleInstance;
 
     // Owns the window between process start and the point ILogger<App> becomes resolvable --
@@ -43,6 +50,15 @@ public partial class App : Application
 
     private IHost? _host;
     private ILogger<App>? _logger;
+
+    // bs-ww9.3 / bs-ww9.5 / ADR-018: constructed in InitializeUserInterface, once the host has
+    // started successfully. Null if the host failed to start (nothing to show), or if UI
+    // construction itself failed -- see InitializeUserInterface's own try/catch. Bosun keeps
+    // running headless (mounting and probing unaffected) in either case; a UI failure must never
+    // take the supervisor down with it.
+    private MainWindow? _mainWindow;
+    private MainWindowController? _mainWindowController;
+    private TrayIconController? _trayIconController;
 
     public App()
     {
@@ -97,11 +113,94 @@ public partial class App : Application
         {
             _logger.LogCritical(ex, "Bosun host failed to start; shutting down.");
             Shutdown(-1);
+            return;
         }
+
+        try
+        {
+            InitializeUserInterface(e.Args);
+        }
+        catch (Exception ex)
+        {
+            // ADR-012's fail-soft principle, applied to the UI layer itself: a failure to
+            // construct the tray icon or main window must never take the supervisor down with it
+            // -- mounting and probing continue headless. There is no catastrophic-failure channel
+            // for this (the logger, and therefore normal logging, is already available by this
+            // point), so a logged error is the whole response.
+            _logger.LogError(ex, "Failed to initialize the tray icon and main window; Bosun continues running headless this session");
+        }
+    }
+
+    /// <summary>
+    /// Constructs the UI layer this epic adds (bs-ww9.3 / bs-ww9.5, ADR-018) and wires it to the
+    /// already-running host. Deliberately NOT part of <see cref="Hosting.BosunHostFactory"/> --
+    /// see <see cref="Bosun.UI.Tray.IStatusReadModel"/>'s remarks on why UI composition stays out
+    /// of that file. <see cref="Bosun.UI.Tray.Placeholder.PlaceholderStatusReadModel"/> is a
+    /// TEMPORARY stand-in for bs-ww9.6's real status read-model (built concurrently in a separate
+    /// worktree); swapping it for the real implementation is the one line this method is expected
+    /// to change once bs-ww9.6 lands -- see that class's remarks.
+    /// </summary>
+    private void InitializeUserInterface(string[] args)
+    {
+        var services = _host!.Services;
+        var supervisor = services.GetRequiredService<IMountSupervisor>();
+        var configStore = services.GetRequiredService<IHostConfigStore>();
+
+        IStatusReadModel statusReadModel = new PlaceholderStatusReadModel(supervisor, configStore);
+        var launcher = new Win32ExternalLauncher(services.GetRequiredService<ILogger<Win32ExternalLauncher>>());
+        var actionDispatcher = new HostActionDispatcher(
+            supervisor, launcher, services.GetRequiredService<ILogger<HostActionDispatcher>>());
+
+        _mainWindow = new MainWindow { Logger = services.GetRequiredService<ILogger<MainWindow>>() };
+        _mainWindow.Configure(statusReadModel, actionDispatcher);
+
+        // ADR-018 rule 3: closing the window hides it to tray, never exits. The only way to exit
+        // is the tray's "Exit" item (TrayIconController) or a future explicit Exit command, both
+        // of which call Application.Shutdown() directly rather than Window.Close() -- Closing is
+        // therefore never raised on the real exit path, only on the user clicking the window's own
+        // X button.
+        _mainWindow.Closing += (_, closingArgs) =>
+        {
+            closingArgs.Cancel = true;
+            _mainWindowController?.HideToTray();
+        };
+
+        var placementStore = new JsonWindowPlacementStore(
+            JsonWindowPlacementStore.GetDefaultFilePath(),
+            services.GetRequiredService<ILogger<JsonWindowPlacementStore>>());
+
+        _mainWindowController = new MainWindowController(
+            _mainWindow,
+            placementStore,
+            new WpfVirtualScreenProvider(),
+            services.GetRequiredService<ILogger<MainWindowController>>());
+
+        _trayIconController = new TrayIconController(
+            statusReadModel,
+            supervisor,
+            actionDispatcher,
+            _mainWindowController,
+            services.GetRequiredService<ILogger<TrayIconController>>());
+
+        // bs-2wa / ADR-018 Decision 6: a second launch is a user asking to see Bosun. Raised on
+        // EventWaitHandleActivationChannel's dedicated listener thread, never the UI thread -- see
+        // its class remarks -- so this must marshal back onto the dispatcher before touching any
+        // WPF object.
+        SingleInstance.ActivationRequested += (_, _) =>
+            Dispatcher.BeginInvoke(() => _mainWindowController?.ShowAndActivate());
+
+        _mainWindowController.Initialize(LaunchContextDetector.Detect(args));
     }
 
     protected override async void OnExit(ExitEventArgs e)
     {
+        // Persists whatever geometry the window currently has, whether or not it is visible right
+        // now -- harmless when HideToTray already persisted it (the common path), and the only
+        // thing that captures a final geometry for a user who exits via the tray's "Exit" item
+        // while the window is open (that path never goes through HideToTray).
+        _mainWindowController?.PersistCurrentPlacement();
+        _trayIconController?.Dispose();
+
         if (_host is not null)
         {
             using var cts = new CancellationTokenSource(HostStopTimeout);

@@ -1102,3 +1102,17 @@ detection. Rejected on ADR-012's own reasoning about login-time focus stealing.
 window is built to be closed. Nothing here prevents leaving it open, and if that
 turns out to be how it gets used, the content is the same either way.
 
+**Amendment (`bs-ww9.3`): the launch-context flag.** The Consequences section above
+says E10's autostart registration "must pass whatever flag rule 2 keys off" without
+naming it — this records the answer, verified rather than left to be reinvented.
+
+The flag is a command-line switch, `--autostart`, matched case-insensitively and
+independent of position (`Bosun.UI.LaunchContextDetector.Detect`, tested in
+`LaunchContextDetectorTests`). E10's `shell:startup` shortcut must point at
+`Bosun.exe --autostart`; anything launched without that exact flag — a desktop
+shortcut, `Bosun.exe` typed at a prompt, a debugger launch — is `LaunchContext.Manual`
+and shows the window. A command-line switch was chosen over an environment variable
+or a marker file because it is visible in the shortcut's own Target field (so the
+autostart registration is self-documenting to anyone who inspects it) and needs no
+process-wide state that could leak into a manual launch started from the same shell.
+
