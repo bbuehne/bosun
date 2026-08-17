@@ -39,6 +39,8 @@ public sealed class MutexSingleInstanceGuard : ISingleInstanceGuard
         _name = name ?? DefaultName;
     }
 
+    public bool IsOwned => _owned;
+
     public bool TryAcquire()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

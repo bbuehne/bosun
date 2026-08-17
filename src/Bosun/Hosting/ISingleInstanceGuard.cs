@@ -27,4 +27,19 @@ public interface ISingleInstanceGuard : IDisposable
     /// A crashed previous holder must never permanently lock the user out of running Bosun.
     /// </remarks>
     bool TryAcquire();
+
+    /// <summary>
+    /// <see langword="true"/> if this instance currently holds the guard -- i.e. the most recent
+    /// <see cref="TryAcquire"/> call returned <see langword="true"/> and <see cref="IDisposable.Dispose"/>
+    /// has not been called since. <see langword="false"/> before any acquisition attempt, after a
+    /// failed one, or after release.
+    /// </summary>
+    /// <remarks>
+    /// This is the seam <see cref="BootstrapOrchestrator"/> asserts against (bs-2wa) so that
+    /// building the host without first establishing single-instance primacy is a loud,
+    /// immediate failure rather than a silent startup-ordering bug that only manifests as two
+    /// mount supervisors racing for the same drive letters. See
+    /// <see cref="BootstrapOrchestrator.TryCreateHost"/>'s remarks.
+    /// </remarks>
+    bool IsOwned { get; }
 }

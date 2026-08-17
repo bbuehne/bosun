@@ -25,21 +25,37 @@ namespace Bosun.Hosting;
 /// ADR-012 assigns those to different channels (persistent tray icon, toast, first-run window),
 /// which is E12b's job, not this one's.
 /// </para>
+/// <para>
+/// <b>Single-instance primacy is a precondition, asserted, not merely documented (bs-2wa).</b>
+/// <see cref="TryCreateHost"/> requires the injected <see cref="ISingleInstanceGuard"/> to report
+/// <see cref="ISingleInstanceGuard.IsOwned"/> before it will call <c>hostFactory</c>. A comment
+/// telling <c>App.OnStartup</c> to call <c>SingleInstanceOrchestrator.TryBecomePrimary()</c> first
+/// is exactly the kind of rule a later reorder can silently violate -- nothing would fail, a
+/// second launch would just create the log directory, spawn <c>rclone rcd</c>, and race the first
+/// instance for the same drive letters before anyone noticed. Making this an injected dependency
+/// this class checks turns that into an immediate, loud <see cref="InvalidOperationException"/>
+/// instead -- a startup-ordering bug, not a runtime failure, so it deliberately is NOT caught by
+/// the try/catch below and NOT routed through the catastrophic notifier (which would misreport it
+/// to the user as an environment problem rather than a code defect).
+/// </para>
 /// </remarks>
 public sealed class BootstrapOrchestrator
 {
     private readonly Func<IHost> _hostFactory;
     private readonly ICatastrophicStartupNotifier _notifier;
     private readonly IBootstrapDiagnosticSink _diagnosticSink;
+    private readonly ISingleInstanceGuard _singleInstanceGuard;
 
     public BootstrapOrchestrator(
         Func<IHost> hostFactory,
         ICatastrophicStartupNotifier notifier,
-        IBootstrapDiagnosticSink diagnosticSink)
+        IBootstrapDiagnosticSink diagnosticSink,
+        ISingleInstanceGuard singleInstanceGuard)
     {
         _hostFactory = hostFactory;
         _notifier = notifier;
         _diagnosticSink = diagnosticSink;
+        _singleInstanceGuard = singleInstanceGuard;
     }
 
     /// <summary>
@@ -47,8 +63,24 @@ public sealed class BootstrapOrchestrator
     /// failure and blocks on the catastrophic notifier, then returns <see langword="null"/> so the
     /// caller can exit without a second, uncaught throw.
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The injected <see cref="ISingleInstanceGuard"/> does not report <see cref="ISingleInstanceGuard.IsOwned"/>
+    /// -- i.e. this process has not established single-instance primacy (bs-2wa). See the class
+    /// remarks: this is a startup-ordering bug and is deliberately not caught here.
+    /// </exception>
     public IHost? TryCreateHost()
     {
+        if (!_singleInstanceGuard.IsOwned)
+        {
+            throw new InvalidOperationException(
+                "BootstrapOrchestrator.TryCreateHost() was called before this process established " +
+                "single-instance primacy (bs-2wa / ADR-018 Decision 6). SingleInstanceOrchestrator." +
+                "TryBecomePrimary() must be called, and must return true, before the host is built -- " +
+                "otherwise a second launch could create the log directory, spawn rclone rcd, or write " +
+                "the Terminal fragment before discovering it should have exited. This is a " +
+                "startup-ordering bug in App.OnStartup, not a runtime failure.");
+        }
+
         try
         {
             return _hostFactory();

@@ -82,13 +82,27 @@ public sealed class MutexSingleInstanceGuardTests
     {
         var name = UniqueName();
 
-        // Simulate a previous Bosun process that died while holding the mutex: acquire it on a
-        // background OS thread and let that thread exit WITHOUT calling ReleaseMutex. Mutex
-        // ownership in Windows is per-thread, so the thread terminating abandons it -- exactly
-        // what happens when the owning process crashes.
+        // A named kernel object is destroyed as soon as its LAST open handle closes, regardless
+        // of abandonment status. If nothing here held a handle open across the background thread
+        // below closing its own, the object would simply cease to exist the moment that thread's
+        // `using` disposed it -- and MutexSingleInstanceGuard.TryAcquire's own
+        // `new Mutex(false, _name, out _)` a few lines down would then silently create a BRAND
+        // NEW, unowned object instead of ever observing the abandonment, so no
+        // AbandonedMutexException would fire and this test would pass for the wrong reason (which
+        // is exactly what an earlier draft of this test did -- confirmed via a standalone repro:
+        // WaitOne returned true normally, never throwing). Keeping this handle open for the whole
+        // test is what makes the abandonment actually observable.
+        using var keepAlive = new Mutex(initiallyOwned: false, name, out _);
+
+        // Simulate a previous Bosun process that died while holding the mutex: acquire it (via
+        // its OWN separate handle, opened by name -- not initiallyOwned, since keepAlive above
+        // already created the object) on a background OS thread, and let that thread exit
+        // WITHOUT calling ReleaseMutex. Mutex ownership in Windows is per-thread, so the thread
+        // terminating abandons it -- exactly what happens when the owning process crashes.
         var thread = new Thread(() =>
         {
-            using var abandoned = new Mutex(initiallyOwned: true, name, out _);
+            using var abandoned = new Mutex(initiallyOwned: false, name, out _);
+            abandoned.WaitOne();
             // Deliberately no ReleaseMutex() here.
         });
         thread.Start();
