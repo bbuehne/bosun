@@ -27,8 +27,13 @@
             </Grid.ColumnDefinitions>
             <TextBlock x:Name="HealthTextBlock" Grid.Column="0" FontWeight="Bold" VerticalAlignment="Center" />
             <!-- bs-ww9.8 / ADR-019: the window can create hosts too, not just edit/delete them
-                 from the per-row context menu below. -->
-            <Button x:Name="AddHostButton" Grid.Column="1" Content="Add Host..." Click="OnAddHostClick" />
+                 from the per-row context menu below. bs-ww9.9 adds importing a Bitvise/Tunnelier
+                 profile as an alternate way into the same "Add Host" flow: it only pre-fills the
+                 form that opens next; it never writes a host by itself. -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button x:Name="ImportBitviseButton" Content="Import from Bitvise..." Margin="0,0,8,0" Click="OnImportBitviseClick" />
+                <Button x:Name="AddHostButton" Content="Add Host..." Click="OnAddHostClick" />
+            </StackPanel>
         </Grid>
 
         <DataGrid x:Name="HostsGrid"

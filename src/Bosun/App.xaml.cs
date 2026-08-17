@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Threading;
 using Bosun.Configuration;
 using Bosun.Hosting;
+using Bosun.Import;
 using Bosun.SessionMonitor;
 using Bosun.Status;
 using Bosun.Supervisor;
@@ -189,7 +190,9 @@ public partial class App : Application
             hostEditorController,
             configStore,
             new Win32IdentityFilePicker(),
-            new Win32DriveLetterInspector());
+            new Win32DriveLetterInspector(),
+            new Win32BitviseProfilePicker(),
+            new BitviseProfileParser());
 
         // ADR-018 rule 3: closing the window hides it to tray, never exits. The only way to exit
         // is the tray's "Exit" item (TrayIconController) or a future explicit Exit command, both

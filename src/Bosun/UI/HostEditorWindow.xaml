@@ -62,6 +62,13 @@
                 <Button x:Name="BrowseIdentityFileButton" Grid.Column="1" Content="Browse..." Margin="6,0,0,0" Click="OnBrowseIdentityFileClick" />
             </Grid>
             <TextBlock x:Name="IdentityFileError" Style="{StaticResource FieldErrorStyle}" />
+            <!-- bs-ww9.9 / ADR-019: only shown when this form was opened from "Import from
+                 Bitvise...". "Import cannot supply the key" is the one thing users will most
+                 expect it to do, so it is said plainly right next to the field it affects rather
+                 than leaving the field mysteriously blank. -->
+            <TextBlock x:Name="ImportNoticeTextBlock"
+                       Foreground="#8A6D00" Background="#FFF6DC" TextWrapping="Wrap"
+                       Padding="6" Margin="0,4,0,0" Visibility="Collapsed" />
 
             <Separator Margin="0,16,0,8" />
             <TextBlock Text="Mount" FontWeight="Bold" Margin="0,0,0,4" />

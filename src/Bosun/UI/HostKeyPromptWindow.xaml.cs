@@ -11,12 +11,26 @@ public partial class HostKeyPromptWindow : Window
 {
     private readonly HostEditorController _controller;
 
-    public HostKeyPromptWindow(HostEditorController controller)
+    /// <param name="controller">Used to reject a key that already names another host.</param>
+    /// <param name="initialKey">Pre-fills the key field -- used by the Bitvise import flow
+    /// (bs-ww9.9, ADR-019), which derives a suggested short name from the imported profile's file
+    /// name (<see cref="Bosun.Import.BitviseShortNameDeriver"/>). <see langword="null"/> or blank
+    /// for the ordinary "Add Host" flow, which starts empty as before.</param>
+    public HostKeyPromptWindow(HostEditorController controller, string? initialKey = null)
     {
         ArgumentNullException.ThrowIfNull(controller);
         InitializeComponent();
         _controller = controller;
         ContinueButton.IsEnabled = false;
+
+        if (!string.IsNullOrWhiteSpace(initialKey))
+        {
+            // Setting Text fires OnKeyTextChanged, which runs the same uniqueness check a typed
+            // key gets -- a suggested key that collides with an existing host is caught here, not
+            // silently accepted.
+            KeyTextBox.Text = initialKey;
+            KeyTextBox.SelectAll();
+        }
     }
 
     /// <summary>The confirmed, trimmed key. Only meaningful when <see cref="Window.DialogResult"/>

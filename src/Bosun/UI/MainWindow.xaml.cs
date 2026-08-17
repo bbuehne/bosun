@@ -1,8 +1,10 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Bosun.Configuration;
+using Bosun.Import;
 using Bosun.Supervisor;
 using Bosun.UI.HostEditor;
 using Bosun.UI.Tray;
@@ -50,6 +52,11 @@ public partial class MainWindow : Window, IAppWindow
     private IIdentityFilePicker? _identityFilePicker;
     private IDriveLetterInspector? _driveLetterInspector;
 
+    // bs-ww9.9 / ADR-019: Bitvise/Tunnelier profile import. Null until ConfigureHostEditor is
+    // called, same lifecycle as the fields above.
+    private IBitviseProfilePicker? _bitviseProfilePicker;
+    private IBitviseProfileParser? _bitviseProfileParser;
+
     public ILogger<MainWindow>? Logger { get; set; }
 
     public MainWindow()
@@ -78,12 +85,16 @@ public partial class MainWindow : Window, IAppWindow
         HostEditorController hostEditorController,
         IHostConfigStore hostConfigStore,
         IIdentityFilePicker identityFilePicker,
-        IDriveLetterInspector driveLetterInspector)
+        IDriveLetterInspector driveLetterInspector,
+        IBitviseProfilePicker bitviseProfilePicker,
+        IBitviseProfileParser bitviseProfileParser)
     {
         _hostEditorController = hostEditorController;
         _hostConfigStore = hostConfigStore;
         _identityFilePicker = identityFilePicker;
         _driveLetterInspector = driveLetterInspector;
+        _bitviseProfilePicker = bitviseProfilePicker;
+        _bitviseProfileParser = bitviseProfileParser;
     }
 
     private void OnAddHostClick(object sender, RoutedEventArgs e)
@@ -108,6 +119,78 @@ public partial class MainWindow : Window, IAppWindow
                 _driveLetterInspector!.InUseLetters(),
                 form.IsNewHost ? null : form.Key),
             form) { Owner = this }.ShowDialog();
+    }
+
+    /// <summary>"Import from Bitvise..." (bs-ww9.9, ADR-019): picks a profile file, parses it, and
+    /// -- only on success -- opens the ordinary new-host flow with the form pre-filled. Never
+    /// writes a host directly; the user still confirms via <see cref="HostEditorWindow"/>'s normal
+    /// Save.</summary>
+    private void OnImportBitviseClick(object sender, RoutedEventArgs e)
+    {
+        if (_hostEditorController is null || _identityFilePicker is null
+            || _bitviseProfilePicker is null || _bitviseProfileParser is null || _hostConfigStore is null)
+        {
+            return;
+        }
+
+        var path = _bitviseProfilePicker.PickProfileFile();
+        if (path is null)
+        {
+            return;
+        }
+
+        byte[] bytes;
+        try
+        {
+            bytes = File.ReadAllBytes(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Logger?.LogWarning(ex, "Could not read Bitvise profile {Path}", path);
+            MessageBox.Show(
+                this,
+                $"Could not read '{path}':{Environment.NewLine}{ex.Message}",
+                "Import failed",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return;
+        }
+
+        var imported = _bitviseProfileParser.Parse(bytes);
+        if (!imported.Succeeded)
+        {
+            Logger?.LogInformation("Bitvise import of {Path} did not find a usable hostname: {Error}", path, imported.Error);
+            MessageBox.Show(
+                this,
+                $"Could not import '{Path.GetFileName(path)}':{Environment.NewLine}{imported.Error}",
+                "Import failed",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        var suggestedKey = BitviseShortNameDeriver.Derive(Path.GetFileName(path));
+        var prompt = new HostKeyPromptWindow(_hostEditorController, suggestedKey) { Owner = this };
+        if (prompt.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var form = _hostEditorController.CreateImportedHostForm(prompt.HostKey, imported);
+        new HostEditorWindow(
+            _hostEditorController,
+            _identityFilePicker!,
+            HostEditorController.BuildDriveLetterOptions(
+                _hostConfigStore.Current,
+                _driveLetterInspector!.InUseLetters(),
+                editingHostKey: null),
+            form,
+            importNotice:
+                "Imported from Bitvise — hostname, username, and port were pre-filled from the "
+                + "profile, but the key was not. Bitvise stores keys in its own store, not as "
+                + "files, so this could not be imported: choose an OpenSSH private key file below, "
+                + "or export one from Bitvise's key manager first.")
+        { Owner = this }.ShowDialog();
     }
 
     private void OpenEditHostDialog(string hostKey)

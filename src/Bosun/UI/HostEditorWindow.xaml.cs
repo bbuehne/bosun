@@ -21,11 +21,16 @@ public partial class HostEditorWindow : Window
     private readonly IIdentityFilePicker _filePicker;
     private readonly Dictionary<HostFormFieldId, (Control Control, TextBlock? ErrorBlock)> _fieldControls;
 
+    /// <param name="importNotice">When non-null/blank, shown as a banner beneath the identity-file
+    /// field (bs-ww9.9, ADR-019) -- used by the "Import from Bitvise..." flow to say plainly that
+    /// the key could not be imported, rather than leaving the field mysteriously blank.
+    /// <see langword="null"/> for the ordinary add/edit flows, which show nothing.</param>
     public HostEditorWindow(
         HostEditorController controller,
         IIdentityFilePicker filePicker,
         IReadOnlyList<DriveLetterOption> driveLetters,
-        HostFormModel model)
+        HostFormModel model,
+        string? importNotice = null)
     {
         ArgumentNullException.ThrowIfNull(controller);
         ArgumentNullException.ThrowIfNull(filePicker);
@@ -78,6 +83,12 @@ public partial class HostEditorWindow : Window
         TabColorPaletteItems.ItemsSource = TabColorPalette.Choices;
 
         LoadFromModel(model);
+
+        if (!string.IsNullOrWhiteSpace(importNotice))
+        {
+            ImportNoticeTextBlock.Text = importNotice;
+            ImportNoticeTextBlock.Visibility = Visibility.Visible;
+        }
     }
 
     private void LoadFromModel(HostFormModel model)
