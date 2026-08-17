@@ -1,0 +1,40 @@
+<Window x:Class="Bosun.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Bosun" MinWidth="400" MinHeight="300" Width="900" Height="600">
+    <!--
+        ADR-018: a real, resizable window with a taskbar entry and Alt+Tab presence while shown.
+        Show/hide/activate and geometry persistence are owned by MainWindowController (see
+        MainWindow.xaml.cs); this file is chrome only.
+
+        Content is intentionally minimal: a host table with a per-row context menu built from the
+        same HostContextMenuBuilder/HostActionDispatcher the tray uses (ADR-018: "two surfaces can
+        now trigger the same action ... both post commands to the supervisor channel"). Causal
+        status text (ADR-012 Decision 3) and a scrollable transition-log view are bs-ww9.6 and
+        bs-ww9.1's jobs respectively, not built here; see MainWindow.xaml.cs's remarks.
+    -->
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="HealthTextBlock" Grid.Row="0" FontWeight="Bold" Margin="0,0,0,8" />
+
+        <DataGrid x:Name="HostsGrid"
+                  Grid.Row="1"
+                  AutoGenerateColumns="False"
+                  IsReadOnly="True"
+                  CanUserAddRows="False"
+                  CanUserDeleteRows="False"
+                  HeadersVisibility="Column"
+                  GridLinesVisibility="Horizontal">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Host" Binding="{Binding DisplayName}" Width="180" />
+                <DataGridTextColumn Header="State" Binding="{Binding State}" Width="110" />
+                <DataGridTextColumn Header="Drive" Binding="{Binding Drive}" Width="60" />
+                <DataGridTextColumn Header="Status" Binding="{Binding StatusText}" Width="*" />
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</Window>

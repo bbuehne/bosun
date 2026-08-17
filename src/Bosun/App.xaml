@@ -4,10 +4,12 @@
              xmlns:local="clr-namespace:Bosun"
              ShutdownMode="OnExplicitShutdown">
     <!--
-        No StartupUri: Bosun has no main window. The tray icon (H.NotifyIcon)
-        arrives in E9 and will own the app's visible surface. ShutdownMode is
-        explicit so the app keeps running with zero windows open, which is the
-        steady state for a tray app.
+        No StartupUri: ADR-018 makes Bosun a normal windowed app that lives in the tray, but
+        launch context (autostart vs manual; see Bosun.UI.LaunchContextDetector) decides
+        whether the window is shown at all, so App.xaml.cs constructs and conditionally shows
+        MainWindow itself rather than declaring it here. ShutdownMode stays explicit: closing the
+        window hides it to tray (never exits), and the tray icon (H.NotifyIcon) is the always-on
+        surface for the steady state where no window is open.
     -->
     <Application.Resources>
 
