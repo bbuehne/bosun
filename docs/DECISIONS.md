@@ -666,9 +666,29 @@ implementation shipped on `main`. This ADR records the reasoning and ratifies it
 rather than leaving live behaviour resting on an unrecorded interpretation.
 
 **Decision.** A user-requested unmount **parks** the host. It stays unmounted
-until one of: an explicit user remount, a configuration reload, or an application
-restart. The host continues to probe normally while parked — it simply does not
-auto-mount. The parked state is exposed in the supervisor snapshot.
+until one of: an explicit user remount, or an application restart. The host
+continues to probe normally while parked — it simply does not auto-mount. The
+parked state is exposed in the supervisor snapshot.
+
+**Amendment (`bs-7ck`): a config reload no longer un-parks.** This ADR originally
+listed "a configuration reload" alongside an explicit remount and a restart, and
+`docs/ARCHITECTURE.md` §4 rule 9 said the same. That was written when a reload
+meant the user had deliberately opened `hosts.toml` in an editor and saved it —
+itself an act of intent, and a rare one.
+
+ADR-019 makes that false. The window now writes `hosts.toml` on **every** host
+edit, so under the original wording a drive the user had explicitly unmounted
+would come back the next time they changed *any* host's tab colour. The click that
+un-parks would be one the user never connected to that host at all.
+
+Parking is deliberately in-memory and is not persisted to config, so a restart
+still clears it — that is unchanged and correct: a fresh process has no memory of
+a session-scoped decision. What is removed is the middle term. The rule is now
+symmetric with how parking is *set*: an explicit user action sets it, and only an
+explicit user action clears it.
+
+Found by independent test authorship of `bs-7ck`, which spotted that its spec and
+this one disagreed rather than implementing to one and leaving the other stale.
 
 **Reasoning.**
 

@@ -625,11 +625,61 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
     {
         try
         {
+            // RE-PROVISION BEFORE THE SUPERVISOR SEES THE CHANGE (bs-0tn). This ordering is the
+            // whole point of the call, not a detail.
+            //
+            // An rclone remote is named `bosun-<key>` -- derived from the host KEY alone, never
+            // from its hostname. EnsureRemoteAsync is what writes hostname/port/user/key into it,
+            // and until config reload existed it was called only here at startup. A hostname change
+            // therefore required a restart, and the restart is what silently kept the remote
+            // correct.
+            //
+            // Config reload removes that restart. Without this call the supervisor would drain a
+            // renamed host, re-probe it (correctly -- IProbe reads Hostname directly, so the probe
+            // hits the NEW machine and succeeds), and then remount `bosun-<key>:` which is still
+            // configured for the OLD one. The drive letter returns, every state assertion reads
+            // healthy, and the user reads and writes the wrong server's files. That is worse than a
+            // wedged drive: a wedge is obvious, this is silent.
+            //
+            // EnsureRemoteAsync is idempotent -- it reads the current remote and rewrites only on
+            // difference -- so doing this on every config change costs one `config/get` per host.
+            await EnsureRemotesForChangedConfigAsync(config).ConfigureAwait(false);
+
             await mountSupervisor!.ConfigChangedAsync(config, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "Failed to apply a config change to the mount supervisor");
+        }
+    }
+
+    /// <summary>
+    /// Re-asserts every configured host's rclone remote (bs-0tn). Failures are logged per host and
+    /// do not abort the reload: a remote that could not be rewritten means that ONE host may mount
+    /// stale, which is bad, but abandoning the whole reload would also strand every other host's
+    /// change — including a drive-letter change whose drain is the thing keeping Invariant I2.
+    /// </summary>
+    private async Task EnsureRemotesForChangedConfigAsync(BosunConfig config)
+    {
+        if (remoteProvisioner is null)
+        {
+            return;
+        }
+
+        foreach (var host in config.Hosts.Values)
+        {
+            try
+            {
+                await remoteProvisioner.EnsureRemoteAsync(host, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(
+                    ex,
+                    "Could not re-provision the rclone remote for {HostKey} after a config change; it may mount " +
+                    "against stale connection details until Bosun restarts",
+                    host.Key);
+            }
         }
     }
 

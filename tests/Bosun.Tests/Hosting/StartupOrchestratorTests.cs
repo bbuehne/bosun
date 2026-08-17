@@ -339,6 +339,54 @@ public sealed class StartupOrchestratorTests
         Assert.Single(harness.RcloneClient.MountCalls);
     }
 
+    /// <summary>
+    /// bs-0tn: a config change must re-provision rclone remotes BEFORE the supervisor acts on it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// An rclone remote is named <c>bosun-&lt;key&gt;</c> — derived from the host KEY alone, never
+    /// from its hostname. <c>EnsureRemoteAsync</c> is what writes hostname/port/user into it, and
+    /// before config reload existed it ran only at startup. A hostname change therefore needed a
+    /// restart, and that restart is what silently kept the remote correct.
+    /// </para>
+    /// <para>
+    /// <b>Catches:</b> a reload that hands the change to the supervisor without re-provisioning
+    /// first. The supervisor drains the renamed host, re-probes it — correctly, because
+    /// <c>IProbe</c> reads <c>Hostname</c> directly and so hits the NEW machine and succeeds — and
+    /// then remounts <c>bosun-&lt;key&gt;:</c>, still configured for the OLD one. The drive letter
+    /// returns and every state assertion reads healthy while the user reads and writes the wrong
+    /// server's files. That is worse than a wedged drive: a wedge is obvious, this is silent.
+    /// Reordering the two awaits in <c>HandleConfigChangedAsync</c> reintroduces it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AConfigChangeReprovisionsRemotesBeforeTheSupervisorSeesIt()
+    {
+        var host = HostBlock("nas", MountMode.Persistent, drive: "P:");
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]));
+
+        await harness.StartAsync();
+
+        var provisionsAtStartup = harness.Provisioner.EnsureRemoteCalls.Count;
+        Assert.True(provisionsAtStartup > 0, "startup should already have provisioned once");
+
+        // Rewrite the host with a different hostname -- the case where a stale remote silently
+        // serves the wrong machine.
+        var renamed = HostBlock("nas", MountMode.Persistent, drive: "P:")
+            .Replace("nas.example.internal", "moved.example.internal", StringComparison.Ordinal);
+        File.WriteAllText(harness.ConfigPath, ValidConfig(hostBlocks: [renamed]));
+
+        await AdvanceUntilAsync(
+            harness.SupervisorTime,
+            TimeSpan.FromSeconds(1),
+            () => harness.Provisioner.EnsureRemoteCalls.Count > provisionsAtStartup);
+
+        Assert.True(
+            harness.Provisioner.EnsureRemoteCalls.Count > provisionsAtStartup,
+            "a config change must re-assert the rclone remote; otherwise a renamed host remounts "
+            + $"against stale connection details. Calls: {string.Join(", ", harness.Provisioner.EnsureRemoteCalls)}");
+    }
+
     [Fact]
     public async Task StopAsync_CompletesWithoutHangingAfterAFullStart()
     {
