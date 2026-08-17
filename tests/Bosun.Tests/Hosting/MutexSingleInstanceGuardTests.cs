@@ -116,6 +116,55 @@ public sealed class MutexSingleInstanceGuardTests
     }
 
     [Fact]
+    public void IsOwned_IsFalse_BeforeAnyTryAcquireCall()
+    {
+        var name = UniqueName();
+        using var guard = new MutexSingleInstanceGuard(name);
+
+        Assert.False(guard.IsOwned);
+    }
+
+    [Fact]
+    public void IsOwned_IsTrue_AfterASuccessfulTryAcquire()
+    {
+        var name = UniqueName();
+        using var guard = new MutexSingleInstanceGuard(name);
+
+        Assert.True(guard.TryAcquire());
+        Assert.True(guard.IsOwned);
+    }
+
+    [Fact]
+    public void IsOwned_IsFalse_OnAnInstanceWhoseTryAcquireFailed()
+    {
+        // bs-2wa: BootstrapOrchestrator.TryCreateHost() asserts IsOwned to decide whether the
+        // startup-ordering precondition held -- if IsOwned ever reported true for an instance
+        // that never actually won the mutex, that assertion would silently stop protecting
+        // anything. See BootstrapOrchestratorTests.TryCreateHost_Throws_WhenSingleInstancePrimacyWasNotEstablished.
+        var name = UniqueName();
+        using var holder = new BackgroundHolder(name);
+        Assert.True(holder.Acquired);
+
+        using var second = new MutexSingleInstanceGuard(name);
+        Assert.False(second.TryAcquire());
+
+        Assert.False(second.IsOwned);
+    }
+
+    [Fact]
+    public void IsOwned_IsFalse_AfterDispose()
+    {
+        var name = UniqueName();
+        var guard = new MutexSingleInstanceGuard(name);
+        Assert.True(guard.TryAcquire());
+        Assert.True(guard.IsOwned);
+
+        guard.Dispose();
+
+        Assert.False(guard.IsOwned);
+    }
+
+    [Fact]
     public void Dispose_ReleasesWithoutThrowing_WhenTryAcquireWasNeverCalled()
     {
         var name = UniqueName();
