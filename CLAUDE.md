@@ -164,6 +164,46 @@ testable.
 - **Ask before inventing behaviour.** If the spec is ambiguous, file a `bs-` issue
   tagged `needs-decision` and move to other unblocked work rather than guessing.
 
+### Branching and landing work (`bs-6go`)
+
+**Every branch is cut from `main`. Never stack a branch on another open branch.**
+Beads already carries the dependency DAG; git does not need to re-encode it, and
+stacking has now caused two incidents where work merged green and never reached
+`main`:
+
+- PR #23 merged into a base branch that had itself merged 41 seconds earlier. The
+  base was gone, so the content landed nowhere. GitHub reported it MERGED.
+- PR #24 was merged against a **stale head** — GitHub had `6932e78`, the branch
+  was at `2541079` — silently dropping the two most recent commits.
+
+The cost of main-based branches is more conflicts in `.beads/issues.jsonl`, which
+is a generated file with a documented regeneration rule (§3). That is a trade
+worth making.
+
+**A green, merged PR is not evidence the code is on `main`.** Verify by content:
+
+```
+git show origin/main:<path> | grep <a distinctive string from the change>
+```
+
+`git merge-base --is-ancestor` is **not** a sufficient check — it reports
+"content preserved via a rebuild" identically to "genuinely lost".
+
+**Before merging**, confirm GitHub's recorded head matches the real ref, because
+they have been observed to disagree:
+
+```
+gh pr view <n> --json headRefOid        # vs
+git ls-remote origin refs/heads/<branch>
+```
+
+**GitHub's view of this repo lags.** `pull_request` CI events frequently do not
+fire, and PR pages have returned 404 while the API worked fine. So: trigger CI
+explicitly with `gh workflow run build.yml --ref <branch>` and confirm the run's
+`headSha` equals the commit you care about — a PR showing "no checks" is not
+evidence of anything. When the web UI is unavailable, merge with
+`gh pr merge <n> --merge --delete-branch`, then content-check `main`.
+
 ---
 
 ## 6. Agent topology

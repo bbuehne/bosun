@@ -327,6 +327,44 @@ a host that is *known-stale* is a worse answer than one that is unknown.
 
 `mode = "none"` hosts remain untouched: they are not enabled, and are never probed.
 
+#### A failed mount attempt is paced too, on its own ladder
+
+Everything above paces `Unreachable → Probing` — a host that cannot be *reached*.
+A host can be perfectly reachable and still be impossible to **mount**: an expired
+key, a disabled SFTP subsystem, a drive letter already claimed by something else.
+That is a different failure and it needs its own rule (`bs-k4k`).
+
+**Every failed mount attempt paces the re-enable that follows it**, through a
+backoff ladder kept separate from the probe ladder (`MountRetryBackoff`). The
+failing attempt increments it before the drain begins, so the first retry already
+sits on rung one — **a failed mount is never retried immediately**. It uses the
+same configured `backoff_seconds` values.
+
+*Why this is not optional.* Without it the cycle
+`Ready → Mounting → Draining → Disabled → Probing → Ready` closes on a persistent
+host **with no clock advance anywhere in it**, and it is stack-recursive rather
+than channel-driven. In production that pegs a core, floods the target's auth log
+and `rclone` as fast as the network allows, and terminates in a
+`StackOverflowException` — which .NET permits no `catch` to intercept, so the
+process dies. Bosun dying is itself an Invariant I2 hazard: §6 handles
+crash-with-mounts-up via adopt-or-clear, but only if the user restarts it.
+
+*Why pace from the first failure rather than allowing N free retries.* The
+conditions that cause it do not clear in seconds. An expired key stays expired; a
+drive letter in use stays in use — and §6 already requires that case to "refuse the
+mount, surface the conflict in the tray, do not silently pick another letter."
+Free retries are nearer to *retry forever* than to *refuse*. The first rung is 5s
+by default, quick enough that a genuinely transient failure recovers unnoticed.
+
+*A successful mount resets the ladder*, exactly as a successful probe resets the
+probe ladder.
+
+**Pacing is only half the requirement.** A reachable host that cannot be mounted is
+a condition the user must be able to *see*; retrying it quietly forever is the
+failure ADR-012 Decision 3 exists to prevent, and it is worse here than the
+missing-WinFsp case, because the host looks healthy and only one drive is affected.
+Surfacing it is tracked as `bs-ww9.4` and is not yet implemented.
+
 ### Reconciliation
 
 Every supervisor tick, compare intended state against `mount/listmounts`. Drift
