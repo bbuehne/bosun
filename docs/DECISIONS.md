@@ -145,8 +145,8 @@ communicated in the UI, not hidden.
 **Status:** Accepted
 
 **Decision.** Write profiles to a fragment file under
-`...\Windows Terminal\Fragments\Bosun\`. Never read or write the user's
-`settings.json`.
+`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Bosun\bosun.json`. Never
+read or write the user's `settings.json`.
 
 **Reasoning.** Terminal rewrites `settings.json` whenever the user changes
 anything in its settings UI. Two writers means clobbering. Fragments are merged
@@ -154,9 +154,51 @@ at load time, are owned solely by us, and yield stable profile GUIDs derived fro
 source name plus profile name. Clean ownership split: Bosun owns host profiles,
 Terminal owns themes and keybindings.
 
-**Note for implementation.** The fragment directory differs between Store and
-unpackaged Terminal installs. Verify the current path against Microsoft's
-documentation rather than hardcoding from memory.
+**Amendment (`bs-4jn`): the verified path and GUID algorithm.** This ADR
+originally abbreviated the path as `...\Windows Terminal\Fragments\Bosun\` and
+told the implementer to verify it rather than hardcode from memory. That
+verification happened (against Microsoft Learn, `ms.date` 2025-11-10, fetched
+2026-08-16); this records the result, because the abbreviation **omits a path
+segment** and is wrong as a literal.
+
+*Path.* Two locations are read, regardless of whether Terminal itself is a Store
+or unpackaged install:
+
+| Scope | Path |
+|---|---|
+| All users | `%ProgramData%\Microsoft\Windows Terminal\Fragments\<app>\<file>.json` |
+| Per user | `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\<app>\<file>.json` |
+
+Bosun is an unpackaged per-user win-x64 executable, so it writes the **per-user**
+path. Note the `Microsoft\` segment. The Store-vs-unpackaged distinction this
+ADR's original note warned about is a red herring: it applies only to
+Store-*packaged* apps registering via an app-extension manifest
+(`PublicFolder\Fragments`), a different mechanism Bosun does not use.
+
+*Profile GUID.* UUIDv5, derived in two levels, with name strings encoded
+**UTF-16LE** before hashing:
+
+```
+appNamespace = UUIDv5(TERMINAL_FRAGMENT_NS, <app-name>)
+profileGuid  = UUIDv5(appNamespace, <profile-name>)
+TERMINAL_FRAGMENT_NS = {f65ddb7e-706b-4499-8a50-40313caf510a}
+```
+
+Microsoft documents a test vector: app `Git`, profile `Git Bash` →
+`{2ece5bfe-50ed-5f3a-ab87-5cd4baafed2b}`. Reproducing it is the unit test that
+proves the derivation, and it is pinned as one.
+
+*Failure surface.* Since microsoft/terminal#10601 (shipped 1.10.1933.0) Terminal
+wraps per-fragment parsing in try/catch, so a malformed fragment is skipped and
+others still load — but there is **no UI surface, toast, or default log entry**
+indicating that a fragment failed. Profiles appearing in Terminal's dropdown is
+the only available confirmation. Hence: validate our own JSON before writing it,
+and `docs/OPERATIONS.md`'s "Terminal profiles missing" triage row says so.
+
+*Related.* Invariant I5 in `CLAUDE.md` carried the same abbreviated path and is
+corrected alongside this. The shipped code was already right
+(`FragmentWriterOptions`), so this amendment closes a doc/code divergence rather
+than a defect.
 
 ---
 

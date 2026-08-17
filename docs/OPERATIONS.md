@@ -110,7 +110,7 @@ These cannot be automated and must be run by hand before any release.
 | Explorer hangs on a drive | Was a mount left up while the host went away? Check the supervisor log for a missed unmount. This is an ADR-005 violation and a bug. |
 | Drive never appears | Deep probe failing. Try `rclone lsd <remote>:` manually. |
 | Drive appears then vanishes | Expected on probe failure — check whether the host is genuinely reachable. |
-| Terminal profiles missing | Fragment path wrong for this Terminal install (Store vs unpackaged). Check the written file exists and is valid JSON. |
+| Terminal profiles missing | Terminal reports **nothing** when a fragment fails to parse — no toast, no UI surface, no default log entry; it skips that fragment and loads the rest. Profiles appearing in the dropdown is the only confirmation available. Check `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Bosun\bosun.json` exists and is valid JSON, then restart Terminal. Bosun's own log records each write. (The Store-vs-unpackaged path distinction is a red herring — see ADR-006's amendment.) |
 | Profile opens but the connection fails | No matching `Host <host-key>` block in `~/.ssh/config`. Bosun emits `ssh <host-key>` deliberately, so that your `ProxyJump` and friends still apply (ADR-013) — but it means the alias has to exist. Test it directly: `ssh <host-key>`. |
 | Profile lost its colours or font after a rename | Terminal derives profile identity from the GUID, and Bosun derives that GUID from the host's **config key**, not `display_name` (ADR-013). Renaming `display_name` should be safe; renaming the TOML key is what creates a new profile. |
 | Terminal profiles duplicated | Something wrote to `settings.json`. Invariant I5 violation. |
