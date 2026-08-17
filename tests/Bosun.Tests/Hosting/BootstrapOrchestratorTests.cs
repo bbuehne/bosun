@@ -14,10 +14,14 @@ namespace Bosun.Tests.Hosting;
 /// <see cref="FakeBootstrapDiagnosticSink"/> -- never <see cref="MessageBoxCatastrophicStartupNotifier"/>
 /// or <see cref="BootstrapDiagnosticSink"/>, so nothing here can pop a real dialog, write to the
 /// real Windows Event Log, or write to the real <c>%TEMP%</c>/<c>%LOCALAPPDATA%</c> (CLAUDE.md
-/// worktree-safety rules).
+/// worktree-safety rules). Every test also passes an <see cref="ISingleInstanceGuard"/> --
+/// <c>AlreadyPrimary</c> unless the test is specifically about bs-2wa's primacy precondition,
+/// which <see cref="TryCreateHost_Throws_WhenSingleInstancePrimacyWasNotEstablished"/> covers.
 /// </remarks>
 public sealed class BootstrapOrchestratorTests : IDisposable
 {
+    private static FakeSingleInstanceGuard AlreadyPrimary() => new(isOwned: true);
+
     private readonly string _tempDirectory =
         Path.Combine(Path.GetTempPath(), "bosun-tests", Guid.NewGuid().ToString("N"));
 
@@ -44,7 +48,7 @@ public sealed class BootstrapOrchestratorTests : IDisposable
         });
         var notifier = new FakeCatastrophicStartupNotifier();
         var sink = new FakeBootstrapDiagnosticSink();
-        var orchestrator = new BootstrapOrchestrator(() => expectedHost, notifier, sink);
+        var orchestrator = new BootstrapOrchestrator(() => expectedHost, notifier, sink, AlreadyPrimary());
 
         var host = orchestrator.TryCreateHost();
 
@@ -53,6 +57,38 @@ public sealed class BootstrapOrchestratorTests : IDisposable
         Assert.Equal(0, sink.CallCount);
 
         expectedHost.Dispose();
+    }
+
+    [Fact]
+    public void TryCreateHost_Throws_WhenSingleInstancePrimacyWasNotEstablished()
+    {
+        // bs-2wa: TryCreateHost must not silently proceed if App.OnStartup were ever reordered to
+        // call this before SingleInstanceOrchestrator.TryBecomePrimary() succeeds -- a second
+        // launch would otherwise create the log directory, spawn rclone rcd, and race the first
+        // instance for the same drive letters before anyone noticed. This is a startup-ordering
+        // bug in the CALLER, not a "host failed to construct" runtime failure, so it must be a
+        // loud, immediate exception -- never routed through the catastrophic notifier/diagnostic
+        // sink, which would misreport it to the user as an environment problem.
+        var hostFactoryCallCount = 0;
+        var notifier = new FakeCatastrophicStartupNotifier();
+        var sink = new FakeBootstrapDiagnosticSink();
+        var notPrimary = new FakeSingleInstanceGuard(); // IsOwned defaults to false
+        var orchestrator = new BootstrapOrchestrator(
+            () =>
+            {
+                hostFactoryCallCount++;
+                throw new InvalidOperationException("hostFactory must never be called in this test");
+            },
+            notifier,
+            sink,
+            notPrimary);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => orchestrator.TryCreateHost());
+
+        Assert.Contains("bs-2wa", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, hostFactoryCallCount);
+        Assert.Equal(0, notifier.CallCount);
+        Assert.Equal(0, sink.CallCount);
     }
 
     [Fact]
@@ -76,7 +112,8 @@ public sealed class BootstrapOrchestratorTests : IDisposable
                 ConfigPath = Path.Combine(Path.GetTempPath(), "hosts.toml"),
             }),
             notifier,
-            sink);
+            sink,
+            AlreadyPrimary());
 
         var host = orchestrator.TryCreateHost();
 
@@ -104,7 +141,8 @@ public sealed class BootstrapOrchestratorTests : IDisposable
         var orchestrator = new BootstrapOrchestrator(
             () => throw new IOException("simulated CreateHost failure"),
             notifier,
-            brokenSink);
+            brokenSink,
+            AlreadyPrimary());
 
         // Must not throw -- TryCreateHost itself must survive a sink that violates its "never
         // throw" contract.
@@ -122,7 +160,8 @@ public sealed class BootstrapOrchestratorTests : IDisposable
         var orchestrator = new BootstrapOrchestrator(
             () => throw new InvalidOperationException("never called in this test"),
             new FakeCatastrophicStartupNotifier(),
-            brokenSink);
+            brokenSink,
+            AlreadyPrimary());
 
         var exception = Record.Exception(() =>
             orchestrator.RecordPreLoggerFailure("some pre-logger failure", new Exception("boom")));
@@ -137,7 +176,7 @@ public sealed class BootstrapOrchestratorTests : IDisposable
         var notifier = new FakeCatastrophicStartupNotifier();
         var sink = new FakeBootstrapDiagnosticSink();
         var orchestrator = new BootstrapOrchestrator(
-            () => throw new InvalidOperationException("unused"), notifier, sink);
+            () => throw new InvalidOperationException("unused"), notifier, sink, AlreadyPrimary());
 
         var boom = new InvalidOperationException("fatal during startup");
         orchestrator.ReportTerminalPreLoggerFailure("Bosun could not start.", boom);
@@ -156,7 +195,7 @@ public sealed class BootstrapOrchestratorTests : IDisposable
         var notifier = new FakeCatastrophicStartupNotifier();
         var sink = new FakeBootstrapDiagnosticSink(new IOException("diagnostic sink is broken too"));
         var orchestrator = new BootstrapOrchestrator(
-            () => throw new InvalidOperationException("unused"), notifier, sink);
+            () => throw new InvalidOperationException("unused"), notifier, sink, AlreadyPrimary());
 
         orchestrator.ReportTerminalPreLoggerFailure("Bosun could not start.", new IOException("disk"));
 
@@ -171,7 +210,7 @@ public sealed class BootstrapOrchestratorTests : IDisposable
         var notifier = new ThrowingCatastrophicStartupNotifier();
         var sink = new FakeBootstrapDiagnosticSink();
         var orchestrator = new BootstrapOrchestrator(
-            () => throw new InvalidOperationException("unused"), notifier, sink);
+            () => throw new InvalidOperationException("unused"), notifier, sink, AlreadyPrimary());
 
         // The process is already terminating; failing to display must not add a second exception on
         // the way down, which would replace a legible message with a crash dump.

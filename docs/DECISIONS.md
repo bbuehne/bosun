@@ -1002,3 +1002,103 @@ drives-disappear-and-reappear posture of ADR-005. Rejected because it discards
 working mounts that survived a sleep perfectly well, and the daily cost of that
 lands on the one user this tool exists for.
 
+---
+
+## ADR-018 — A windowed application that lives in the tray, not a tray applet
+
+**Status:** Accepted. Supersedes the "no main window" clause of
+`docs/ARCHITECTURE.md` §2. Extends ADR-012 rather than replacing it.
+
+**Context.** The original design was a tray applet: no main window, a context
+menu, and a status window popped on demand. That was a reasonable default for a
+daemon — Bosun's real output is drive letters and Terminal profiles, and you
+interact with it through Explorer and Windows Terminal, not through Bosun.
+
+Two things pushed against it. ADR-012 loaded real weight onto the visible
+surface — the tray icon must encode aggregate health at a glance, and every
+degraded state must explain itself *causally* ("`P:` is not mounted — WinFsp is
+not installed"), because a user who finds no drive letter will otherwise blame
+Windows, the VPN, or the network. And `docs/OPERATIONS.md`'s entire triage story
+is "read the transition log", which today means opening a file by hand. A context
+menu is a poor host for a diagnostic table, and a popup window that only exists
+while you are looking at it is a poor host for watching a resume happen.
+
+**Decision.** Bosun is a normal windowed WPF application that happens to live in
+the tray. Concretely:
+
+1. **A real main window.** Taskbar button, Alt+Tab, resizable, remembers its size
+   and position. Not a borderless popup anchored to the tray.
+2. **Launch context decides visibility.** Started from `shell:startup` at login,
+   Bosun starts to tray with **no window**. Started manually, it shows the window.
+3. **Closing the window does not exit.** It hides to tray.
+   `ShutdownMode=OnExplicitShutdown` stays. Exit is deliberate — tray menu, or
+   the window's own explicit Exit.
+4. **Taskbar presence only while the window is shown.** A hidden window is not an
+   Alt+Tab entry.
+5. **The tray icon keeps every obligation ADR-012 gave it.** It is still the
+   only always-on surface, because the window is closed most of the time. Nothing
+   in Decision 3 of ADR-012 is relaxed.
+6. **One instance, enforced** (`bs-2wa`). A second launch shows the running
+   instance's window and exits.
+
+**Reasoning.**
+
+*Why rule 2 is not negotiable.* ADR-012 already made this argument in the
+opposite direction and it applies unchanged: *"Bosun launches from
+`shell:startup`. At login the user is walking away, windows are fighting for
+focus."* A windowed app that presents its window every login is precisely the
+irritant that trains people to dismiss Bosun reflexively — which would destroy
+the signal ADR-012's whole degradation contract depends on. The window is for
+when you *asked* for it.
+
+*Why a window at all, given the tool is invisible by design.* Because there are
+exactly two moments when you need to look at Bosun, and both were underserved.
+When something breaks, you want a table you can read and a transition log you can
+scroll — not a balloon that has already gone. And on first run, ADR-012 *already*
+specified a window shown actively; that was a special case bolted onto an app
+that otherwise had no windows. Making the window first-class removes the special
+case rather than adding one.
+
+*Why one instance becomes load-bearing now.* Under the tray-only design the only
+launch was autostart, once per login. Once there is a window, "is it running? let
+me double-click it" is the obvious user action, and it is the action that starts a
+second supervisor racing the first for the same drive letters. The guard is not
+polish; it is what makes rule 1 safe. See `bs-2wa`.
+
+*Why not a full management UI.* `CLAUDE.md` §5 stands: no settings UI for what
+`hosts.toml` already covers. The window is for *seeing*, not configuring. Host
+tiers, drives, colours and probe intervals stay in the config file, which this
+tool's one user is comfortable editing. The window's content is state and history
+— what is mounted, why it is not, and what happened.
+
+**Consequences.**
+
+- `ARCHITECTURE.md` §2's "A WPF application with no main window" is wrong and is
+  amended. The process model is otherwise unchanged: one process, in the user's
+  interactive session, `rclone rcd` as a child (ADR-004 untouched).
+- E9 grows: window chrome, show/hide/restore lifecycle, launch-context detection,
+  and window-state persistence are now in scope alongside the tray icon and
+  context menu.
+- `bs-2wa` (single instance) becomes a prerequisite for shipping the window, not
+  an independent nicety.
+- The autostart registration in E10 must pass whatever flag rule 2 keys off, so
+  "started by Windows" is distinguishable from "started by the user".
+- Two surfaces can now trigger the same action (tray menu and window). Both post
+  commands to the supervisor channel; neither mutates state directly. The
+  existing E9 rule — *"actions post commands to the supervisor channel; UI never
+  mutates state"* — is what keeps that from being a problem.
+
+**Rejected alternatives.**
+
+*Keep the tray applet.* Cheaper, and it is what the spec said. Rejected because
+the diagnostic content ADR-012 requires does not fit a context menu, and because
+the popup-only status window is unusable for the one thing it is most needed for
+— watching state change during a resume.
+
+*Show the window at every launch, including login.* Simpler rule, no launch-context
+detection. Rejected on ADR-012's own reasoning about login-time focus stealing.
+
+*A dashboard meant to be left open.* Considered and not chosen as a *goal* — the
+window is built to be closed. Nothing here prevents leaving it open, and if that
+turns out to be how it gets used, the content is the same either way.
+

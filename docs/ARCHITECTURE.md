@@ -28,8 +28,16 @@ never leave a mounted drive letter pointing at an unreachable host.
 
 ## 2. Process model
 
-**One process.** A WPF application with no main window, a tray icon, and a
+**One process.** A WPF application with a main window, a tray icon, and a
 `BackgroundService` host running the supervisor loop.
+
+The window is optional, not incidental (**ADR-018**): Bosun starts to tray with
+no window when launched at login, shows the window when launched by hand, and
+hides rather than exits when the window is closed. The tray icon is the
+always-on surface and keeps every obligation ADR-012 gave it, because the window
+is closed most of the time. Exactly one instance may run — a second launch
+focuses the first and exits (`bs-2wa`), which is what keeps two supervisors from
+racing for the same drive letters.
 
 This is forced by a Windows constraint: **drive letters are scoped to a logon
 session**. A Windows Service running as `SYSTEM` can mount `P:` successfully and
@@ -41,9 +49,10 @@ exit. Bosun talks to it over `http://127.0.0.1:<port>` and never spawns
 `rclone mount` directly.
 
 ```
-Bosun.exe
-├── App (WPF, no MainWindow, ShutdownMode=OnExplicitShutdown)
-├── TrayIcon (H.NotifyIcon) ──► StatusWindow (on demand)
+Bosun.exe                      (single instance, named mutex — bs-2wa)
+├── App (WPF, ShutdownMode=OnExplicitShutdown)
+├── MainWindow  ── shown on manual launch, hidden at login; close hides
+├── TrayIcon (H.NotifyIcon) ──► show/hide MainWindow, per-host actions, exit
 └── IHost
     ├── RcloneProcessService   : IHostedService    (owns rclone rcd lifetime)
     ├── SupervisorService      : BackgroundService (the loop, §4)
