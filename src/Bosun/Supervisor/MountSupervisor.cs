@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Bosun.Configuration;
 using Bosun.Probe;
@@ -55,6 +56,21 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     private static readonly TimeSpan ReconciliationInterval = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// Ring-buffer capacity for the bounded in-memory transition history (bs-ww9.2, ADR-018). Same
+    /// category as <see cref="ReconciliationInterval"/> and
+    /// <see cref="MountedDeepProbeFailureThreshold"/> below: a deliberately hardcoded constant, not
+    /// config-driven (docs/CONFIG-SCHEMA.md has no setting for it, and this is not a value that
+    /// feeds a safety decision -- it only bounds a diagnostic convenience). "A few hundred" is the
+    /// right order of magnitude for a personal tool with a handful of hosts: a full sleep/resume
+    /// cycle plus a stretch of probe failures produces at most a few dozen transitions per host, so
+    /// this comfortably covers "what happened overnight" (the scenario ADR-018 names) while staying
+    /// nowhere near a memory concern in a process that runs for weeks. <c>internal</c> (rather than
+    /// <c>private</c>) purely so tests can assert boundedness against the real constant instead of a
+    /// hardcoded duplicate of it.
+    /// </summary>
+    internal const int TransitionHistoryCapacity = 300;
+
+    /// <summary>
     /// The ENTIRE transition table (docs/ARCHITECTURE.md §4). See the class remarks for how this
     /// is what makes "Mounting only from Ready" structural rather than a convention.
     /// </summary>
@@ -97,6 +113,32 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     /// mutable state from an arbitrary caller thread exactly as every other snapshot field already
     /// does (docs/ARCHITECTURE.md §5: "UI reads a snapshot").</summary>
     private MountingAvailability mountingAvailability = MountingAvailability.Available;
+
+    /// <summary>
+    /// Bounded transition history backing <see cref="GetTransitionHistory"/> (bs-ww9.2). Every
+    /// entry is written by <see cref="RecordTransition"/>, called only from
+    /// <see cref="SetState"/> and the one documented <c>SetState</c> bypass in
+    /// <see cref="AdoptOrClearExistingMountsAsync"/> -- i.e. only ever from the single
+    /// channel-processing thread, the same single-writer discipline every other piece of mutable
+    /// supervisor state relies on (see the class remarks).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ConcurrentQueue{T}"/> rather than a plain <see cref="Queue{T}"/>, deliberately.
+    /// <see cref="GetSnapshot"/> gets away with reading plain fields directly from an arbitrary UI
+    /// thread because each individual read is a single field access -- a benign, already-accepted
+    /// race (see that method's remarks). Trimming this collection on every write is a *structural*
+    /// mutation (grow, then possibly dequeue), not a single field write: enumerating a plain
+    /// <see cref="Queue{T}"/> on one thread while another thread is concurrently
+    /// enqueuing/dequeuing it risks "Collection was modified; enumeration operation may not
+    /// execute" -- an actual exception reaching the UI thread, not just a stale read.
+    /// <see cref="ConcurrentQueue{T}"/> makes <see cref="GetTransitionHistory"/>'s
+    /// <c>ToArray()</c> call a genuine moment-in-time snapshot with no lock and no possibility of
+    /// that exception, while the write side (here) still only ever runs on the channel thread --
+    /// exactly the same "single writer, direct unlocked read from elsewhere" shape as everything
+    /// else in this class, just with a collection type that makes that shape safe for a
+    /// continuously-mutated buffer instead of only for scalar fields.
+    /// </remarks>
+    private readonly ConcurrentQueue<MountTransitionEntry> transitionHistory = new();
 
     public MountSupervisor(
         IHostConfigStore configStore,
@@ -290,6 +332,14 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 MountUnavailableReason = mountingAvailability.IsAvailable ? null : mountingAvailability.Reason,
             })
             .ToList();
+
+    /// <inheritdoc/>
+    public IReadOnlyList<MountTransitionEntry> GetTransitionHistory() =>
+        // ToArray() is ConcurrentQueue<T>'s documented moment-in-time snapshot (see
+        // transitionHistory's remarks) -- safe to call from any thread, no lock needed. The queue
+        // itself is oldest-first (FIFO); reverse into newest-first per this method's documented
+        // contract on IMountSupervisor.
+        transitionHistory.ToArray().Reverse().ToList();
 
     public Task RequestMountAsync(string hostKey, CancellationToken cancellationToken = default) =>
         EnqueueAndWait(async ct =>
@@ -616,12 +666,61 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 "MountSupervisor, not a recoverable runtime condition.");
         }
 
+        var timestamp = timeProvider.GetUtcNow();
+
         host.State = to;
-        host.LastTransitionUtc = timeProvider.GetUtcNow();
+        host.LastTransitionUtc = timestamp;
         host.LastTransitionTrigger = trigger;
+
+        RecordTransition(host.Key, from, to, trigger, timestamp);
 
         logger.LogInformation(
             "Host {HostKey} transitioned {From} -> {To} (trigger: {Trigger})", host.Key, from, to, trigger);
+    }
+
+    /// <summary>
+    /// Appends to the bounded in-memory transition history (bs-ww9.2) and trims from the front
+    /// once <see cref="TransitionHistoryCapacity"/> is exceeded.
+    /// </summary>
+    /// <remarks>
+    /// Called from exactly two places, deliberately -- <b>do not "simplify" this back to a single
+    /// call from <see cref="SetState"/> alone.</b>
+    /// <list type="number">
+    /// <item><see cref="SetState"/> itself, for every ordinary transition.</item>
+    /// <item>The one documented <c>SetState</c> bypass in
+    /// <see cref="AdoptOrClearExistingMountsAsync"/> (crash-recovery adoption of an
+    /// already-mounted host at startup). That bypass exists because there is no meaningful "from"
+    /// state to validate against the transition table for a runtime object that was just
+    /// constructed -- see its own remarks -- but it is still a REAL, logged transition
+    /// (<c>Disabled -&gt; Mounted</c>, trigger "startup: adopted existing mount"), and it is
+    /// specifically the one docs/OPERATIONS.md's T6 manual test (crash recovery) exercises. Someone
+    /// opening the window after Bosun silently adopted a surviving mount on restart is exactly the
+    /// moment this history exists to explain (ADR-018); if this call were removed, the history
+    /// would have a blind spot at precisely that moment even though the log file would not.</item>
+    /// </list>
+    /// Both call sites already only ever run on the single channel-processing thread (see the class
+    /// remarks), so this needs no lock -- see <see cref="transitionHistory"/>'s remarks for why the
+    /// backing collection is a <see cref="ConcurrentQueue{T}"/> anyway (it is the read side, not the
+    /// write side, that needs it).
+    /// </remarks>
+    private void RecordTransition(string hostKey, MountState from, MountState to, string trigger, DateTimeOffset timestampUtc)
+    {
+        transitionHistory.Enqueue(new MountTransitionEntry
+        {
+            TimestampUtc = timestampUtc,
+            HostKey = hostKey,
+            From = from,
+            To = to,
+            Trigger = trigger,
+        });
+
+        while (transitionHistory.Count > TransitionHistoryCapacity && transitionHistory.TryDequeue(out _))
+        {
+            // Trim from the front (FIFO) until back within capacity. The loop condition, not an
+            // `if`, matters only in the pathological case of capacity dropping between calls,
+            // which cannot happen since it is a compile-time constant -- kept as a loop anyway so
+            // this reads correctly as "trim to capacity" rather than "trim by one".
+        }
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1352,9 +1451,14 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                     "at {MountPoint} serving its own remote {Fs}, crash recovery)",
                     host.Key, mount.MountPoint, mount.Fs);
 
+                var adoptTimestamp = timeProvider.GetUtcNow();
                 host.State = MountState.Mounted; // see remarks: the one documented SetState bypass
-                host.LastTransitionUtc = timeProvider.GetUtcNow();
+                host.LastTransitionUtc = adoptTimestamp;
                 host.LastTransitionTrigger = "startup: adopted existing mount";
+                // Bypasses SetState (see remarks above) but is a real, logged transition -- T6's
+                // crash-recovery scenario (docs/OPERATIONS.md) is exactly what the transition
+                // history needs to show, so record it here the same way SetState would.
+                RecordTransition(host.Key, MountState.Disabled, MountState.Mounted, "startup: adopted existing mount", adoptTimestamp);
                 host.ConsecutiveMountedFailures = 0;
                 host.ConsecutiveDeepProbeFailures = 0;
                 ArmMountedProbeTimer(host);

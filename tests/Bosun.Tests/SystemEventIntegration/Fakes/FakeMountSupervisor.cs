@@ -44,6 +44,8 @@ internal sealed class FakeMountSupervisor : IMountSupervisor
 
     public IReadOnlyList<HostMountSnapshot> GetSnapshot() => throw new NotSupportedException();
 
+    public IReadOnlyList<MountTransitionEntry> GetTransitionHistory() => throw new NotSupportedException();
+
     public Task RequestMountAsync(string hostKey, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public Task RequestUnmountAsync(string hostKey, CancellationToken cancellationToken = default) => throw new NotSupportedException();
