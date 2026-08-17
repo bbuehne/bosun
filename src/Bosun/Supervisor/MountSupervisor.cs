@@ -1903,6 +1903,23 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 // for the new persistent tier) the idle-unmount timer -- see the branch below.
                 await TryBeginMountAsync(host, "config change: tier changed to persistent", ct).ConfigureAwait(false);
             }
+            else if (newMode == MountMode.Persistent && host.State == MountState.Unreachable)
+            {
+                // on-demand -> persistent while the host is DARK. Found by independent testing of
+                // bs-7ck; this branch did not exist and the promotion silently bought nothing.
+                //
+                // ADR-014 splits the recurring ladder by tier: an on-demand host in Unreachable is
+                // not polled AT ALL, deliberately, so it sits dark until the user acts. Promoting
+                // it to persistent is precisely the user saying "bring this up on your own" -- but
+                // there is no timer running to ever notice the host came back, and nothing else
+                // will ever start one, because starting one is what entering Unreachable does and
+                // it is already there. The host stays Unreachable forever.
+                //
+                // Arming the ladder here is what the promotion actually buys. Backoff is left where
+                // it stands rather than reset: the host's own reachability has not changed, and a
+                // config save must never look like a successful probe.
+                ArmIdleProbeTimer(host);
+            }
             else if (host.State == MountState.Mounted)
             {
                 // Already mounted through the flip, in EITHER direction -- no drain either way

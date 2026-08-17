@@ -89,7 +89,18 @@ internal sealed class IndependentHarness
 
         if (!Store.LastPublishHadSubscribers)
         {
-            await InvokeExplicitReloadSeamAsync(next);
+            // Must go through RunAsync, NOT `await seam; await DrainAsync();`.
+            //
+            // The seam is EnqueueAndWait: it writes to the supervisor's channel and returns a task
+            // that completes only once that item is PUMPED. In tests the pump is DrainAsync, which
+            // nothing calls automatically. Awaiting the seam first therefore waits forever for a
+            // pump that is on the next line and can never be reached -- the whole suite hangs with
+            // no failing test, which is how this was found. RunAsync starts the operation, pumps,
+            // and only then awaits, which is why every other harness entry point uses it.
+            //
+            // Production is unaffected: RunAsync (the real loop) pumps continuously.
+            await RunAsync(() => InvokeExplicitReloadSeamAsync(next));
+            return;
         }
 
         await Supervisor.DrainAsync();
