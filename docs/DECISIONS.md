@@ -1116,3 +1116,100 @@ or a marker file because it is visible in the shortcut's own Target field (so th
 autostart registration is self-documenting to anyone who inspects it) and needs no
 process-wide state that could leak into a manual launch started from the same shell.
 
+
+---
+
+## ADR-019 — The window edits hosts; `hosts.toml` gets a single writer
+
+**Status:** Accepted. Supersedes ADR-018's "not a management UI" clause and the
+"no settings UI" sentence of `CLAUDE.md` §5 **for host definitions specifically**.
+
+**Context.** ADR-018 drew the window's scope deliberately narrow: *"The window is
+for seeing, not configuring. Host tiers, drives, colours and probe intervals stay
+in the config file, which this tool's one user is comfortable editing."* That
+rested on a premise about the user, and the user has said it is wrong: he wants to
+add and edit hosts in the GUI, with sane defaults, and to import much of a host's
+detail from an existing Bitvise/Tunnelier profile.
+
+That is the maintainer overruling a scope decision about his own tool, which is
+decisive. What follows is not whether, but the two things that are genuinely
+hard about it.
+
+**Decision.**
+
+1. **The window can create, edit and delete hosts.** Fields it edits are the ones
+   a host actually needs — key, display name, hostname, port, user, identity file,
+   mount tier/drive/remote path, session options, probe intervals — with defaults
+   pre-filled so a new host is a few fields, not a blank form.
+2. **Bosun becomes the sole writer of `hosts.toml`.** Edits are written by Bosun,
+   atomically (temp file + replace), and the file remains fully hand-editable when
+   Bosun is not running.
+3. **Validation runs before a write, not after.** The existing `ConfigValidator`
+   is the same gate the file path already uses, so the window cannot produce a
+   config the loader would reject.
+4. **Import from a Bitvise/Tunnelier profile pre-fills a form; it never writes a
+   host directly.** The user confirms before anything is saved.
+5. **Import never supplies key material.** See below.
+
+**Reasoning.**
+
+*Why a single writer, and why this is the real risk.* Two writers to one file is
+exactly the failure ADR-006 refused to accept for Windows Terminal's
+`settings.json` — *"Terminal rewrites it whenever the user changes anything in its
+settings UI. Two writers means clobbering."* Bosun already **watches**
+`hosts.toml` and reloads on change (E2). Adding a GUI writer creates the same
+hazard against ourselves: the user edits the file in an editor while the window
+holds older values, then saves from the window and silently reverts them. Making
+Bosun the writer, writing atomically, and reloading from what actually landed
+keeps one authority at a time. Hand-editing stays supported because it is how the
+file is documented and how a broken install gets repaired.
+
+*Why validation moves in front of the write.* A GUI that can save an invalid
+config turns a startup-time error into an error the user caused and cannot see.
+`ConfigValidator` already enforces the invariants that matter — drive letters in
+`[D-Z]`, `vfs_cache_mode` no weaker than `writes` (I6), `network_mode` true (I7),
+identity file exists, no duplicate drives or display names. Running it before the
+write means the window refuses to save rather than saving something the loader
+will reject on next start.
+
+*Why import cannot supply the key, which is the one thing users will expect it
+to.* Bitvise keeps keypairs in its own store (`HKCU\Software\Bitvise\Keypairs`),
+not as files on disk, and a profile's key material is inside its proprietary
+blob. Bosun requires `identity_file` to be a path that **exists** (Invariant I10,
+key-based auth only), because that is what `ssh` itself will read. So an imported
+host arrives with everything except a key, and the form must say so plainly rather
+than leaving a field mysteriously empty. Exporting a key from Bitvise is a
+deliberate act in Bitvise's own key manager and is not Bosun's job to automate.
+
+*What the profile format actually is.* Length-prefixed big-endian records, version
+tagged in the header (`Tunnelier 9.51`), undocumented. It is not parsed
+completely and should not be: the import extracts the fields it can identify
+confidently — hostname, username, port — and leaves the rest. Verified across
+profiles written by three different versions (7.16, 9.17, 9.51). A partial,
+honest extraction that pre-fills three fields is worth far more than a brittle
+full parse that breaks on the next Bitvise release.
+
+**Consequences.**
+
+- `IHostConfigStore` grows a write path. It currently only loads and watches.
+- The window's own reload must not fight the file watcher: a write Bosun made
+  should not be re-processed as an external change.
+- `CLAUDE.md` §5's "no settings UI for options the configuration file already
+  covers" now has a stated exception for host definitions. It still holds for
+  *global* tuning — probe timeouts, backoff ladders, the rc port — which stay
+  file-only, because those are set once and never touched.
+- Deleting a host that is currently `Mounted` has to drain it first; it cannot
+  simply vanish from the config while a drive letter is live.
+
+**Rejected alternatives.**
+
+*Keep the window read-only.* What ADR-018 said. Rejected because the premise it
+rested on — that the user prefers editing TOML — turned out to be false, and a
+premise about the user is the user's to correct.
+
+*Let the window edit a copy and ask the user to merge.* Avoids the two-writer
+problem by refusing to solve it. Rejected as busywork.
+
+*Parse the Bitvise profile format completely.* Attractive, and it would recover
+port forwarding and SFTP settings too. Rejected for now: undocumented, version
+tagged, and the marginal fields are ones Bosun has no model for anyway.
