@@ -818,8 +818,7 @@ up to ten minutes," not the alternative of a wedge that never resolves at all.
 
 ## ADR-017 — State that survived a transition is not trusted
 
-**Status:** **PROPOSED** — awaiting the maintainer's decision. Nothing is
-implemented against it. Resolves `bs-mk4`, `bs-brv`, and item 1 of `bs-u4a`.
+**Status:** Accepted. Resolves `bs-mk4`, `bs-brv`, and item 1 of `bs-u4a`.
 Extends ADR-016.
 
 **Context.** Three defects were filed independently, by three different agents,
@@ -904,17 +903,25 @@ it badly.
 - More probe traffic immediately after a transition. That is the intended trade
   and is bounded by the number of mounted hosts.
 
-**A sub-decision this leaves open, deliberately.**
+**The sub-decision this left open, settled at implementation.**
 
-Is a forced deep-probe failure *immediately after a transition* conclusive enough
-to drain, or must it still meet ADR-016's threshold of two?
+The question was whether a forced deep-probe failure *immediately after a
+transition* is conclusive enough to drain, or must still meet ADR-016's threshold
+of two.
 
-Arguments both ways are real. The transition is corroborating evidence, so one
-failure means more than it would mid-session — but `rclone rcd` may itself still be
-recovering in the seconds after a resume, and draining on a probe that failed for
-that reason would unmount a healthy drive. The safe order is to confirm rcd health
-first and only then treat a deep failure as conclusive; that is mechanism, and it
-should be settled when this is implemented rather than guessed at here.
+**Settled: one post-transition deep failure is conclusive, but only once `rclone
+rcd` has answered `core/version`.** The gate is what makes the single failure
+safe. Without it the two readings of a failed `operations/list` — "the SSH channel
+under this mount is dead" and "rcd has not finished coming back yet" — are
+indistinguishable, and acting on the second unmounts a healthy drive on every
+resume. With rcd confirmed live, only the first reading remains, and a transition
+is corroborating evidence that makes waiting for a second failure a cost paid in
+exactly the window where a wedged drive is most likely.
+
+If `core/version` does not answer, the reconciliation does not run at all: the
+supervisor cannot distinguish anything without rcd, so it retries on the ordinary
+cadence rather than guessing. That is the same posture as I1 — no action on
+unverified state — applied to the supervisor's own dependency.
 
 **Rejected alternatives.**
 
