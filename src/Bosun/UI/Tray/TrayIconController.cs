@@ -78,6 +78,30 @@ public sealed class TrayIconController : IDisposable
         _taskbarIcon = new TaskbarIcon();
         _taskbarIcon.TrayLeftMouseUp += (_, _) => _windowController.ShowAndActivate();
 
+        // Set the icon BEFORE creating the Win32 notification icon, so it is never briefly blank.
+        UpdateIcon(_statusReadModel.Current.Health);
+
+        // TaskbarIcon is a FrameworkElement: declared in XAML it creates the actual Win32
+        // notification icon when it is loaded into a visual tree. Bosun constructs it in code and
+        // never puts it in one -- the tray is not part of any window -- so without this call it is
+        // a live object that has never registered anything with the shell. It SILENTLY does
+        // nothing: no exception, no log line, and the app looks fine right up until the window is
+        // closed and the user discovers there is nothing to restore it from.
+        //
+        // enablesEfficiencyMode: false -- that flag opts the process into Windows' efficiency
+        // mode, which throttles background work. Bosun's whole job is timers: probe cadences,
+        // mounted deep probes, idle unmount, reconciliation. Throttling those is precisely what
+        // must not happen (ADR-011: a mounted host is ALWAYS probed).
+        _taskbarIcon.ForceCreate(enablesEfficiencyMode: false);
+
+        if (!_taskbarIcon.IsCreated)
+        {
+            // Fail loudly in the log rather than leaving a tray-less Bosun looking healthy.
+            _logger?.LogError(
+                "The tray icon was not created. Bosun is running but has no tray presence, so closing " +
+                "the window leaves no way to reach it short of restarting.");
+        }
+
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = RefreshInterval,
