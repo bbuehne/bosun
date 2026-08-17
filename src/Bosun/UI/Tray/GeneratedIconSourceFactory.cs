@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.IO;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -7,20 +8,33 @@ namespace Bosun.UI.Tray;
 
 /// <summary>
 /// Renders a <see cref="TrayIconAppearance"/> (plain data, unit-tested via
-/// <see cref="TrayIconAppearanceSelector"/>) into an <see cref="ImageSource"/> the tray can show:
-/// Bosun's anchor mark in the health colour, with a corner badge when something is wrong.
+/// <see cref="TrayIconAppearanceSelector"/>) into a <see cref="System.Drawing.Icon"/> for
+/// <c>TaskbarIcon.Icon</c>: Bosun's anchor mark in the health colour, with a corner badge when
+/// something is wrong.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why a badge and not colour alone.</b> ADR-012 Decision 3 requires a degraded Bosun to be
-/// distinguishable at a glance. Colour alone fails that for a colourblind user, and hue
-/// differences are easy to miss at 16px anyway, so the two unhealthy states also carry a shape:
-/// a filled disc in the corner with a glyph. Healthy carries no badge — "nothing is wrong" is best
-/// said by the absence of a mark, and it keeps the common case visually quiet.
+/// <b>Why a <see cref="System.Drawing.Icon"/> and not <c>TaskbarIcon.IconSource</c>.</b> The
+/// <c>IconSource</c> path runs through H.NotifyIcon's <c>ImageExtensions.ToStream(ImageSource)</c>,
+/// which switches on the concrete type and handles exactly two: <c>BitmapImage</c> (read via its
+/// <c>UriSource</c>) and <c>BitmapFrame</c> (converted to a URI string). <b>Both resolve a URI.</b>
+/// An icon generated at runtime has no URI — there is no file and no pack resource behind it — so
+/// that path cannot work for us at all, whatever ImageSource type we hand it.
 /// </para>
 /// <para>
-/// Pure drawing code; the decision of WHICH appearance to use lives in
-/// <see cref="TrayIconAppearanceSelector"/> and is tested there.
+/// This is not theoretical. Handing it a <see cref="RenderTargetBitmap"/> threw
+/// <c>NotImplementedException: ImageSource type: ... RenderTargetBitmap is not supported</c> from
+/// H.NotifyIcon's own dispatcher continuation, which is an <b>unhandled</b> exception on the
+/// dispatcher and killed the whole process — taking the supervisor with it and orphaning a live
+/// mount. <c>TaskbarIcon.Icon</c> takes a <see cref="System.Drawing.Icon"/> directly and skips the
+/// conversion entirely.
+/// </para>
+/// <para>
+/// The icon is built by rendering to a <see cref="RenderTargetBitmap"/>, encoding that as PNG, and
+/// wrapping it in a minimal single-image ICO container. PNG-compressed ICO entries are supported
+/// from Windows Vista onward. Going via a container rather than
+/// <c>Icon.FromHandle(bitmap.GetHicon())</c> deliberately avoids owning an unmanaged HICON that
+/// would have to be destroyed by hand on every health change.
 /// </para>
 /// </remarks>
 internal static class GeneratedIconSourceFactory
@@ -35,17 +49,25 @@ internal static class GeneratedIconSourceFactory
     private const double MarkExtentWhenBadged = 0.80;
 
     /// <summary>Badge radius as a fraction of the icon. Large enough that its PRESENCE is visible
-    /// at 16px (where the glyph inside it is not legible, and is not expected to be -- the shape
+    /// at 16px (where the glyph inside it is not legible, and is not expected to be — the shape
     /// difference is what carries at that size), small enough to leave the anchor recognisable.</summary>
     private const double BadgeRadius = 0.24;
 
-    public static ImageSource Create(TrayIconAppearance appearance)
+    public static System.Drawing.Icon Create(TrayIconAppearance appearance)
     {
         ArgumentNullException.ThrowIfNull(appearance);
 
+        var png = RenderPng(appearance);
+        using var ico = new MemoryStream();
+        WriteSingleImageIcoContainer(ico, png, IconSize);
+        ico.Position = 0;
+        return new System.Drawing.Icon(ico);
+    }
+
+    private static byte[] RenderPng(TrayIconAppearance appearance)
+    {
         var markBrush = ToBrush(appearance.ColorHex);
         var mark = AnchorMarkGeometry.Create(markBrush);
-
         var badged = !string.IsNullOrEmpty(appearance.Glyph);
 
         var visual = new DrawingVisual();
@@ -70,7 +92,35 @@ internal static class GeneratedIconSourceFactory
         var bitmap = new RenderTargetBitmap(IconSize, IconSize, 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(visual);
         bitmap.Freeze();
-        return bitmap;
+
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = new MemoryStream();
+        encoder.Save(stream);
+        return stream.ToArray();
+    }
+
+    /// <summary>Wraps a single PNG in an ICO container: a 6-byte ICONDIR, one 16-byte ICONDIRENTRY,
+    /// then the PNG bytes. See scripts/build-icon.ps1, which writes the same structure for the
+    /// multi-size application icon.</summary>
+    private static void WriteSingleImageIcoContainer(Stream target, byte[] png, int size)
+    {
+        using var writer = new BinaryWriter(target, System.Text.Encoding.UTF8, leaveOpen: true);
+
+        writer.Write((ushort)0);    // reserved
+        writer.Write((ushort)1);    // type: icon
+        writer.Write((ushort)1);    // image count
+
+        writer.Write((byte)(size >= 256 ? 0 : size));   // width  (0 means 256)
+        writer.Write((byte)(size >= 256 ? 0 : size));   // height
+        writer.Write((byte)0);      // palette entries
+        writer.Write((byte)0);      // reserved
+        writer.Write((ushort)1);    // colour planes
+        writer.Write((ushort)32);   // bits per pixel
+        writer.Write((uint)png.Length);
+        writer.Write((uint)(6 + 16));  // offset: past the directory
+
+        writer.Write(png);
     }
 
     private static void DrawBadge(DrawingContext ctx, TrayIconAppearance appearance)

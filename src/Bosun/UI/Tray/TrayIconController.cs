@@ -120,7 +120,17 @@ public sealed class TrayIconController : IDisposable
         }
 
         var appearance = TrayIconAppearanceSelector.Select(health);
-        _taskbarIcon.IconSource = GeneratedIconSourceFactory.Create(appearance);
+
+        // Icon, not IconSource: the IconSource path resolves a URI and cannot accept an icon
+        // generated at runtime -- see GeneratedIconSourceFactory's remarks. Setting IconSource
+        // with a RenderTargetBitmap threw on H.NotifyIcon's own dispatcher continuation, where
+        // nothing could catch it, and killed the process with a mount still up.
+        var previous = _taskbarIcon.Icon;
+        _taskbarIcon.Icon = GeneratedIconSourceFactory.Create(appearance);
+
+        // The Icon property does not take ownership, so the one being replaced is ours to release.
+        previous?.Dispose();
+
         _taskbarIcon.ToolTipText = appearance.AccessibleName;
         _lastRenderedHealth = health;
     }
