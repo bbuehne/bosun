@@ -99,6 +99,16 @@ public static class ConfigValidator
                 $"global.mounted_probe_interval_seconds must be positive (got {global.MountedProbeIntervalSeconds}) -- a mounted host must always have a probe cadence (ADR-011)"));
         }
 
+        // bs-2eg / ADR-016: the same shape of hole ADR-011 closed for mounted_probe_interval_seconds,
+        // now for the periodic DEEP probe run while Mounted. Absent already defaulted to 300 by
+        // ConfigParser; only an explicit zero/negative reaches here.
+        if (global.MountedDeepProbeIntervalSeconds <= 0)
+        {
+            errors.Add(new ConfigValidationError(
+                "invalid-mounted-deep-probe-interval",
+                $"global.mounted_deep_probe_interval_seconds must be positive (got {global.MountedDeepProbeIntervalSeconds}) -- a mounted host's SSH channel must always be verified, not just its TCP reachability (ADR-016)"));
+        }
+
         // bs-z3y: the same shape of hole ADR-011 closed for mounted_probe_interval_seconds.
         // Depending on how MountSupervisor's ">=" comparison reads, 0 means either "unmount on
         // the very next probe tick" or -- the actually observed direction -- "never unmount",

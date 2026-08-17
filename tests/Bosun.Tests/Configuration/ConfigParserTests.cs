@@ -20,6 +20,7 @@ public sealed class ConfigParserTests
         Assert.Equal(3, config.Global.FailuresBeforeUnmount);
         Assert.Equal([5, 15, 30, 60, 300], config.Global.BackoffSeconds);
         Assert.Equal(60, config.Global.MountedProbeIntervalSeconds);
+        Assert.Equal(300, config.Global.MountedDeepProbeIntervalSeconds);
         Assert.Equal(8, config.Global.SuspendUnmountTimeoutSeconds);
         Assert.True(config.Global.StartWithWindows);
     }
@@ -200,6 +201,7 @@ public sealed class ConfigParserTests
         Assert.Equal(GlobalConfig.DefaultFailuresBeforeUnmount, config.Global.FailuresBeforeUnmount);
         Assert.Equal(GlobalConfig.DefaultBackoffSeconds, config.Global.BackoffSeconds);
         Assert.Equal(GlobalConfig.DefaultMountedProbeIntervalSeconds, config.Global.MountedProbeIntervalSeconds);
+        Assert.Equal(GlobalConfig.DefaultMountedDeepProbeIntervalSeconds, config.Global.MountedDeepProbeIntervalSeconds);
         Assert.Equal(GlobalConfig.DefaultSuspendUnmountTimeoutSeconds, config.Global.SuspendUnmountTimeoutSeconds);
         Assert.Equal(GlobalConfig.DefaultStartWithWindows, config.Global.StartWithWindows);
     }
@@ -240,6 +242,43 @@ public sealed class ConfigParserTests
 
         Assert.Equal(6000, config.Global.RcloneRcPort);
         Assert.Equal(60, config.Global.MountedProbeIntervalSeconds);
+    }
+
+    [Fact]
+    public void Parse_MountedDeepProbeIntervalSecondsAbsentFromPresentGlobalTable_DefaultsTo300()
+    {
+        // bs-2eg / ADR-016: same treatment as MountedProbeIntervalSeconds above -- absent is not
+        // an error, even when [global] itself is present with other keys set.
+        const string toml = """
+            [global]
+            rclone_rc_port = 6000
+
+            [hosts.jump]
+            display_name  = "Jump"
+            hostname      = "jump.example.com"
+            port          = 22
+            user          = "barry"
+            identity_file = "~/.ssh/id_ed25519"
+
+              [hosts.jump.mount]
+              mode = "none"
+
+              [hosts.jump.session]
+              autostart = true
+              reconnect = true
+              tmux      = false
+              tab_color    = "#3A4A6B"
+              color_scheme = "Campbell"
+
+              [hosts.jump.probe]
+              interval_seconds = 0
+              deep_probe       = false
+            """;
+
+        var config = ConfigParser.Parse(toml);
+
+        Assert.Equal(6000, config.Global.RcloneRcPort);
+        Assert.Equal(300, config.Global.MountedDeepProbeIntervalSeconds);
     }
 
     [Fact]
