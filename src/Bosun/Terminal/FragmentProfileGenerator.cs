@@ -1,3 +1,4 @@
+using System.Globalization;
 using Bosun.Configuration;
 
 namespace Bosun.Terminal;
@@ -8,11 +9,12 @@ namespace Bosun.Terminal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The commandline (ADR-013).</b> Uses the host's <see cref="HostConfig.Key"/> -- the TOML key,
-/// e.g. <c>example-nas</c> -- never <see cref="HostConfig.DisplayName"/> and never a fully
-/// specified <c>user@hostname</c>. A fully specified form would target the host directly and so
-/// would not match a <c>Host &lt;alias&gt;</c> block in the user's own <c>ssh_config</c>, silently
-/// discarding <c>ProxyJump</c> and everything else configured there.
+/// <b>The commandline (ADR-013 as amended by bs-dkm).</b> Connects using the host's own
+/// <see cref="HostConfig.Hostname"/>, <see cref="HostConfig.Port"/>, <see cref="HostConfig.User"/>
+/// and <see cref="HostConfig.IdentityFile"/> -- the four fields the Add Host dialog collects for
+/// exactly this purpose. <see cref="HostConfig.Key"/> remains Bosun's stable identity (it is still
+/// the GUID hash input, Decision 2) but is no longer an ssh target; see
+/// <see cref="BuildSshInvocation"/> for why that changed.
 /// </para>
 /// <para>
 /// <b>Hosts with <c>mount.mode = "none"</c> still get a profile.</b> Terminal-profile generation
@@ -107,27 +109,70 @@ public static class FragmentProfileGenerator
     }
 
     /// <summary>
-    /// The exact command that ends up as <c>ssh.exe</c>'s own argv -- one of E8's two recognised
-    /// forms, always, whether or not <see cref="SessionConfig.Reconnect"/> wraps it:
+    /// The exact command that ends up as <c>ssh.exe</c>'s own argv, whether or not
+    /// <see cref="SessionConfig.Reconnect"/> wraps it:
     /// <code>
-    /// ssh &lt;config-key&gt;
-    /// ssh -t &lt;config-key&gt; tmux new -A -s &lt;session&gt;
+    /// ssh -i "&lt;identity_file&gt;" -p &lt;port&gt; &lt;user&gt;@&lt;hostname&gt;
+    /// ssh -t -i "&lt;identity_file&gt;" -p &lt;port&gt; &lt;user&gt;@&lt;hostname&gt; tmux new -A -s &lt;session&gt;
     /// </code>
     /// Exposed separately from <see cref="CreateProfile"/> so callers -- including the E7/E8
     /// contract test -- can verify what <c>ssh.exe</c> itself will be launched with, independent of
     /// whatever process launches it (Terminal directly, or <c>cmd.exe</c> via the reconnect loop).
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the fully-specified form (ADR-013 Amendment 1, bs-dkm).</b> This used to emit
+    /// <c>ssh &lt;config-key&gt;</c>, on the reasoning that a bare alias lets the user's own
+    /// <c>ssh_config</c> stay in charge of <c>ProxyJump</c> and friends. The cost was a
+    /// prerequisite: a matching <c>Host &lt;config-key&gt;</c> block had to exist, or ssh falls
+    /// back to treating the alias as a literal hostname and DNS fails. Documenting that
+    /// prerequisite did not stop it being hit -- a host added through the GUI, with hostname,
+    /// port, user and key all filled in, mounted its drive and then could not open a terminal.
+    /// Collecting exactly the four fields needed to connect and then not using them is the wrong
+    /// trade for a tool whose hosts are created in a dialog.
+    /// </para>
+    /// <para>
+    /// <c>ssh_config</c> is not cut out of the picture by this. ssh matches <c>Host</c> patterns
+    /// against the target given on the command line, so a <c>Host &lt;hostname&gt;</c> block still
+    /// applies, and <c>ProxyJump</c> keyed on the real hostname still works -- it simply no longer
+    /// *requires* an invented per-host alias to exist first. Explicit command-line options
+    /// override the config file, which is the precedence a user filling in the dialog expects.
+    /// </para>
+    /// <para>
+    /// <b>Quoting.</b> The identity path is quoted because key paths can contain spaces, and an
+    /// unquoted one would split into two argv entries. Verified against a real <c>cmd.exe</c> that
+    /// this survives the reconnect wrapper intact -- the nested quotes inside
+    /// <c>cmd.exe /c "..."</c> do not need <c>/s</c>, and a real <c>ssh -G</c> through the wrapper
+    /// resolves identityfile, port, user and hostname correctly. A leading <c>~</c> is passed
+    /// through unexpanded on purpose: Windows OpenSSH expands it itself (also verified), so
+    /// expanding it here would buy nothing and would cost this method its purity.
+    /// </para>
+    /// </remarks>
     public static string BuildSshInvocation(HostConfig host)
     {
         ArgumentNullException.ThrowIfNull(host);
 
+        // -t is required for tmux (allocate a TTY for a remote command) and must precede the
+        // target, like every other option.
+        var command = host.Session.Tmux ? "ssh -t" : "ssh";
+
+        // IdentityFile is `required` and validated to exist (I10), but an empty string is still
+        // representable -- and emitting a bare `-i ` would make ssh swallow the following token
+        // as its value, silently targeting the wrong thing.
+        if (!string.IsNullOrWhiteSpace(host.IdentityFile))
+        {
+            command += $" -i \"{host.IdentityFile}\"";
+        }
+
+        command += $" -p {host.Port.ToString(CultureInfo.InvariantCulture)} {host.User}@{host.Hostname}";
+
         if (!host.Session.Tmux)
         {
-            return $"ssh {host.Key}";
+            return command;
         }
 
         var session = string.IsNullOrWhiteSpace(host.Session.TmuxSession) ? DefaultTmuxSession : host.Session.TmuxSession;
-        return $"ssh -t {host.Key} tmux new -A -s {session}";
+        return $"{command} tmux new -A -s {session}";
     }
 
     /// <summary>

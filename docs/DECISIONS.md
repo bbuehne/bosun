@@ -584,6 +584,74 @@ rather than hopeful. Use it as a unit test.
   worthwhile. Invariant I5 forbids touching Terminal's `settings.json`; it says
   nothing about ssh's config. Not worth building until wanted.
 
+**Amendment 1 (2026-08-17, `bs-dkm`) — Decision 1 is reversed. The commandline
+uses the host's own connection details, not its config key.**
+
+Decision 1 was wrong, and the way it failed is the tell.
+
+A host was added through the GUI with hostname, port, user and key all filled in.
+Its drive mounted. Its terminal then failed with
+`ssh: Could not resolve hostname aws-lucid-forge-tm` — ssh had been handed the
+config key, found no matching `Host` block, fell back to treating the alias as a
+literal hostname, and asked DNS to resolve it. The only reason the *first*
+configured host worked is that a matching `Host` block happened to already exist
+for it.
+
+Both mitigations this ADR specified were in place and neither helped: README's
+Requirements paragraph said it, and `docs/OPERATIONS.md` had the triage row. The
+prerequisite was documented *and* still discovered at the point of failure, which
+is exactly what the Consequences section said must not happen. A trap that is
+documented is still a trap.
+
+**The revised decision.** The emitted commandline is:
+
+```
+ssh -i "<identity_file>" -p <port> <user>@<hostname>
+ssh -t -i "<identity_file>" -p <port> <user>@<hostname> tmux new -A -s <session>
+```
+
+*Why the original reasoning does not survive.* It rested on a false dichotomy —
+that a fully-specified invocation means "`ssh_config` is bypassed". It does not.
+ssh matches `Host` patterns against **the target named on the command line**, so a
+`Host <hostname>` block still applies and `ProxyJump` keyed on the real hostname
+still works. What changes is only that reaching a bastion no longer *requires*
+inventing a per-host alias first. And where a command-line option does override
+the config file, that precedence is the one a user filling in a dialog expects:
+the port they typed wins.
+
+The original ADR also argued that `hostname`/`port`/`user`/`identity_file` "earn
+their place serving rclone whatever the profile emits". True, but it proves less
+than it appears to: it explains why those fields exist, not why the terminal path
+should decline to use them. ADR-019 later put those four fields in a GUI form.
+Collecting them in a dialog and then not connecting with them is indefensible.
+
+*What is unaffected.* Decision 2 stands unchanged — the profile `guid` is still
+derived from the config key, and the key remains Bosun's stable identity for
+supervisor state, session correlation, and fragment identity. The key stopped
+being a *network name*; it did not stop being an *identity*.
+
+Decision 3 is withdrawn. There is no longer a prerequisite for README to state.
+
+*Cost, paid.* E8's `SshCommandLineParser` was **not** already correct under this
+change — the claim above that it needed none was true only while E7 emitted a bare
+target. It now walks the argument list getopt-style rather than matching two rigid
+shapes, so a flag's value is never mistaken for the target, and correlating a live
+`ssh.exe` back to a host key moved from a dictionary lookup to a hostname match in
+`SshSessionMonitor`, narrowed by user and port. An ambiguous match resolves to
+**no** host rather than a guess: reporting a session under the wrong host would
+show activity on a host that has none.
+
+The E7/E8 contract test the Consequences called for now runs the invocation
+through a real `SshSessionMonitor` rather than the parser alone, because with the
+key no longer appearing in the command line, a parser-only assertion would no
+longer test the property that has to hold — that a terminal opened from a Bosun
+profile shows up in the tray under the right host.
+
+*Verified, not assumed.* Against a real `cmd.exe` and the real Windows OpenSSH
+binary: a quoted key path containing spaces survives the reconnect wrapper as a
+single argv entry (no `/s` needed), and Windows OpenSSH expands a leading `~` in
+`-i` itself — so the generator passes the path through unexpanded and stays pure.
+
 ---
 
 ## ADR-014 — Unreachable hosts: poll by tier, and make the Mount click mean something

@@ -49,11 +49,11 @@ There is no roadmap and no support commitment.
 - Windows Terminal
 - SSH key-based authentication with `ssh-agent` (password and MFA auth are not
   supported — see `docs/DECISIONS.md`, ADR-007)
-- An `~/.ssh/config` entry per host. Bosun generates Terminal profiles that run
-  `ssh <host-key>`, using the key you give the host in `hosts.toml`, so each one
-  needs a matching `Host <host-key>` block. This is deliberate: it means your
-  `ProxyJump`, ciphers, and agent-forwarding settings keep working instead of
-  being bypassed. See `docs/DECISIONS.md`, ADR-013.
+No `~/.ssh/config` entry is required. Bosun's Terminal profiles connect using the
+`hostname`, `port`, `user` and `identity_file` you configure for each host. If you
+*do* have a `Host` block matching a host's hostname — for `ProxyJump` through a
+bastion, say — it still applies, since ssh matches `Host` patterns against the
+target on the command line. See `docs/DECISIONS.md`, ADR-013 Amendment 1.
 
 ## Configuration
 

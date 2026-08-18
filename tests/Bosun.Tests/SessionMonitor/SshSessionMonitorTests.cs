@@ -140,14 +140,129 @@ public sealed class SshSessionMonitorTests
         Assert.Contains(sessions, s => s.HostKey == "example-remote" && s.ProcessId == 200);
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Correlating the fully-specified form Bosun's own profiles emit (bs-dkm, ADR-013 Amdt. 1).
+    // Before the amendment every live ssh.exe named a config key, so correlation was a dictionary
+    // lookup. Now Bosun's own profiles name a HOSTNAME, and the key has to be recovered from it.
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void A_process_naming_a_configured_hosts_hostname_is_reported_under_that_hosts_key()
+    {
+        var enumerator = new FakeSshProcessEnumerator();
+        enumerator.SetProcesses([Process(pid: 100, "example-nas.example.internal", "user", 22)]);
+        var monitor = CreateMonitor(enumerator, new FakeTcpConnectionReader(), ConfigWithHosts("example-nas"));
+
+        var session = Assert.Single(monitor.GetActiveSessions());
+        Assert.Equal("example-nas", session.HostKey);
+    }
+
+    [Fact]
+    public void Hostname_correlation_is_case_insensitive_because_DNS_names_are()
+    {
+        var enumerator = new FakeSshProcessEnumerator();
+        enumerator.SetProcesses([Process(pid: 100, "EXAMPLE-NAS.Example.Internal", "user", 22)]);
+        var monitor = CreateMonitor(enumerator, new FakeTcpConnectionReader(), ConfigWithHosts("example-nas"));
+
+        var session = Assert.Single(monitor.GetActiveSessions());
+        Assert.Equal("example-nas", session.HostKey);
+    }
+
+    [Fact]
+    public void Two_hosts_on_the_same_box_are_told_apart_by_user()
+    {
+        // The same machine configured twice under different accounts -- the case that makes
+        // hostname alone insufficient.
+        var config = ConfigWith(
+            HostWithKey("nas-admin") with { Hostname = "nas.example.internal", User = "root" },
+            HostWithKey("nas-me") with { Hostname = "nas.example.internal", User = "barry" });
+
+        var enumerator = new FakeSshProcessEnumerator();
+        enumerator.SetProcesses([Process(pid: 100, "nas.example.internal", "barry", 22)]);
+        var monitor = CreateMonitor(enumerator, new FakeTcpConnectionReader(), config);
+
+        var session = Assert.Single(monitor.GetActiveSessions());
+        Assert.Equal("nas-me", session.HostKey);
+    }
+
+    [Fact]
+    public void Two_hosts_on_the_same_box_are_told_apart_by_port()
+    {
+        var config = ConfigWith(
+            HostWithKey("box-22") with { Hostname = "box.example.internal", Port = 22 },
+            HostWithKey("box-2222") with { Hostname = "box.example.internal", Port = 2222 });
+
+        var enumerator = new FakeSshProcessEnumerator();
+        enumerator.SetProcesses([Process(pid: 100, "box.example.internal", "user", 2222)]);
+        var monitor = CreateMonitor(enumerator, new FakeTcpConnectionReader(), config);
+
+        var session = Assert.Single(monitor.GetActiveSessions());
+        Assert.Equal("box-2222", session.HostKey);
+    }
+
+    [Fact]
+    public void An_ambiguous_match_is_reported_under_no_host_rather_than_guessed()
+    {
+        // Two hosts identical in every field the command line carries. Attributing the session to
+        // either would show activity on a host that may have none -- worse than showing nothing.
+        var config = ConfigWith(
+            HostWithKey("dup-a") with { Hostname = "box.example.internal" },
+            HostWithKey("dup-b") with { Hostname = "box.example.internal" });
+
+        var enumerator = new FakeSshProcessEnumerator();
+        enumerator.SetProcesses([Process(pid: 100, "box.example.internal", "user", 22)]);
+        var monitor = CreateMonitor(enumerator, new FakeTcpConnectionReader(), config);
+
+        Assert.Empty(monitor.GetActiveSessions());
+    }
+
+    [Fact]
+    public void Narrowing_never_eliminates_the_only_candidate()
+    {
+        // ssh fills in defaults the command line does not spell out (the local username, port 22),
+        // so a hand-launched `ssh nas.example.internal` carries neither. The one host on that
+        // hostname must still correlate rather than being narrowed away to nothing.
+        var enumerator = new FakeSshProcessEnumerator();
+        enumerator.SetProcesses([Process(pid: 100, "example-nas.example.internal", user: null, port: null)]);
+        var monitor = CreateMonitor(enumerator, new FakeTcpConnectionReader(), ConfigWithHosts("example-nas"));
+
+        var session = Assert.Single(monitor.GetActiveSessions());
+        Assert.Equal("example-nas", session.HostKey);
+    }
+
+    [Fact]
+    public void An_ssh_config_alias_matching_a_config_key_still_correlates()
+    {
+        // Bosun no longer emits this shape, but a user can still type `ssh example-nas` against
+        // their own ssh_config alias, and older Terminal fragments on disk still contain it until
+        // the next rewrite. Dropping it would silently shrink the session list.
+        var enumerator = new FakeSshProcessEnumerator();
+        enumerator.SetProcesses([Process(pid: 100, targetHost: "example-nas")]);
+        var monitor = CreateMonitor(enumerator, new FakeTcpConnectionReader(), ConfigWithHosts("example-nas"));
+
+        var session = Assert.Single(monitor.GetActiveSessions());
+        Assert.Equal("example-nas", session.HostKey);
+    }
+
     private static SshSessionMonitor CreateMonitor(
         ISshProcessEnumerator enumerator, ITcpConnectionReader tcp, BosunConfig config) =>
         new(enumerator, tcp, new FakeHostConfigStore(config), NullLogger<SshSessionMonitor>.Instance);
 
+    /// <summary>A live ssh.exe whose command line named <paramref name="targetHost"/> as its
+    /// target, with no user or port given -- i.e. the hand-launched <c>ssh sometarget</c> shape.
+    /// Correlation of the fully-specified form Bosun itself emits is covered separately below.
+    /// </summary>
     private static SshProcessInfo Process(int pid, string? targetHost) => new()
     {
         ProcessId = pid,
-        TargetHost = targetHost,
+        Target = targetHost is null ? null : new SshTarget { Host = targetHost },
+        StartTime = StartTime,
+    };
+
+    private static SshProcessInfo Process(int pid, string host, string? user, int? port) => new()
+    {
+        ProcessId = pid,
+        Target = new SshTarget { Host = host, User = user, Port = port },
         StartTime = StartTime,
     };
 
@@ -163,6 +278,12 @@ public sealed class SshSessionMonitorTests
     {
         Global = new GlobalConfig(),
         Hosts = keys.ToDictionary(k => k, HostWithKey),
+    };
+
+    private static BosunConfig ConfigWith(params HostConfig[] hosts) => new()
+    {
+        Global = new GlobalConfig(),
+        Hosts = hosts.ToDictionary(h => h.Key, StringComparer.Ordinal),
     };
 
     private static HostConfig HostWithKey(string key) => new()

@@ -7,13 +7,13 @@ using Microsoft.Extensions.Logging;
 namespace Bosun.SessionMonitor;
 
 /// <summary>One live <c>ssh.exe</c> process, before correlation to a configured host (bs-8dr).
-/// <see cref="TargetHost"/> is whatever <see cref="SshCommandLineParser"/> extracted from the
+/// <see cref="Target"/> is whatever <see cref="SshCommandLineParser"/> extracted from the
 /// process's command line -- it may be <see langword="null"/>, or may not match any configured
-/// host key; neither is this type's concern.</summary>
+/// host; neither is this type's concern.</summary>
 public sealed record SshProcessInfo
 {
     public required int ProcessId { get; init; }
-    public string? TargetHost { get; init; }
+    public SshTarget? Target { get; init; }
     public required DateTimeOffset StartTime { get; init; }
 }
 
@@ -41,7 +41,7 @@ public interface ISshProcessEnumerator
 /// handling, same reasoning.</item>
 /// <item>CIM being slow, unavailable, or access-denied -- caught around the whole query. A CIM
 /// failure degrades to "no command lines resolved this tick" (every process reports
-/// <c>TargetHost = null</c> and is filtered out upstream), never a crash.</item>
+/// <c>Target = null</c> and is filtered out upstream), never a crash.</item>
 /// </list>
 /// Production only. Enumeration itself is not unit-tested against real processes (bs-8dr
 /// acceptance) -- see <see cref="SshCommandLineParser"/> for the part that is.
@@ -94,12 +94,12 @@ public sealed class CimSshProcessEnumerator(ILogger<CimSshProcessEnumerator> log
             var startTime = process.StartTime;
 
             commandLines.TryGetValue(pid, out var commandLine);
-            var targetHost = commandLine is null ? null : SshCommandLineParser.TryParseTargetHost(commandLine);
+            var target = commandLine is null ? null : SshCommandLineParser.TryParse(commandLine);
 
             info = new SshProcessInfo
             {
                 ProcessId = pid,
-                TargetHost = targetHost,
+                Target = target,
                 StartTime = startTime,
             };
             return true;

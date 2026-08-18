@@ -16,7 +16,9 @@ public sealed class FragmentProfileGeneratorTests
 
         var profile = FragmentProfileGenerator.CreateProfile(host);
 
-        Assert.Equal("ssh example-nas", profile.CommandLine);
+        Assert.Equal(
+            "ssh -i \"~/.ssh/id_ed25519\" -p 22 someuser@example-nas.example.internal",
+            profile.CommandLine);
     }
 
     [Fact]
@@ -26,18 +28,56 @@ public sealed class FragmentProfileGeneratorTests
 
         var profile = FragmentProfileGenerator.CreateProfile(host);
 
-        Assert.Equal("ssh -t example-nas tmux new -A -s main", profile.CommandLine);
+        Assert.Equal(
+            "ssh -t -i \"~/.ssh/id_ed25519\" -p 22 someuser@example-nas.example.internal tmux new -A -s main",
+            profile.CommandLine);
     }
 
     [Fact]
-    public void CreateProfile_uses_the_config_key_not_display_name_in_the_commandline()
+    public void CreateProfile_connects_by_hostname_never_by_the_config_key_or_display_name()
     {
-        var host = TerminalHostFixtures.Host("example-nas", displayName: "My Fancy NAS");
+        // bs-dkm / ADR-013 Amendment 1. The key is Bosun's identity, not a network name: handing
+        // it to ssh made it a DNS lookup that only succeeded if the user had hand-written a
+        // matching `Host <key>` block in ~/.ssh/config. A key deliberately unrelated to the
+        // hostname here, so "contains the key" cannot pass by substring accident.
+        var host = TerminalHostFixtures.Host("example-nas", displayName: "My Fancy NAS") with
+        {
+            Hostname = "nas.internal.example.com",
+        };
 
         var profile = FragmentProfileGenerator.CreateProfile(host);
 
-        Assert.Contains("example-nas", profile.CommandLine);
-        Assert.DoesNotContain("My Fancy NAS", profile.CommandLine);
+        Assert.Contains("someuser@nas.internal.example.com", profile.CommandLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("example-nas", profile.CommandLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("My Fancy NAS", profile.CommandLine, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CreateProfile_carries_the_port_and_identity_file_the_user_configured()
+    {
+        var host = TerminalHostFixtures.Host("example-nas") with
+        {
+            Port = 2222,
+            IdentityFile = @"C:\keys\nas_ed25519",
+        };
+
+        var profile = FragmentProfileGenerator.CreateProfile(host);
+
+        Assert.Contains("-p 2222", profile.CommandLine, StringComparison.Ordinal);
+        Assert.Contains(@"-i ""C:\keys\nas_ed25519""", profile.CommandLine, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CreateProfile_omits_dash_i_entirely_when_no_identity_file_is_set()
+    {
+        // A bare "-i " would make ssh consume the NEXT token as the key path -- here "-p" --
+        // silently changing what it connects to. Omitting the flag is the only safe handling.
+        var host = TerminalHostFixtures.Host("example-nas") with { IdentityFile = "   " };
+
+        var invocation = FragmentProfileGenerator.BuildSshInvocation(host);
+
+        Assert.DoesNotContain("-i", invocation, StringComparison.Ordinal);
+        Assert.Equal("ssh -p 22 someuser@example-nas.example.internal", invocation);
     }
 
     [Fact]
@@ -104,7 +144,7 @@ public sealed class FragmentProfileGeneratorTests
         var document = FragmentProfileGenerator.CreateDocument([host]);
 
         var profile = Assert.Single(document.Profiles);
-        Assert.Equal("example-jump", profile.CommandLine.Split(' ')[1]);
+        Assert.Equal(FragmentProfileGenerator.BuildSshInvocation(host), profile.CommandLine);
     }
 
     [Fact]
@@ -133,7 +173,7 @@ public sealed class FragmentProfileGeneratorTests
 
         var profile = FragmentProfileGenerator.CreateProfile(host);
 
-        Assert.Contains("ssh example-remote", profile.CommandLine);
+        Assert.Contains(FragmentProfileGenerator.BuildSshInvocation(host), profile.CommandLine, StringComparison.Ordinal);
         Assert.Contains("cmd.exe", profile.CommandLine);
         Assert.Contains("255", profile.CommandLine); // retries on the dropped-connection exit code
     }
@@ -171,7 +211,7 @@ public sealed class FragmentProfileGeneratorTests
 
         var profile = FragmentProfileGenerator.CreateProfile(host);
 
-        Assert.Equal("ssh example-remote", profile.CommandLine);
+        Assert.Equal("ssh -i \"~/.ssh/id_ed25519\" -p 22 someuser@example-remote.example.internal", profile.CommandLine);
     }
 
     [Fact]
@@ -195,6 +235,8 @@ public sealed class FragmentProfileGeneratorTests
 
         var invocation = FragmentProfileGenerator.BuildSshInvocation(host);
 
-        Assert.Equal("ssh -t example-nas tmux new -A -s main", invocation);
+        Assert.Equal(
+            "ssh -t -i \"~/.ssh/id_ed25519\" -p 22 someuser@example-nas.example.internal tmux new -A -s main",
+            invocation);
     }
 }

@@ -120,15 +120,18 @@ warned about does not apply to Bosun; ADR-006 explains why.
 Each host becomes a profile whose `commandline` is either:
 
 ```
-ssh <config-key>                                  # tmux = false
-ssh -t <config-key> tmux new -A -s <session>      # tmux = true
+ssh -i "<identity_file>" -p <port> <user>@<hostname>                                 # tmux = false
+ssh -t -i "<identity_file>" -p <port> <user>@<hostname> tmux new -A -s <session>      # tmux = true
 ```
 
-`<config-key>` is the host's **TOML key** — `example-nas`, not `display_name` and
-not `user@hostname`. Bosun therefore expects a matching `Host <config-key>` block
-in the user's `~/.ssh/config`, which is a documented prerequisite (README) and a
-triage row (`docs/OPERATIONS.md`). The fully-specified alternative would bypass
-`ProxyJump` and everything else the user configured there. See **ADR-013**.
+The four connection fields come straight from the host's `hosts.toml` entry — the
+same four the Add Host dialog collects. No `~/.ssh/config` alias is required.
+
+This reverses ADR-013's original Decision 1, which emitted the bare config key as
+an `ssh_config` alias; see **ADR-013 Amendment 1** for why that failed in practice
+and why `ProxyJump` still works without it. The config key remains Bosun's
+identity — it is still the profile GUID's hash input — but it is no longer a
+network name.
 
 Bosun emits an explicit profile `guid`, derived from the config key rather than
 letting Terminal derive one from `display_name` — otherwise renaming a host
