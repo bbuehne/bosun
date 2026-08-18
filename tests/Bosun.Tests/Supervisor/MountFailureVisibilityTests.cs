@@ -16,6 +16,38 @@ namespace Bosun.Tests.Supervisor;
 /// </summary>
 public sealed class MountFailureVisibilityTests
 {
+    /// <summary>
+    /// The captured reason must name the CAUSE, not just the outcome enum.
+    /// </summary>
+    /// <remarks>
+    /// From a real failure on the maintainer's machine: a host whose identity_file pointed at a
+    /// .pub (the public half) failed its deep probe with rclone reporting "failed to parse private
+    /// key file: ssh: no key found". The supervisor recorded only
+    /// <c>"deep probe failed entering Mounting: Failed"</c> -- the enum -- so the window could say
+    /// no more than "Failed", and the actionable sentence existed only in the log file. The user
+    /// had to ask for the log to be read to them.
+    ///
+    /// That is exactly the failure ADR-012 Decision 3 exists to prevent: a degraded state that
+    /// does not explain itself sends the user looking elsewhere. Catches a regression to
+    /// <c>{deep.Outcome}</c>.
+    /// </remarks>
+    [Fact]
+    public async Task The_recorded_failure_reason_names_the_cause_not_just_the_outcome()
+    {
+        const string rcloneDetail = "failed to parse private key file: ssh: no key found";
+
+        var host = HostFixtures.Persistent("prod", drive: "P:");
+        var harness = new SupervisorHarness(HostFixtures.Build(HostFixtures.Global(), host));
+        harness.Probe.EnqueueDeep("prod", DeepProbeOutcome.Failed, rcloneDetail);
+
+        await harness.StartAsync();
+
+        var reason = harness.Snapshot("prod").LastMountFailureReason;
+
+        Assert.NotNull(reason);
+        Assert.Contains(rcloneDetail, reason, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task A_deep_probe_failure_entering_Mounting_is_captured_on_the_snapshot()
     {

@@ -959,7 +959,15 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 "than mounting (Invariant I1 -- deep probe failure never reaches Mounted)",
                 host.Key, deep.Outcome, deep.Detail);
             host.MountRetryBackoff = host.MountRetryBackoff.RecordFailure();
-            var deepProbeFailureReason = $"deep probe failed entering Mounting: {deep.Outcome}";
+            // Detail, not just Outcome. Outcome alone is the enum -- "Failed" -- which reaches the
+            // window as "last error: deep probe failed entering Mounting: Failed" and tells the
+            // user nothing they can act on. Detail carries the actual cause from rclone, e.g.
+            // "failed to parse private key file: ssh: no key found", which names the fix. That
+            // difference is the whole of ADR-012 Decision 3: a degraded state must explain itself,
+            // or the user reads a log to find out what a dialog could have told them.
+            var deepProbeFailureReason = string.IsNullOrWhiteSpace(deep.Detail)
+                ? $"deep probe failed entering Mounting: {deep.Outcome}"
+                : $"deep probe failed entering Mounting: {deep.Detail}";
             host.ConsecutiveMountFailures++;
             host.LastMountFailureReason = deepProbeFailureReason;
             await BeginDrainAsync(host, deepProbeFailureReason, DrainCause.MountFailure, ct)

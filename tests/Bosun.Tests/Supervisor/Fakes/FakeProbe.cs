@@ -41,7 +41,12 @@ internal sealed class FakeProbe : IProbe
         });
     }
 
-    public void EnqueueDeep(string hostKey, DeepProbeOutcome outcome)
+    public void EnqueueDeep(string hostKey, DeepProbeOutcome outcome) =>
+        EnqueueDeep(hostKey, outcome, detail: null);
+
+    /// <summary>Scripts a deep probe with the DETAIL rclone would return, e.g.
+    /// "failed to parse private key file: ssh: no key found" -- what makes a failure actionable.</summary>
+    public void EnqueueDeep(string hostKey, DeepProbeOutcome outcome, string? detail)
     {
         if (!deepScripts.TryGetValue(hostKey, out var queue))
         {
@@ -53,7 +58,7 @@ internal sealed class FakeProbe : IProbe
         {
             Outcome = outcome,
             Elapsed = TimeSpan.Zero,
-            Detail = outcome == DeepProbeOutcome.Success ? null : $"fake {outcome}",
+            Detail = outcome == DeepProbeOutcome.Success ? null : (detail ?? $"fake {outcome}"),
         });
     }
 
