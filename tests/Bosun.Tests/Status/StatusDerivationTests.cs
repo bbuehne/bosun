@@ -27,6 +27,7 @@ public sealed class StatusDerivationTests
         int consecutiveIdleFailures = 0,
         bool userParked = false,
         string? mountUnavailableReason = null,
+        MountingUnavailableCause? mountUnavailableCause = null,
         int consecutiveMountFailures = 0,
         string? lastMountFailureReason = null) => new()
     {
@@ -38,6 +39,7 @@ public sealed class StatusDerivationTests
         ConsecutiveIdleFailures = consecutiveIdleFailures,
         UserParked = userParked,
         MountUnavailableReason = mountUnavailableReason,
+        MountUnavailableCause = mountUnavailableCause,
         ConsecutiveMountFailures = consecutiveMountFailures,
         LastMountFailureReason = lastMountFailureReason,
     };
@@ -136,6 +138,97 @@ public sealed class StatusDerivationTests
 
         Assert.Equal(StatusCategory.MountingUnavailable, row.Category);
         Assert.Equal("P: is not mounted -- WinFsp is not installed", row.StatusText);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // bs-yyg: an app-wide fault is shown once, in the banner -- not copied onto every row
+    // ------------------------------------------------------------------------------------------
+
+    private const string RcdMessage =
+        "rclone rcd started but did not respond to core/version within 00:00:15. The rc port answered HTTP 401 (PID 4242).";
+
+    [Fact]
+    public void An_rclone_fault_gives_the_short_reference_not_the_rcd_message()
+    {
+        var row = StatusDerivation.DeriveRow(
+            Snapshot(
+                state: MountState.Ready,
+                mountUnavailableReason: RcdMessage,
+                mountUnavailableCause: MountingUnavailableCause.RcloneUnhealthy),
+            PersistentHost,
+            0);
+
+        Assert.Equal(StatusCategory.MountingUnavailable, row.Category);
+        Assert.Equal("Waiting: rclone is not ready (see banner)", row.StatusText);
+        Assert.DoesNotContain("core/version", row.StatusText, StringComparison.Ordinal);
+        Assert.DoesNotContain("401", row.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Every_mount_capable_host_gets_the_same_short_text_so_nothing_app_wide_is_repeated_per_row()
+    {
+        var snapshot = Snapshot(
+            state: MountState.Ready, mountUnavailableReason: RcdMessage, mountUnavailableCause: MountingUnavailableCause.RcloneUnhealthy);
+
+        var persistent = StatusDerivation.DeriveRow(snapshot, PersistentHost, 0);
+        var onDemand = StatusDerivation.DeriveRow(snapshot with { HostKey = "archive" }, OnDemandHost, 0);
+
+        Assert.Equal(persistent.StatusText, onDemand.StatusText);
+    }
+
+    [Fact]
+    public void A_WinFsp_cause_gets_its_own_short_reference()
+    {
+        var row = StatusDerivation.DeriveRow(
+            Snapshot(
+                state: MountState.Ready,
+                mountUnavailableReason: "WinFsp is not installed",
+                mountUnavailableCause: MountingUnavailableCause.WinFspMissing),
+            PersistentHost,
+            0);
+
+        Assert.Equal("Waiting: WinFsp is not installed (see banner)", row.StatusText);
+    }
+
+    [Fact]
+    public void Host_specific_mount_failures_are_unchanged_by_the_app_level_text()
+    {
+        // The reason here deliberately looks like an rcd message: it is THIS host's failure, so it
+        // stays in the row verbatim.
+        var row = StatusDerivation.DeriveRow(
+            Snapshot(
+                state: MountState.Ready,
+                consecutiveMountFailures: 2,
+                lastMountFailureReason: "mount/mount failed: " + RcdMessage),
+            PersistentHost,
+            0);
+
+        Assert.Equal(StatusCategory.MountFailing, row.Category);
+        Assert.Equal($"P: is not mounted -- mount failed 2 times; last error: mount/mount failed: {RcdMessage}", row.StatusText);
+    }
+
+    [Fact]
+    public void Host_specific_unreachable_text_is_unchanged()
+    {
+        var row = StatusDerivation.DeriveRow(
+            Snapshot(state: MountState.Unreachable, consecutiveIdleFailures: 3), PersistentHost, 0);
+
+        Assert.Equal("P: is not mounted -- host unreachable after 3 consecutive failed probes", row.StatusText);
+    }
+
+    [Fact]
+    public void A_parked_host_still_says_it_is_parked_while_rclone_is_down()
+    {
+        var row = StatusDerivation.DeriveRow(
+            Snapshot(
+                state: MountState.Ready,
+                userParked: true,
+                mountUnavailableReason: RcdMessage,
+                mountUnavailableCause: MountingUnavailableCause.RcloneUnhealthy),
+            PersistentHost,
+            0);
+
+        Assert.Equal(StatusCategory.Parked, row.Category);
     }
 
     [Fact]

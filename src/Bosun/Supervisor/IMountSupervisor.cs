@@ -224,6 +224,14 @@ public sealed record HostMountSnapshot
     public string? MountUnavailableReason { get; init; }
 
     /// <summary>
+    /// Which process-wide cause <see cref="MountUnavailableReason"/> describes (bs-yyg), or
+    /// <see langword="null"/> when mounting is available. Lets the status derivation tell an
+    /// app-level cause (rclone, WinFsp -- shown once in the health banner) from the reason text
+    /// itself, which for rclone is the full fault message and must not be repeated on every row.
+    /// </summary>
+    public MountingUnavailableCause? MountUnavailableCause { get; init; }
+
+    /// <summary>
     /// Consecutive MOUNT-ATTEMPT failures -- a deep probe failing while entering
     /// <see cref="MountState.Mounting"/>, or <c>mount/mount</c> itself failing (bs-ww9.4;
     /// docs/ARCHITECTURE.md §4 "A failed mount attempt is paced too, on its own ladder"). This is

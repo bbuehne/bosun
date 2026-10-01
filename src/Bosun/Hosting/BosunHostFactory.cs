@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net.Http;
 using Bosun.Configuration;
+using Bosun.Health;
 using Bosun.Probe;
 using Bosun.Rclone;
 using Bosun.Rclone.Process;
@@ -238,6 +239,15 @@ public static class BosunHostFactory
         // registration in this factory.
         builder.Services.AddSingleton<ISystemEventSource>(sp => new Win32SystemEventSource(
             TimeProvider.System, sp.GetRequiredService<ILogger<Win32SystemEventSource>>()));
+
+        // bs-yyg / ADR-020 Decision 4: the one application-health model. One instance behind both
+        // faces -- StartupOrchestrator (and later the watchdog) push into IAppHealthReporter, the
+        // window and tray read IAppHealth -- so they cannot disagree. Constructing it only creates a
+        // timer for the startup grace period; no I/O.
+        builder.Services.AddSingleton(sp => new AppHealthService(
+            TimeProvider.System, logger: sp.GetRequiredService<ILogger<AppHealthService>>()));
+        builder.Services.AddSingleton<IAppHealth>(sp => sp.GetRequiredService<AppHealthService>());
+        builder.Services.AddSingleton<IAppHealthReporter>(sp => sp.GetRequiredService<AppHealthService>());
 
         // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
         // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without

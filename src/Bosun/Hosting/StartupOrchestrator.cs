@@ -1,4 +1,5 @@
 using Bosun.Configuration;
+using Bosun.Health;
 using Bosun.Rclone;
 using Bosun.Rclone.Process;
 using Bosun.Supervisor;
@@ -101,6 +102,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
     private SystemEventSupervisorAdapter? systemEventAdapter;
     private CancellationTokenSource? supervisorLoopCts;
     private Task? supervisorLoopTask;
+    private readonly IAppHealthReporter? health;
     private StartupReadiness current = StartupReadiness.Initial;
     private bool stopped;
 
@@ -121,6 +123,12 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         this.firstRunBootstrapper = firstRunBootstrapper;
         this.winFspDetector = winFspDetector;
         this.logger = logger;
+
+        // Optional (bs-yyg): resolved, not injected, so a host without the health model -- every
+        // pre-existing test harness -- still works. Resolved here, in the constructor, because the
+        // service's startup grace period is measured from when it is created, and that should be
+        // when Bosun starts starting, not when something first asks for it.
+        health = services.GetService<IAppHealthReporter>();
     }
 
     public StartupReadiness Current
@@ -423,6 +431,8 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             await rcloneProcessService.StartAsync(ct).ConfigureAwait(false);
 
             var healthy = rcloneProcessService.Status == RcloneProcessStatus.Healthy;
+            health?.ObserveRclone(
+                rcloneProcessService.Status, rcloneProcessService.FaultKind, rcloneProcessService.LastFaultMessage);
             PublishReadiness(Current with
             {
                 RcloneHealthy = healthy,
@@ -433,6 +443,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Failed to start rclone rcd; mounting is disabled until this is fixed");
+            health?.ObserveRclone(RcloneProcessStatus.Faulted, RcloneProcessFaultKind.LaunchFailed, ex.Message);
             PublishReadiness(Current with { RcloneHealthy = false, RcloneFaultMessage = ex.Message });
             return false;
         }
@@ -448,6 +459,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             // EnqueueAndWait-based call (StartAsync included) is issued below, or that call
             // deadlocks forever waiting for work nothing is dequeuing -- see the class remarks.
             supervisorLoopCts = new CancellationTokenSource();
+            health?.ObserveSupervisorLoop(started: true, isRunning: true);
             supervisorLoopTask = RunSupervisorLoopAsync(mountSupervisor, supervisorLoopCts.Token);
 
             // bs-yvw.1: the mounting-availability gate MUST be in effect before StartAsync below
@@ -466,6 +478,11 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Failed to start the mount supervisor; no host will be probed or mounted this session");
+            health?.ReportIssue(
+                HealthIssueCodes.StartupSupervisorFailed,
+                HealthLevel.Faulted,
+                "Mount supervision could not start",
+                $"No host will be probed or mounted until Bosun is restarted. {ex.Message}");
             return false;
         }
     }
@@ -518,6 +535,17 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         {
             logger.LogCritical(ex, "The mount supervisor's processing loop crashed; mounts are no longer managed until Bosun restarts");
         }
+        finally
+        {
+            // bs-yyg: the loop is the one thing whose silent death went unnoticed for 2.5 days, so
+            // its exit is published to the health model -- unless this is the shutdown the token
+            // asked for, which is not a fault. IsLoopRunning is read, not assumed: RunAsync clears
+            // it on every exit path.
+            if (!ct.IsCancellationRequested)
+            {
+                health?.ObserveSupervisorLoop(started: true, isRunning: supervisor.IsLoopRunning);
+            }
+        }
     }
 
     private async Task<Dictionary<string, string>> ProvisionAllRemotesAsync(BosunConfig config, CancellationToken ct)
@@ -548,6 +576,8 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
 
     private void OnRcloneProcessStatusChanged(object? sender, RcloneProcessStatusChangedEventArgs e)
     {
+        health?.ObserveRclone(e.Status, e.FaultKind, e.Detail);
+
         if (e.Status != RcloneProcessStatus.Healthy)
         {
             PublishReadiness(Current with { RcloneHealthy = false, RcloneFaultMessage = e.Detail });
@@ -694,6 +724,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
     private void PublishReadiness(StartupReadiness readiness)
     {
         Current = readiness;
+        health?.ObserveStartup(readiness);
         ReadinessChanged?.Invoke(this, new StartupReadinessChangedEventArgs(readiness));
     }
 }
