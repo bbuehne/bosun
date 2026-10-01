@@ -271,5 +271,9 @@ public sealed class BosunHostFactoryTests : IDisposable
         Assert.NotNull(host.Services.GetRequiredService<IFragmentWriter>());
         Assert.NotNull(host.Services.GetRequiredService<IRemoteRootLister>());
         Assert.NotNull(host.Services.GetRequiredService<IWinFspDetector>());
+
+        // bs-ds3: App.InitializeUserInterface resolves this for the dispatcher. Resolving it builds
+        // the whole bundle graph, which must stay inert (no process, Event Log or file access).
+        Assert.NotNull(host.Services.GetRequiredService<Bosun.Diagnostics.CopyDiagnosticsCommand>());
     }
 }

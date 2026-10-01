@@ -1,3 +1,4 @@
+using Bosun.Diagnostics;
 using Bosun.Supervisor;
 using Microsoft.Extensions.Logging;
 using Bosun.Status;
@@ -24,11 +25,13 @@ public sealed class HostActionDispatcher
     private readonly IMountSupervisor _supervisor;
     private readonly IExternalLauncher _launcher;
     private readonly ILogger<HostActionDispatcher>? _logger;
+    private readonly CopyDiagnosticsCommand? _diagnostics;
 
     public HostActionDispatcher(
         IMountSupervisor supervisor,
         IExternalLauncher launcher,
-        ILogger<HostActionDispatcher>? logger = null)
+        ILogger<HostActionDispatcher>? logger = null,
+        CopyDiagnosticsCommand? diagnostics = null)
     {
         ArgumentNullException.ThrowIfNull(supervisor);
         ArgumentNullException.ThrowIfNull(launcher);
@@ -36,6 +39,24 @@ public sealed class HostActionDispatcher
         _supervisor = supervisor;
         _launcher = launcher;
         _logger = logger;
+        _diagnostics = diagnostics;
+    }
+
+    /// <summary>
+    /// "Copy diagnostics" (bs-ds3): the one application-level command on this path, shared by the
+    /// tray menu and the window button for the same reason the per-host actions are. Returns
+    /// immediately; the command reports its own failure to the user. It reads state and writes a
+    /// zip, and never touches a mount.
+    /// </summary>
+    public void CopyDiagnostics()
+    {
+        if (_diagnostics is null)
+        {
+            _logger?.LogWarning("Copy diagnostics was requested but no diagnostics command is configured");
+            return;
+        }
+
+        _ = _diagnostics.RunAsync();
     }
 
     /// <summary>

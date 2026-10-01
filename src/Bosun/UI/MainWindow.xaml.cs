@@ -109,6 +109,9 @@ public partial class MainWindow : Window, IAppWindow
         _bitviseProfileParser = bitviseProfileParser;
     }
 
+    private void OnCopyDiagnosticsClick(object sender, RoutedEventArgs e) =>
+        _actionDispatcher?.CopyDiagnostics();
+
     private void OnAddHostClick(object sender, RoutedEventArgs e)
     {
         if (_hostEditorController is null || _identityFilePicker is null)

@@ -216,6 +216,11 @@ public sealed class TrayIconController : IDisposable
         autostartItem.Click += (_, _) => ToggleAutostart(autostartItem.IsChecked);
         menu.Items.Add(autostartItem);
 
+        // bs-ds3: same dispatcher the window's button uses, so both do exactly the same thing.
+        var diagnosticsItem = new MenuItem { Header = "Copy diagnostics" };
+        diagnosticsItem.Click += (_, _) => _actionDispatcher.CopyDiagnostics();
+        menu.Items.Add(diagnosticsItem);
+
         var exitItem = new MenuItem { Header = "Exit" };
         exitItem.Click += (_, _) => Application.Current?.Shutdown();
         menu.Items.Add(exitItem);
