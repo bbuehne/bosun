@@ -14,8 +14,32 @@
         status text (ADR-012 Decision 3) and a scrollable transition-log view are bs-ww9.6 and
         bs-ww9.1's jobs respectively, not built here; see MainWindow.xaml.cs's remarks.
     -->
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+
+        <!--
+            bs-yyg: the health banner's colours follow the view model's Level. The palette is the
+            tray icon's (TrayIconAppearanceSelector): amber for Degraded, red for Faulted, so the
+            window and the tray say the same thing in the same colours. Degraded is the default and
+            Faulted overrides it, so an unexpected level can never render as "fine".
+        -->
+        <Style x:Key="HealthBannerStyle" TargetType="Border">
+            <Setter Property="Background" Value="#FFF4D6" />
+            <Setter Property="BorderBrush" Value="#F9A825" />
+            <Setter Property="TextElement.Foreground" Value="#4A3600" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Level}" Value="Faulted">
+                    <Setter Property="Background" Value="#FDECEA" />
+                    <Setter Property="BorderBrush" Value="#C62828" />
+                    <Setter Property="TextElement.Foreground" Value="#5A1111" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
     <Grid Margin="12">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
@@ -36,8 +60,78 @@
             </StackPanel>
         </Grid>
 
+        <!--
+            bs-yyg / ADR-020 Decision 4: the application-health banner. Sits between the header and
+            the host grid. Bound to HealthBannerViewModel (DataContext set in MainWindow's
+            constructor); Visibility follows IsVisible, and Collapsed means it takes no space, so a
+            healthy Bosun looks exactly as it did before. Shows the most severe issue in full; any
+            others are behind the "N more" toggle.
+        -->
+        <Border x:Name="HealthBanner"
+                Grid.Row="1"
+                Margin="0,0,0,8"
+                Padding="12,8"
+                BorderThickness="1"
+                CornerRadius="3"
+                Style="{StaticResource HealthBannerStyle}"
+                Visibility="{Binding IsVisible, Converter={StaticResource BoolToVisibility}}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0">
+                    <TextBlock Text="{Binding Title}" FontWeight="Bold" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                    <TextBlock Text="{Binding SinceText}" FontSize="11" Opacity="0.75" Margin="0,2,0,0" />
+
+                    <!-- The "N more" expansion: every issue after the top one. -->
+                    <ItemsControl ItemsSource="{Binding OtherIssues}"
+                                  Margin="0,8,0,0"
+                                  Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibility}}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="0,0,0,6">
+                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding SinceText}" FontSize="11" Opacity="0.75" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="12,0,0,0">
+                    <!--
+                        ACTION BUTTONS GO HERE (bs-aoz: Restart rclone, Unmount all and re-probe,
+                        Restart Bosun). Empty today: HealthBannerViewModel.Actions has no items, so
+                        nothing renders. Adding a HealthBannerAction to that collection is all it
+                        takes to add a button, with no change to this file.
+                    -->
+                    <ItemsControl x:Name="HealthBannerActions" ItemsSource="{Binding Actions}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Button Content="{Binding Label}" Command="{Binding Command}" Margin="0,0,8,0" Padding="10,3" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <ToggleButton Content="{Binding MoreText}"
+                                  IsChecked="{Binding IsExpanded, Mode=TwoWay}"
+                                  Padding="10,3"
+                                  Visibility="{Binding HasMore, Converter={StaticResource BoolToVisibility}}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
         <DataGrid x:Name="HostsGrid"
-                  Grid.Row="1"
+                  Grid.Row="2"
                   AutoGenerateColumns="False"
                   IsReadOnly="True"
                   CanUserAddRows="False"

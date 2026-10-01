@@ -4,8 +4,10 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Bosun.Configuration;
+using Bosun.Health;
 using Bosun.Import;
 using Bosun.Supervisor;
+using Bosun.UI.Banner;
 using Bosun.UI.HostEditor;
 using Bosun.UI.Tray;
 using Microsoft.Extensions.Logging;
@@ -42,6 +44,11 @@ public partial class MainWindow : Window, IAppWindow
 
     private readonly DispatcherTimer _refreshTimer;
     private IStatusReadModel? _statusReadModel;
+
+    // bs-yyg: the banner's view model (always present, so the XAML bindings resolve from the first
+    // frame) and the health source it is fed from (null until Configure).
+    private readonly HealthBannerViewModel _healthBanner = new();
+    private IAppHealth? _appHealth;
     private HostActionDispatcher? _actionDispatcher;
 
     // bs-ww9.8 / ADR-019: null until ConfigureHostEditor is called. HostEditorController owns all
@@ -63,6 +70,10 @@ public partial class MainWindow : Window, IAppWindow
     {
         InitializeComponent();
 
+        // Only the banner takes this view model as its DataContext; the grid and the header keep
+        // theirs (none) and are populated from code, as before.
+        HealthBanner.DataContext = _healthBanner;
+
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = RefreshInterval };
         _refreshTimer.Tick += (_, _) => RefreshRows();
 
@@ -71,9 +82,10 @@ public partial class MainWindow : Window, IAppWindow
 
     /// <summary>Wires the real dependencies in and starts the refresh timer. Call once, after
     /// construction and before the window is shown.</summary>
-    public void Configure(IStatusReadModel statusReadModel, HostActionDispatcher actionDispatcher)
+    public void Configure(IStatusReadModel statusReadModel, HostActionDispatcher actionDispatcher, IAppHealth appHealth)
     {
         _statusReadModel = statusReadModel;
+        _appHealth = appHealth;
         _actionDispatcher = actionDispatcher;
         RefreshRows();
         _refreshTimer.Start();
@@ -265,7 +277,10 @@ public partial class MainWindow : Window, IAppWindow
             var rows = _statusReadModel.Current.Rows;
             var health = _statusReadModel.Current.Health;
             HostsGrid.ItemsSource = rows;
-            HealthTextBlock.Text = $"Bosun — {health}";
+
+            // The header and the banner come from one Update so they cannot disagree.
+            _healthBanner.Update(_appHealth?.Current ?? AppHealth.Healthy, health);
+            HealthTextBlock.Text = _healthBanner.HeaderText;
         }
         catch (Exception ex)
         {
