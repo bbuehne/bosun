@@ -213,7 +213,9 @@ public static class BosunHostFactory
                 rcloneProcessOptions,
                 TimeProvider.System,
                 sp.GetRequiredService<ILogger<RcloneProcessService>>(),
-                sp.GetRequiredService<RcloneRcCredential>());
+                sp.GetRequiredService<RcloneRcCredential>(),
+                RcPortGuardFactory.CreateForCurrentUser(
+                    rcloneProcessOptions, TimeProvider.System, sp.GetRequiredService<ILoggerFactory>()));
         });
 
         // MountSupervisor (bs-psq; docs/ARCHITECTURE.md §4) -- registered as both its concrete

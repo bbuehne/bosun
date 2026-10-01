@@ -1,3 +1,4 @@
+using System.Net.Http;
 using Bosun.Rclone;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -28,10 +29,22 @@ namespace Bosun.Rclone.Process;
 /// failure would just spam the log without helping anyone -- the actionable message
 /// (<see cref="RcloneExecutableNotFoundException"/>) is the whole point. Every other fault kind
 /// (<see cref="RcloneProcessFaultKind.LaunchFailed"/>, <see cref="RcloneProcessFaultKind.HealthCheckFailed"/>,
+/// <see cref="RcloneProcessFaultKind.HealthCheckUnauthorized"/>,
+/// <see cref="RcloneProcessFaultKind.ProcessExitedBeforeHealthy"/>,
+/// <see cref="RcloneProcessFaultKind.PortHeldByOtherProcess"/>,
 /// <see cref="RcloneProcessFaultKind.ProcessExitedUnexpectedly"/>) retries indefinitely with a
 /// fixed delay (<see cref="RcloneProcessServiceOptions.RestartDelay"/>) until
 /// <see cref="StopAsync"/> is called -- these are plausibly transient (antivirus killed it, a
 /// momentary port conflict, a slow machine on resume from sleep).
+/// </para>
+/// <para>
+/// <b>Lifetime and the rc port (ADR-020 §1-2, bs-772, bs-o5x).</b> The OS ties the child to
+/// Bosun's lifetime through a Job Object assigned in <see cref="Win32RcloneProcessLauncher"/>.
+/// Before every launch, <see cref="IRcPortGuard"/> checks the rc port: a stale rcd of Bosun's own
+/// is killed, anything else holding the port faults with
+/// <see cref="RcloneProcessFaultKind.PortHeldByOtherProcess"/>. Every fault message names the
+/// REAL cause (HTTP 401 from another process, child exited with code N, port held by PID X, no
+/// response); a generic "did not respond" is never used when something better is known.
 /// </para>
 /// </remarks>
 public sealed class RcloneProcessService(
@@ -40,12 +53,14 @@ public sealed class RcloneProcessService(
     RcloneProcessServiceOptions options,
     TimeProvider timeProvider,
     ILogger<RcloneProcessService> logger,
-    RcloneRcCredential credential) : IHostedService, IAsyncDisposable
+    RcloneRcCredential credential,
+    IRcPortGuard? portGuard = null) : IHostedService, IAsyncDisposable
 {
     private readonly object _gate = new();
     private IRcloneProcessHandle? _handle;
     private CancellationTokenSource? _lifetimeCts;
     private Task? _superviseLoopTask;
+    private string? _lastPortHeldMessage;
 
     public RcloneProcessStatus Status { get; private set; } = RcloneProcessStatus.Stopped;
     public RcloneProcessFaultKind FaultKind { get; private set; } = RcloneProcessFaultKind.None;
@@ -216,6 +231,28 @@ public sealed class RcloneProcessService(
     {
         SetStatus(RcloneProcessStatus.Starting, RcloneProcessFaultKind.None, null);
 
+        // ADR-020 §2: never launch into a held port. A stale rcd of Bosun's own is killed; any
+        // other holder is reported by PID and image path, and the caller's RestartDelay loop
+        // retries (the holder may go away) rather than this method retrying tightly.
+        if (portGuard is not null)
+        {
+            var check = await portGuard.EnsureFreeAsync(cancellationToken).ConfigureAwait(false);
+            if (check.Outcome == RcPortCheckOutcome.HeldByOtherProcess)
+            {
+                // Logged at Warning once per distinct message; the 5 s retry would otherwise
+                // repeat the same line forever.
+                logger.Log(
+                    check.Message == _lastPortHeldMessage ? LogLevel.Debug : LogLevel.Warning,
+                    "{Message}",
+                    check.Message);
+                _lastPortHeldMessage = check.Message;
+                SetStatus(RcloneProcessStatus.Faulted, RcloneProcessFaultKind.PortHeldByOtherProcess, check.Message);
+                return false;
+            }
+
+            _lastPortHeldMessage = null;
+        }
+
         IRcloneProcessHandle handle;
         try
         {
@@ -239,12 +276,10 @@ public sealed class RcloneProcessService(
             _handle = handle;
         }
 
-        var healthy = await WaitUntilHealthyAsync(cancellationToken).ConfigureAwait(false);
-        if (!healthy)
+        var health = await WaitUntilHealthyAsync(handle, cancellationToken).ConfigureAwait(false);
+        if (!health.Healthy)
         {
-            var message =
-                $"rclone rcd started but did not respond to core/version within {options.HealthCheckTimeout}.";
-            logger.LogError(message);
+            logger.LogError("{Message}", health.Message);
 
             handle.Kill();
             lock (_gate)
@@ -252,7 +287,7 @@ public sealed class RcloneProcessService(
                 _handle = null;
             }
 
-            SetStatus(RcloneProcessStatus.Faulted, RcloneProcessFaultKind.HealthCheckFailed, message);
+            SetStatus(RcloneProcessStatus.Faulted, health.FaultKind, health.Message);
             return false;
         }
 
@@ -262,36 +297,139 @@ public sealed class RcloneProcessService(
     }
 
     /// <summary>Polls <c>core/version</c> at <see cref="RcloneProcessServiceOptions.HealthCheckPollInterval"/>
-    /// until it succeeds or <see cref="RcloneProcessServiceOptions.HealthCheckTimeout"/> elapses.
+    /// until it succeeds, our own child exits, or <see cref="RcloneProcessServiceOptions.HealthCheckTimeout"/>
+    /// elapses. Keeps the last failure so the fault message can name the real cause (bs-o5x), and
+    /// stops waiting the moment the child has exited: a process that died on a bind failure will
+    /// never answer, and waiting out the timeout would only delay (and blur) the diagnosis.
     /// All delays go through the injected <see cref="TimeProvider"/> -- no real wall-clock wait
     /// (CLAUDE.md worktree-safety rules).</summary>
-    private async Task<bool> WaitUntilHealthyAsync(CancellationToken cancellationToken)
+    private async Task<HealthWaitResult> WaitUntilHealthyAsync(IRcloneProcessHandle handle, CancellationToken cancellationToken)
     {
         var deadline = timeProvider.GetUtcNow() + options.HealthCheckTimeout;
+        Exception? lastFailure = null;
 
-        while (true)
+        // Cancelled when the child exits, to cut short both an in-flight poll and the delay.
+        using var exitSignal = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        void OnExited(object? sender, EventArgs e)
         {
             try
             {
-                await client.GetVersionAsync(cancellationToken).ConfigureAwait(false);
-                return true;
+                exitSignal.Cancel();
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (ObjectDisposedException)
             {
-                throw;
+                // Wait already over.
             }
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                logger.LogDebug(ex, "core/version health check attempt failed, will retry if time remains");
-            }
-
-            if (timeProvider.GetUtcNow() + options.HealthCheckPollInterval > deadline)
-            {
-                return false;
-            }
-
-            await Task.Delay(options.HealthCheckPollInterval, timeProvider, cancellationToken).ConfigureAwait(false);
         }
+
+        handle.Exited += OnExited;
+        try
+        {
+            while (true)
+            {
+                if (handle.HasExited)
+                {
+                    return ExitedBeforeHealthy(handle, lastFailure);
+                }
+
+                try
+                {
+                    await client.GetVersionAsync(exitSignal.Token).ConfigureAwait(false);
+                    return HealthWaitResult.Success;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException) when (exitSignal.IsCancellationRequested)
+                {
+                    // Our child exited mid-poll; the top of the loop reports it.
+                    continue;
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    lastFailure = ex;
+                    logger.LogDebug(ex, "core/version health check attempt failed, will retry if time remains");
+                }
+
+                if (handle.HasExited)
+                {
+                    return ExitedBeforeHealthy(handle, lastFailure);
+                }
+
+                if (timeProvider.GetUtcNow() + options.HealthCheckPollInterval > deadline)
+                {
+                    return NotHealthy(lastFailure);
+                }
+
+                try
+                {
+                    await Task.Delay(options.HealthCheckPollInterval, timeProvider, exitSignal.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Child exited during the delay; the top of the loop reports it.
+                }
+            }
+        }
+        finally
+        {
+            handle.Exited -= OnExited;
+        }
+    }
+
+    private HealthWaitResult ExitedBeforeHealthy(IRcloneProcessHandle handle, Exception? lastFailure)
+    {
+        var message = $"rclone rcd exited with code {handle.ExitCode} before becoming healthy";
+
+        // The usual reason a child dies this fast is that it could not bind the rc port. Say who
+        // holds it, and what the last probe got from them, instead of leaving the user to guess.
+        var holder = portGuard?.DescribeHolder();
+        if (holder is not null)
+        {
+            message += $"; {holder}";
+        }
+
+        if (lastFailure is not null)
+        {
+            message += $"; the last core/version attempt got: {DescribeProbeFailure(lastFailure)}";
+        }
+
+        return HealthWaitResult.Failure(RcloneProcessFaultKind.ProcessExitedBeforeHealthy, message + ".");
+    }
+
+    private HealthWaitResult NotHealthy(Exception? lastFailure)
+    {
+        var prefix = $"rclone rcd started but did not become healthy within {options.HealthCheckTimeout}";
+        var cause = lastFailure is null ? "no core/version attempt completed" : DescribeProbeFailure(lastFailure);
+        var kind = lastFailure is RcloneRcException { HttpStatusCode: 401 }
+            ? RcloneProcessFaultKind.HealthCheckUnauthorized
+            : RcloneProcessFaultKind.HealthCheckFailed;
+
+        return HealthWaitResult.Failure(kind, $"{prefix}: {cause}.");
+    }
+
+    /// <summary>Names what a failed <c>core/version</c> actually was. The distinction matters: on
+    /// 2026-10-01 a 401 from an orphaned rcd was reported as "did not respond", which sent the
+    /// diagnosis the wrong way.</summary>
+    private string DescribeProbeFailure(Exception failure) => failure switch
+    {
+        RcloneRcTimeoutException => "no response (the core/version call timed out)",
+        RcloneRcException { HttpStatusCode: 401 } =>
+            $"HTTP 401 Unauthorized from the process on 127.0.0.1:{options.RcloneRcPort} " +
+            "(another rclone with a different credential?)",
+        RcloneRcException { HttpStatusCode: { } code } =>
+            $"HTTP {code} from the process on 127.0.0.1:{options.RcloneRcPort} ({failure.Message})",
+        RcloneRcException => $"an unusable response ({failure.Message})",
+        HttpRequestException => $"no response (connection refused or reset: {failure.Message})",
+        _ => $"{failure.GetType().Name}: {failure.Message}",
+    };
+
+    private sealed record HealthWaitResult(bool Healthy, RcloneProcessFaultKind FaultKind, string? Message)
+    {
+        public static readonly HealthWaitResult Success = new(true, RcloneProcessFaultKind.None, null);
+
+        public static HealthWaitResult Failure(RcloneProcessFaultKind kind, string message) => new(false, kind, message);
     }
 
     private async Task KillAndConfirmExitAsync(CancellationToken cancellationToken)
