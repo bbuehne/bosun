@@ -46,6 +46,7 @@ public sealed class MountingAvailabilityTests
 
         var snapshot = harness.Snapshot("prod");
         Assert.Equal("WinFsp is not installed", snapshot.MountUnavailableReason);
+        Assert.Equal(MountingUnavailableCause.WinFspMissing, snapshot.MountUnavailableCause);
     }
 
     [Fact]
@@ -60,6 +61,7 @@ public sealed class MountingAvailabilityTests
 
         Assert.Empty(harness.Rclone.MountCalls);
         Assert.Equal("rclone rcd is not answering", harness.Snapshot("prod").MountUnavailableReason);
+        Assert.Equal(MountingUnavailableCause.RcloneUnhealthy, harness.Snapshot("prod").MountUnavailableCause);
     }
 
     [Fact]
@@ -71,6 +73,7 @@ public sealed class MountingAvailabilityTests
         await harness.StartAsync();
 
         Assert.Null(harness.Snapshot("archive").MountUnavailableReason);
+        Assert.Null(harness.Snapshot("archive").MountUnavailableCause);
     }
 
     [Fact]

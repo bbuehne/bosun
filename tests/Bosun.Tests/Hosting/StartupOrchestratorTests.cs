@@ -1,8 +1,10 @@
 using Bosun.Configuration;
+using Bosun.Health;
 using Bosun.Hosting;
 using Bosun.Probe;
 using Bosun.Rclone;
 using Bosun.Rclone.Process;
+using Bosun.Status;
 using Bosun.Supervisor;
 using Bosun.Terminal;
 using Bosun.Tests.Configuration.Fakes;
@@ -423,6 +425,137 @@ public sealed class StartupOrchestratorTests
         Assert.Contains("nas", harness.Provisioner.EnsureRemoteCalls);
     }
 
+    // ------------------------------------------------------------------------------------------
+    // bs-yyg: the orchestrator feeds the application-health model
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Health_RcdFailsHealthCheck_ShowsTheRealCauseOnce_AndTheHostRowOnlyPointsAtTheBanner()
+    {
+        // The 2026-10-01 failure end to end: rcd faulted with a specific message, and the old UI put
+        // that message on every host row. Now the message is the banner's issue detail, and the row
+        // says only that it is waiting.
+        var hostToml = HostBlock("nas", MountMode.Persistent, drive: "P:");
+        await using var harness = new Harness(
+            initialConfigContent: ValidConfig(hostToml),
+            healthCheckTimeout: TimeSpan.FromMilliseconds(50),
+            healthCheckPollInterval: TimeSpan.FromSeconds(5),
+            withHealth: true);
+        harness.Launcher.EnqueueSuccess(new FakeRcloneProcessHandle());
+        harness.RcloneClient.EnqueueVersionFailure(new InvalidOperationException("rcd not answering"));
+
+        await harness.StartAsync();
+
+        var fault = harness.Orchestrator.Current.RcloneFaultMessage;
+        Assert.False(string.IsNullOrEmpty(fault));
+
+        var health = harness.Health.Current;
+        Assert.Equal(HealthLevel.Faulted, health.Level);
+        var issue = Assert.Single(health.Issues);
+        Assert.Equal(HealthIssueCodes.RcloneHealthCheckFailed, issue.Code);
+        Assert.Equal(fault, issue.Detail);
+
+        var snapshot = harness.MountSupervisor.GetSnapshot().Single(h => h.HostKey == "nas");
+        Assert.Equal(MountingUnavailableCause.RcloneUnhealthy, snapshot.MountUnavailableCause);
+        var host = harness.Services.GetRequiredService<IHostConfigStore>().Current.Hosts["nas"];
+        var row = StatusDerivation.DeriveRow(snapshot, host, sessionCount: 0);
+        Assert.DoesNotContain(fault!, row.StatusText, StringComparison.Ordinal);
+        Assert.Contains("see banner", row.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Health_HealthyStartup_IsOkAndNotStarting()
+    {
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]), withHealth: true);
+
+        await harness.StartAsync();
+
+        Assert.True(harness.Health.Current.IsOk);
+        Assert.False(harness.Health.Current.IsStarting);
+        Assert.Empty(harness.Health.Current.Issues);
+    }
+
+    [Fact]
+    public async Task Health_RcloneRecoveringAtRuntime_ClearsTheIssue()
+    {
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(
+            initialConfigContent: ValidConfig(hostBlocks: [host]),
+            restartDelay: TimeSpan.FromSeconds(5),
+            withHealth: true);
+        harness.Launcher.EnqueueLaunchFailure();
+
+        await harness.StartAsync();
+        Assert.Equal(HealthIssueCodes.RcloneLaunchFailed, Assert.Single(harness.Health.Current.Issues).Code);
+
+        harness.Launcher.EnqueueSuccess(new FakeRcloneProcessHandle());
+        await AdvanceUntilAsync(harness.RcloneTime, TimeSpan.FromSeconds(5), () => harness.Orchestrator.Current.RcloneHealthy);
+        await AdvanceUntilAsync(harness.HealthTime, TimeSpan.Zero, () => harness.Health.Current.IsOk);
+
+        Assert.Empty(harness.Health.Current.Issues);
+    }
+
+    [Fact]
+    public async Task Health_NoWinFsp_ReportsAStartupIssue()
+    {
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(
+            initialConfigContent: ValidConfig(hostBlocks: [host]), winFspReader: () => null, withHealth: true);
+
+        await harness.StartAsync();
+
+        var issue = Assert.Single(harness.Health.Current.Issues);
+        Assert.Equal(HealthIssueCodes.StartupWinFspMissing, issue.Code);
+        Assert.Equal(HealthLevel.Faulted, issue.Severity);
+    }
+
+    [Fact]
+    public async Task Health_InvalidConfig_ReportsOneIssueNotAlsoRcloneNotRunning()
+    {
+        await using var harness = new Harness(initialConfigContent: "this is not valid toml [[[", withHealth: true);
+
+        await harness.StartAsync();
+
+        // Well past the startup grace period: rclone was never started because the config never
+        // loaded, and "rclone is not running" would only repeat that under another name.
+        harness.HealthTime.Advance(TimeSpan.FromMinutes(5));
+
+        var issue = Assert.Single(harness.Health.Current.Issues);
+        Assert.Equal(HealthIssueCodes.StartupConfigInvalid, issue.Code);
+    }
+
+    [Fact]
+    public async Task Health_SupervisorLoopEndingWithoutShutdown_IsReportedAsFaulted()
+    {
+        // Completing the supervisor's command channel (DisposeAsync) ends RunAsync without the
+        // shutdown token being cancelled -- the "loop died, nobody noticed" shape of bs-x57.
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]), withHealth: true);
+        await harness.StartAsync();
+        Assert.True(harness.Health.Current.IsOk);
+
+        await harness.MountSupervisor.DisposeAsync();
+
+        // The loop task finishes on a pool thread; wait on the observable outcome.
+        await AdvanceUntilAsync(harness.HealthTime, TimeSpan.Zero, () => !harness.Health.Current.IsOk);
+        var issue = Assert.Single(harness.Health.Current.Issues);
+        Assert.Equal(HealthIssueCodes.SupervisorLoopStopped, issue.Code);
+        Assert.Equal(HealthLevel.Faulted, issue.Severity);
+    }
+
+    [Fact]
+    public async Task Health_OrdinaryShutdown_IsNotReportedAsALoopFault()
+    {
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]), withHealth: true);
+        await harness.StartAsync();
+
+        await harness.StopAsync();
+
+        Assert.DoesNotContain(harness.Health.Current.Issues, i => i.Code == HealthIssueCodes.SupervisorLoopStopped);
+    }
+
     private static async Task AdvanceUntilAsync(FakeTimeProvider time, TimeSpan step, Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
@@ -523,6 +656,10 @@ public sealed class StartupOrchestratorTests
         public FakeFragmentFileSystem FragmentFileSystem { get; }
         public FakeTimeProvider RcloneTime { get; } = new();
         public FakeTimeProvider SupervisorTime { get; } = new();
+        public FakeTimeProvider HealthTime { get; } = new();
+
+        /// <summary>The health model, when the harness was built <c>withHealth: true</c>.</summary>
+        public IAppHealth Health => Services.GetRequiredService<IAppHealth>();
         public List<string> Order { get; } = [];
         public ServiceProvider Services { get; }
         public StartupOrchestrator Orchestrator { get; }
@@ -538,7 +675,8 @@ public sealed class StartupOrchestratorTests
             TimeSpan? healthCheckPollInterval = null,
             TimeSpan? restartDelay = null,
             Exception? failFragmentWriteWith = null,
-            FakeFragmentFileSystem? fragmentFileSystem = null)
+            FakeFragmentFileSystem? fragmentFileSystem = null,
+            bool withHealth = false)
         {
             Root = Path.Combine(Path.GetTempPath(), "bosun-tests", "orchestrator", Guid.NewGuid().ToString("N"));
             ConfigPath = Path.Combine(Root, "hosts.toml");
@@ -617,6 +755,15 @@ public sealed class StartupOrchestratorTests
                 sp.GetRequiredService<IFragmentWriter>(),
                 sp.GetRequiredService<IHostConfigStore>(),
                 sp.GetRequiredService<ILogger<FragmentRewriteCoordinator>>()));
+
+            if (withHealth)
+            {
+                // bs-yyg: the same one-instance-behind-two-faces registration BosunHostFactory makes.
+                // Its own fake clock: the grace period is not what these tests are about.
+                services.AddSingleton(new AppHealthService(HealthTime));
+                services.AddSingleton<IAppHealth>(sp => sp.GetRequiredService<AppHealthService>());
+                services.AddSingleton<IAppHealthReporter>(sp => sp.GetRequiredService<AppHealthService>());
+            }
 
             Services = services.BuildServiceProvider();
 

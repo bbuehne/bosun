@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Threading;
 using Bosun.Configuration;
+using Bosun.Health;
 using Bosun.Hosting;
 using Bosun.Import;
 using Bosun.SessionMonitor;
@@ -171,7 +172,10 @@ public partial class App : Application
             supervisor, launcher, services.GetRequiredService<ILogger<HostActionDispatcher>>());
 
         _mainWindow = new MainWindow { Logger = services.GetRequiredService<ILogger<MainWindow>>() };
-        _mainWindow.Configure(statusReadModel, actionDispatcher);
+        // bs-yyg: the one health model the orchestrator pushes into; the window banner and the tray
+        // both read it, so they cannot disagree.
+        var appHealth = services.GetRequiredService<IAppHealth>();
+        _mainWindow.Configure(statusReadModel, actionDispatcher, appHealth);
 
         // bs-ww9.8 / ADR-019: host create/edit/delete. IHostConfigWriter is registered by the
         // config-writer delivery (bs-ww9.8's other half); resolved here, not constructed, so this
@@ -221,6 +225,7 @@ public partial class App : Application
 
         _trayIconController = new TrayIconController(
             statusReadModel,
+            appHealth,
             supervisor,
             actionDispatcher,
             _mainWindowController,

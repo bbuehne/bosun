@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
+using Bosun.Health;
 using Bosun.Supervisor;
 using Bosun.UI.Autostart;
 using H.NotifyIcon;
@@ -42,6 +43,7 @@ public sealed class TrayIconController : IDisposable
 
     private readonly TaskbarIcon _taskbarIcon;
     private readonly IStatusReadModel _statusReadModel;
+    private readonly IAppHealth _appHealth;
     private readonly IMountSupervisor _supervisor;
     private readonly HostActionDispatcher _actionDispatcher;
     private readonly MainWindowController _windowController;
@@ -49,13 +51,14 @@ public sealed class TrayIconController : IDisposable
     private readonly ILogger<TrayIconController>? _logger;
     private readonly DispatcherTimer _refreshTimer;
 
-    private AggregateHealth? _lastRenderedHealth;
+    private TrayStatus? _lastRenderedStatus;
     private DateTimeOffset _lastProcessedTransitionUtc = DateTimeOffset.MinValue;
     private bool _transitionBaselineEstablished;
     private bool _disposed;
 
     public TrayIconController(
         IStatusReadModel statusReadModel,
+        IAppHealth appHealth,
         IMountSupervisor supervisor,
         HostActionDispatcher actionDispatcher,
         MainWindowController windowController,
@@ -63,12 +66,14 @@ public sealed class TrayIconController : IDisposable
         ILogger<TrayIconController>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(statusReadModel);
+        ArgumentNullException.ThrowIfNull(appHealth);
         ArgumentNullException.ThrowIfNull(supervisor);
         ArgumentNullException.ThrowIfNull(actionDispatcher);
         ArgumentNullException.ThrowIfNull(windowController);
         ArgumentNullException.ThrowIfNull(autostart);
 
         _statusReadModel = statusReadModel;
+        _appHealth = appHealth;
         _supervisor = supervisor;
         _actionDispatcher = actionDispatcher;
         _windowController = windowController;
@@ -79,7 +84,7 @@ public sealed class TrayIconController : IDisposable
         _taskbarIcon.TrayLeftMouseUp += (_, _) => _windowController.ShowAndActivate();
 
         // Set the icon BEFORE creating the Win32 notification icon, so it is never briefly blank.
-        UpdateIcon(_statusReadModel.Current.Health);
+        UpdateIcon(TrayStatus.Compose(_statusReadModel.Current.Health, _appHealth.Current));
 
         // TaskbarIcon is a FrameworkElement: declared in XAML it creates the actual Win32
         // notification icon when it is loaded into a visual tree. Bosun constructs it in code and
@@ -115,12 +120,12 @@ public sealed class TrayIconController : IDisposable
     private void Refresh()
     {
         IReadOnlyList<HostStatusRow> rows;
-        AggregateHealth health;
+        TrayStatus status;
 
         try
         {
             rows = _statusReadModel.Current.Rows;
-            health = _statusReadModel.Current.Health;
+            status = TrayStatus.Compose(_statusReadModel.Current.Health, _appHealth.Current);
         }
         catch (Exception ex)
         {
@@ -131,18 +136,32 @@ public sealed class TrayIconController : IDisposable
             return;
         }
 
-        UpdateIcon(health);
+        UpdateIcon(status);
         UpdateContextMenu(rows);
         CheckForUnexpectedUnmounts(rows);
     }
 
-    private void UpdateIcon(AggregateHealth health)
+    private void UpdateIcon(TrayStatus status)
     {
-        if (_lastRenderedHealth == health)
+        // Record equality: icon level and tooltip text both. The tooltip can change (a different
+        // top issue) while the icon colour does not, and the icon is only rebuilt when it must be.
+        if (_lastRenderedStatus == status)
         {
             return;
         }
 
+        var iconChanged = _lastRenderedStatus?.IconHealth != status.IconHealth;
+        if (iconChanged)
+        {
+            ReplaceIcon(status.IconHealth);
+        }
+
+        _taskbarIcon.ToolTipText = status.Tooltip;
+        _lastRenderedStatus = status;
+    }
+
+    private void ReplaceIcon(AggregateHealth health)
+    {
         var appearance = TrayIconAppearanceSelector.Select(health);
 
         // Icon, not IconSource: the IconSource path resolves a URI and cannot accept an icon
@@ -154,9 +173,6 @@ public sealed class TrayIconController : IDisposable
 
         // The Icon property does not take ownership, so the one being replaced is ours to release.
         previous?.Dispose();
-
-        _taskbarIcon.ToolTipText = appearance.AccessibleName;
-        _lastRenderedHealth = health;
     }
 
     private void UpdateContextMenu(IReadOnlyList<HostStatusRow> rows)

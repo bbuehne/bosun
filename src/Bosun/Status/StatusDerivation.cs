@@ -87,9 +87,21 @@ public static class StatusDerivation
         // reachable, perfectly mountable host cannot enter Mounting while this gate is closed
         // (MountSupervisor.TryBeginMountAsync checks it before the deep probe). ADR-012 Decision 3's
         // own worked example is exactly this rung: "P: is not mounted -- WinFsp is not installed".
+        //
+        // bs-yyg: this is an APP-WIDE fault, identical for every host, so the row only points at the
+        // health banner, which names the specific cause once. Repeating rclone's full fault message
+        // here is what put the same (and, on 2026-10-01, wrong) sentence on every row.
         if (snapshot.MountUnavailableReason is { Length: > 0 } reason)
         {
-            return (StatusCategory.MountingUnavailable, $"{drive} is not mounted -- {reason}");
+            return (StatusCategory.MountingUnavailable, snapshot.MountUnavailableCause switch
+            {
+                MountingUnavailableCause.RcloneUnhealthy => "Waiting: rclone is not ready (see banner)",
+                MountingUnavailableCause.WinFspMissing => "Waiting: WinFsp is not installed (see banner)",
+
+                // No cause recorded (a snapshot built before the cause existed): keep the old text
+                // rather than dropping the reason.
+                _ => $"{drive} is not mounted -- {reason}",
+            });
         }
 
         // Rung 4: genuinely unreachable right now. Ahead of the mount-failure ladder (rung 5) on

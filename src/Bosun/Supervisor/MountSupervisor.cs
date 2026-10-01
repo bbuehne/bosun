@@ -368,6 +368,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 LastTransitionTrigger = h.LastTransitionTrigger,
                 UserParked = h.UserParked,
                 MountUnavailableReason = mountingAvailability.IsAvailable ? null : mountingAvailability.Reason,
+                MountUnavailableCause = mountingAvailability.IsAvailable ? null : mountingAvailability.Cause,
                 ConsecutiveMountFailures = h.ConsecutiveMountFailures,
                 LastMountFailureReason = h.LastMountFailureReason,
             })
