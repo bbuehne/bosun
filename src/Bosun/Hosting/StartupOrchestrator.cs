@@ -151,7 +151,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         {
             await RunSequenceAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             // See the class remarks: StartAsync must never throw. Whatever readiness had already
             // been published for earlier, successful steps is left standing.
@@ -208,7 +208,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             {
                 await mountSupervisor.StopAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "MountSupervisor.StopAsync failed during shutdown");
             }
@@ -226,7 +226,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             {
                 await rcloneProcessService.StopAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "RcloneProcessService.StopAsync failed during shutdown");
             }
@@ -430,7 +430,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             });
             return healthy;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Failed to start rclone rcd; mounting is disabled until this is fixed");
             PublishReadiness(Current with { RcloneHealthy = false, RcloneFaultMessage = ex.Message });
@@ -463,7 +463,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             await mountSupervisor.StartAsync(ct).ConfigureAwait(false);
             return true;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Failed to start the mount supervisor; no host will be probed or mounted this session");
             return false;
@@ -507,9 +507,12 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         {
             await supervisor.RunAsync(ct).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Normal shutdown path (StopAsync cancelled this token).
+            // Normal shutdown path (StopAsync cancelled this token). Filtered on the token, NOT
+            // the exception type (bs-x57): an unfiltered catch here read a TaskCanceledException
+            // from an rc timeout as "normal shutdown" and swallowed the loop's death without a
+            // single log line, for 2.5 days.
         }
         catch (Exception ex)
         {
@@ -527,7 +530,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             {
                 await remoteProvisioner!.EnsureRemoteAsync(host, ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError(
                     ex, "Failed to provision the rclone remote for host {HostKey}; that host cannot mount " +
@@ -591,7 +594,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
                 await mountSupervisor.OnRcloneRestartedAsync(ct).ConfigureAwait(false);
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Failed to reconcile after rclone rcd became healthy again");
         }
@@ -647,8 +650,11 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
 
             await mountSupervisor!.ConfigChangedAsync(config, CancellationToken.None).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
+            // No cancellation token exists on this fire-and-forget path (CancellationToken.None
+            // throughout), so any OperationCanceledException here is by definition not shutdown
+            // (bs-x57) and must be logged like any other failure, not escape an unobserved task.
             logger.LogError(ex, "Failed to apply a config change to the mount supervisor");
         }
     }
@@ -672,8 +678,10 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             {
                 await remoteProvisioner.EnsureRemoteAsync(host, CancellationToken.None).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex)
             {
+                // CancellationToken.None above: any OperationCanceledException is a timeout, not
+                // shutdown (bs-x57).
                 logger.LogError(
                     ex,
                     "Could not re-provision the rclone remote for {HostKey} after a config change; it may mount " +

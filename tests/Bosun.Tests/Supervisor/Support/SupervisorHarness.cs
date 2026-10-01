@@ -3,7 +3,6 @@ using Bosun.Supervisor;
 using Bosun.Tests.Configuration.Fakes;
 using Bosun.Tests.SessionMonitor.Fakes;
 using Bosun.Tests.Supervisor.Fakes;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Bosun.Tests.Supervisor.Support;
 
@@ -25,11 +24,14 @@ internal sealed class SupervisorHarness
 
     public MountSupervisor Supervisor { get; }
 
+    /// <summary>Records every log call the supervisor makes (bs-x57: tests assert on severity).</summary>
+    public CapturingLogger<MountSupervisor> Log { get; } = new();
+
     public SupervisorHarness(BosunConfig config, DateTimeOffset? start = null)
     {
         Time = new FakeTimeProvider(start);
         var configStore = new FakeHostConfigStore(config);
-        Supervisor = new MountSupervisor(configStore, Rclone, Probe, Time, NullLogger<MountSupervisor>.Instance);
+        Supervisor = new MountSupervisor(configStore, Rclone, Probe, Time, Log);
     }
 
     /// <summary>Enqueues <paramref name="operation"/>, drains the channel until the resulting work

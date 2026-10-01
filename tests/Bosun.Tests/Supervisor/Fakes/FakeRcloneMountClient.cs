@@ -19,6 +19,9 @@ internal sealed class FakeRcloneMountClient : IRcloneClient
     private readonly Dictionary<string, int> unmountCallCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> confirmUnmountAfterCall = new(StringComparer.OrdinalIgnoreCase);
     private Exception? listMountsThrowsOnce;
+    private Exception? listMountsThrows;
+    private Exception? unmountThrows;
+    private Exception? listThrows;
     private Exception? getVersionThrowsOnce;
 
     public List<RcloneMountRequest> MountCalls { get; } = [];
@@ -46,6 +49,29 @@ internal sealed class FakeRcloneMountClient : IRcloneClient
     public void ConfirmUnmountAfterCall(string mountPoint, int callNumber) => confirmUnmountAfterCall[mountPoint] = callNumber;
 
     public void MakeListMountsThrowOnce(Exception exception) => listMountsThrowsOnce = exception;
+
+    /// <summary>Every <see cref="UnmountAsync"/> call throws <paramref name="exception"/> (after
+    /// being recorded) until <see cref="StopThrowingFromUnmount"/>. The mount table is NOT touched
+    /// while throwing. bs-x57: pass a <see cref="TaskCanceledException"/> to model an rc/HTTP
+    /// timeout, which is an OperationCanceledException that is not the supervisor's shutdown.</summary>
+    public void MakeUnmountThrow(Exception exception) => unmountThrows = exception;
+
+    public void StopThrowingFromUnmount() => unmountThrows = null;
+
+    /// <summary>Every <see cref="ListMountsAsync"/> call throws until
+    /// <see cref="StopThrowingFromListMounts"/> (the persistent counterpart of
+    /// <see cref="MakeListMountsThrowOnce"/>).</summary>
+    public void MakeListMountsThrow(Exception exception) => listMountsThrows = exception;
+
+    public void StopThrowingFromListMounts() => listMountsThrows = null;
+
+    /// <summary>Every <see cref="ListAsync"/> call (the deep probe's rc call) throws until
+    /// <see cref="StopThrowingFromList"/>.</summary>
+    public void MakeListThrow(Exception exception) => listThrows = exception;
+
+    public void StopThrowingFromList() => listThrows = null;
+
+    public int ListCallCount { get; private set; }
 
     /// <summary>The next <see cref="GetVersionAsync"/> call throws <paramref name="exception"/> --
     /// an <c>rclone rcd</c> that has not answered <c>core/version</c> yet (bs-brv/ADR-017's rcd-health
@@ -99,6 +125,11 @@ internal sealed class FakeRcloneMountClient : IRcloneClient
         var count = unmountCallCounts.TryGetValue(mountPoint, out var existing) ? existing + 1 : 1;
         unmountCallCounts[mountPoint] = count;
 
+        if (unmountThrows is not null)
+        {
+            return Task.FromException(unmountThrows);
+        }
+
         var confirmAt = confirmUnmountAfterCall.TryGetValue(mountPoint, out var n) ? n : 1;
         if (count >= confirmAt)
         {
@@ -112,6 +143,11 @@ internal sealed class FakeRcloneMountClient : IRcloneClient
     {
         ListMountsCallCount++;
 
+        if (listMountsThrows is not null)
+        {
+            return Task.FromException<IReadOnlyList<RcloneMountInfo>>(listMountsThrows);
+        }
+
         if (listMountsThrowsOnce is not null)
         {
             var exception = listMountsThrowsOnce;
@@ -122,6 +158,12 @@ internal sealed class FakeRcloneMountClient : IRcloneClient
         return Task.FromResult<IReadOnlyList<RcloneMountInfo>>(mounts.ToList());
     }
 
-    public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<RcloneListItem>>([]);
+    public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken)
+    {
+        ListCallCount++;
+
+        return listThrows is not null
+            ? Task.FromException<IReadOnlyList<RcloneListItem>>(listThrows)
+            : Task.FromResult<IReadOnlyList<RcloneListItem>>([]);
+    }
 }

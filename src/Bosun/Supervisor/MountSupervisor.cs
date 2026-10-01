@@ -39,8 +39,8 @@ namespace Bosun.Supervisor;
 /// per-host serialisation as a special case and is a great deal simpler to reason about and test.
 /// Every external command (<see cref="RequestMountAsync"/> etc.) and every internally-scheduled
 /// timer callback goes through this same channel -- nothing mutates a <c>HostRuntime</c> from
-/// outside it. Tests never run <see cref="RunAsync"/> (it would hang the test thread waiting for
-/// more work); instead they call the internal <see cref="DrainAsync"/>, which processes whatever
+/// outside it. Almost all tests do not run <see cref="RunAsync"/> (it waits forever for more
+/// work); instead they call the internal <see cref="DrainAsync"/>, which processes whatever
 /// is currently queued and returns -- deterministic, no sleeps, no real thread hand-off, matching
 /// the <see cref="FakeTimeProvider"/>-driven synchronous-continuation style already used by
 /// <c>HostProbe</c>/<c>RcloneProcessService</c> tests.
@@ -626,47 +626,154 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
     /// <summary>
     /// The production loop: reads and fully awaits one continuation at a time, forever, until
-    /// <paramref name="cancellationToken"/> fires. Not exercised by any test in this delivery
-    /// (there is no hosted-service integration test -- CLAUDE.md forbids running the app from a
-    /// worktree); the state-machine LOGIC every continuation runs is fully covered via
-    /// <see cref="DrainAsync"/> instead. See the delivery report.
+    /// <paramref name="cancellationToken"/> fires. Only <paramref name="cancellationToken"/>
+    /// being cancelled ends it cleanly (by throwing <see cref="OperationCanceledException"/>, as
+    /// before); nothing a single action does -- including an <see cref="OperationCanceledException"/>
+    /// that is NOT shutdown, such as an HTTP timeout -- can end it (see
+    /// <see cref="ProcessActionAsync"/>). If it ever exits without shutdown having been requested
+    /// that is logged at Critical, because from that moment every timer enqueues into a channel
+    /// nobody reads (bs-x57).
     /// </summary>
+    /// <remarks>
+    /// Not exercised through the production hosting path by any test (CLAUDE.md forbids running the
+    /// app from a worktree), but driven directly, with fakes, by <c>SupervisorLoopSurvivalTests</c>.
+    /// The state-machine LOGIC every continuation runs is otherwise covered via
+    /// <see cref="DrainAsync"/>.
+    /// </remarks>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        while (await channel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+        SetLoopRunning(true);
+        try
         {
-            while (channel.Reader.TryRead(out var action))
+            while (await channel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                await action(cancellationToken).ConfigureAwait(false);
+                while (channel.Reader.TryRead(out var action))
+                {
+                    await ProcessActionAsync(action, cancellationToken).ConfigureAwait(false);
+                }
             }
+
+            // WaitToReadAsync only returns false once the channel's writer has completed
+            // (DisposeAsync). Reaching here with the token un-cancelled means supervision stopped
+            // for a reason other than shutdown.
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogCritical(
+                    "The mount supervisor loop exited without shutdown being requested (its command " +
+                    "channel was completed); mounts are no longer managed until Bosun restarts");
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            logger.LogInformation("The mount supervisor loop is stopping: shutdown requested");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // ProcessActionAsync swallows per-action failures, so reaching here means the loop
+            // machinery itself failed. Log here, at the source, rather than trusting whichever
+            // caller observes the returned Task to do it (bs-x57: the caller's own handler
+            // swallowed this silently for 2.5 days).
+            logger.LogCritical(
+                ex, "The mount supervisor loop faulted without shutdown being requested; mounts are no " +
+                "longer managed until Bosun restarts");
+            throw;
+        }
+        finally
+        {
+            SetLoopRunning(false);
         }
     }
 
     /// <summary>Test-only synchronous pump: processes whatever is currently queued (including any
     /// follow-up work a processed item itself enqueues) and returns once the channel is empty.
-    /// Never used in production -- see <see cref="RunAsync"/>.</summary>
+    /// Never used in production -- see <see cref="RunAsync"/>. Goes through the same
+    /// <see cref="ProcessActionAsync"/> as the production loop so a test cannot pass on behaviour
+    /// the real loop does not have.</summary>
     internal async Task DrainAsync(CancellationToken cancellationToken = default)
     {
         while (channel.Reader.TryRead(out var action))
         {
-            await action(cancellationToken).ConfigureAwait(false);
+            await ProcessActionAsync(action, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private void Enqueue(Func<CancellationToken, Task> action)
+    /// <summary>
+    /// Runs ONE channel continuation such that nothing but genuine shutdown can escape it
+    /// (bs-x57). The loop is the channel's single consumer: if an action's exception propagated
+    /// out, the loop would end, every later timer would enqueue into a channel nobody reads, and
+    /// every <see cref="EnqueueAndWait"/> caller would wait forever -- with no log line, because
+    /// nothing is left running to write one.
+    /// </summary>
+    /// <remarks>
+    /// "Genuine shutdown" is decided by <paramref name="ct"/> -- the supervisor's OWN token --
+    /// never by the exception's type. An <see cref="OperationCanceledException"/> raised while
+    /// <paramref name="ct"/> is NOT cancelled (an HTTP timeout surfaces as
+    /// <see cref="TaskCanceledException"/>) is an ordinary failure and is logged and survived like
+    /// any other.
+    /// </remarks>
+    private async Task ProcessActionAsync(Func<CancellationToken, Task> action, CancellationToken ct)
     {
-        channel.Writer.TryWrite(async ct =>
+        TouchLoopActivity();
+        try
         {
-            try
-            {
-                await action(ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogError(ex, "Unhandled exception processing a supervisor action");
-            }
-        });
+            await action(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unhandled exception processing a supervisor action; the loop continues");
+        }
+        finally
+        {
+            TouchLoopActivity();
+        }
     }
+
+    // ------------------------------------------------------------------------------------------
+    // Loop liveness (bs-x57): read-only signals for a future watchdog. Deliberately just data --
+    // nothing in this class acts on them.
+    // ------------------------------------------------------------------------------------------
+
+    private long lastLoopActivityTicks;
+    private int loopRunning;
+
+    /// <summary>True from the moment <see cref="RunAsync"/> starts until it exits for any reason
+    /// (shutdown, fault, or channel completion). False before it has started. Safe to read from
+    /// any thread.</summary>
+    public bool IsLoopRunning => Volatile.Read(ref loopRunning) == 1;
+
+    /// <summary>
+    /// The injected clock's time when the loop last started, began an action, or finished an
+    /// action (or exited). <see cref="DateTimeOffset.MinValue"/> until <see cref="RunAsync"/> has
+    /// started. Safe to read from any thread.
+    /// </summary>
+    /// <remarks>
+    /// A stale value only means "wedged" when interpreted against the work the loop is expected to
+    /// have: while the supervisor is started, the reconciliation timer enqueues an action every
+    /// <see cref="ReconciliationInterval"/>, so a healthy started loop touches this at least that
+    /// often, plus the duration of the slowest single action (bounded by the per-call rc timeouts
+    /// in <see cref="RcloneClient"/>). An idle, never-started supervisor legitimately goes stale.
+    /// </remarks>
+    public DateTimeOffset LastLoopActivityUtc =>
+        new(Volatile.Read(ref lastLoopActivityTicks), TimeSpan.Zero);
+
+    private void TouchLoopActivity() =>
+        Volatile.Write(ref lastLoopActivityTicks, timeProvider.GetUtcNow().UtcTicks);
+
+    private void SetLoopRunning(bool isRunning)
+    {
+        TouchLoopActivity();
+        Volatile.Write(ref loopRunning, isRunning ? 1 : 0);
+    }
+
+    /// <summary>Posts a fire-and-forget continuation (timer callbacks). <c>internal</c> only so
+    /// loop-survival tests can inject an action that throws; production code reaches it solely
+    /// through this class's own timers.</summary>
+    internal void Enqueue(Func<CancellationToken, Task> action) => channel.Writer.TryWrite(action);
 
     private Task EnqueueAndWait(Func<CancellationToken, Task> action, CancellationToken cancellationToken)
     {
@@ -781,7 +888,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
         SetState(host, MountState.Probing, trigger);
 
-        var result = await probe.ProbeShallowAsync(
+        var result = await ProbeShallowSafelyAsync(
             host.Config.Hostname, host.Config.Port, ProbeTimeout(), ct).ConfigureAwait(false);
 
         if (result.Outcome == ShallowProbeOutcome.Success)
@@ -839,7 +946,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             return;
         }
 
-        var result = await probe.ProbeShallowAsync(
+        var result = await ProbeShallowSafelyAsync(
             host.Config.Hostname, host.Config.Port, ProbeTimeout(), ct).ConfigureAwait(false);
 
         if (result.Outcome == ShallowProbeOutcome.Success)
@@ -951,7 +1058,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         host.ProbeTimer?.Dispose();
         host.ProbeTimer = null;
 
-        var deep = await probe.ProbeDeepAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
+        var deep = await ProbeDeepSafelyAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
         if (deep.Outcome != DeepProbeOutcome.Success)
         {
             logger.LogWarning(
@@ -984,8 +1091,12 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 new RcloneMountRequest { Fs = fs, MountPoint = drive, VfsCacheMode = host.Config.Mount.VfsCacheMode },
                 ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // bs-x57: every rc catch in this class filters on the supervisor's OWN token, never on
+            // the exception type. `ex is not OperationCanceledException` read an rc/HTTP timeout
+            // (a TaskCanceledException) as shutdown, let it escape, and ended the channel loop.
+            // Only cancellation of `ct` is shutdown; anything else is an ordinary rc failure.
             logger.LogError(ex, "mount/mount failed for {HostKey} at {Drive}", host.Key, drive);
             host.MountRetryBackoff = host.MountRetryBackoff.RecordFailure();
             var mountFailureReason = $"mount/mount failed: {ex.Message}";
@@ -1017,7 +1128,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             return;
         }
 
-        var result = await probe.ProbeShallowAsync(
+        var result = await ProbeShallowSafelyAsync(
             host.Config.Hostname, host.Config.Port, ProbeTimeout(), ct).ConfigureAwait(false);
 
         if (result.Outcome == ShallowProbeOutcome.Success)
@@ -1108,7 +1219,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             return;
         }
 
-        var result = await probe.ProbeDeepAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
+        var result = await ProbeDeepSafelyAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
 
         if (result.Outcome == DeepProbeOutcome.Success)
         {
@@ -1277,7 +1388,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         {
             await rcloneClient.UnmountAsync(mountPoint, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(
                 ex, "mount/unmount call failed for {HostKey} at {MountPoint}; will re-verify against listmounts",
@@ -1308,7 +1419,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             {
                 await rcloneClient.UnmountAsync(mountPoint, ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Forced unmount re-attempt failed for {HostKey} at {MountPoint}", host.Key, mountPoint);
             }
@@ -1354,7 +1465,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         {
             mounts = await rcloneClient.ListMountsAsync(ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // Per docs/ARCHITECTURE.md §4 rule 4: never assume a drive is gone. If we cannot even
             // ask, assume the worst (still mounted) so the caller keeps retrying rather than
@@ -1499,7 +1610,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         {
             mounts = await rcloneClient.ListMountsAsync(ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "mount/listmounts failed during startup crash recovery; assuming no existing mounts");
             return;
@@ -1567,7 +1678,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 {
                     await rcloneClient.UnmountAsync(mount.MountPoint, ct).ConfigureAwait(false);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     logger.LogError(ex, "Failed to clear orphaned mount at {MountPoint} during startup", mount.MountPoint);
                 }
@@ -1599,7 +1710,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         {
             mounts = await rcloneClient.ListMountsAsync(ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Reconciliation: mount/listmounts failed; skipping this tick");
             return;
@@ -1634,7 +1745,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 {
                     await rcloneClient.UnmountAsync(drive, ct).ConfigureAwait(false);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     logger.LogError(ex, "Reconciliation: failed to clear orphaned mount for {HostKey}", host.Key);
                 }
@@ -1680,7 +1791,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         {
             await rcloneClient.GetVersionAsync(ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(
                 ex,
@@ -1723,7 +1834,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     /// </summary>
     private async Task ForceDeepProbeAfterTransitionAsync(HostRuntime host, string trigger, CancellationToken ct)
     {
-        var result = await probe.ProbeDeepAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
+        var result = await ProbeDeepSafelyAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
 
         if (result.Outcome == DeepProbeOutcome.Success)
         {
@@ -2086,6 +2197,54 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     // ------------------------------------------------------------------------------------------
 
     private TimeSpan ProbeTimeout() => TimeSpan.FromSeconds(global.ProbeTimeoutSeconds);
+
+    /// <summary>
+    /// <see cref="IProbe.ProbeShallowAsync"/> promises never to throw (<c>HostProbe</c> maps every
+    /// failure to an outcome), but the supervisor must not depend on that: an exception here would
+    /// skip the code after it that either re-arms the host's probe timer or moves it out of a
+    /// transitional state, stranding the host with nothing left to probe it (bs-x57). A throw that
+    /// is not shutdown is therefore folded into a failed probe result, which every caller already
+    /// handles. A throw while <paramref name="ct"/> is cancelled is shutdown and propagates.
+    /// </summary>
+    private async Task<ShallowProbeResult> ProbeShallowSafelyAsync(
+        string hostname, int port, TimeSpan timeout, CancellationToken ct)
+    {
+        try
+        {
+            return await probe.ProbeShallowAsync(hostname, port, timeout, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Shallow probe of {Hostname}:{Port} threw instead of returning a result; treating as failed", hostname, port);
+            return new ShallowProbeResult
+            {
+                Outcome = ShallowProbeOutcome.OtherFailure,
+                Elapsed = TimeSpan.Zero,
+                Detail = ex.Message,
+            };
+        }
+    }
+
+    /// <summary>Deep-probe counterpart of <see cref="ProbeShallowSafelyAsync"/>. Matters most in
+    /// <see cref="TryBeginMountAsync"/>, where the host is already in <c>Mounting</c> when the
+    /// probe runs: a throw there would leave it in <c>Mounting</c> forever instead of draining.</summary>
+    private async Task<DeepProbeResult> ProbeDeepSafelyAsync(string hostKey, TimeSpan timeout, CancellationToken ct)
+    {
+        try
+        {
+            return await probe.ProbeDeepAsync(hostKey, timeout, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Deep probe of {HostKey} threw instead of returning a result; treating as failed", hostKey);
+            return new DeepProbeResult
+            {
+                Outcome = DeepProbeOutcome.Failed,
+                Elapsed = TimeSpan.Zero,
+                Detail = ex.Message,
+            };
+        }
+    }
 
     private ITimer CreateOneShotTimer(TimeSpan due, Action callback) =>
         timeProvider.CreateTimer(_ => callback(), null, due, Timeout.InfiniteTimeSpan);
