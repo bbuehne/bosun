@@ -1301,3 +1301,100 @@ problem by refusing to solve it. Rejected as busywork.
 *Parse the Bitvise profile format completely.* Attractive, and it would recover
 port forwarding and SFTP settings too. Rejected for now: undocumented, version
 tagged, and the marginal fields are ones Bosun has no model for anyway.
+
+
+---
+
+## ADR-020 — Bosun detects and repairs its own failures
+
+**Status:** Accepted (2026-10-01).
+
+**Context.** On 2026-09-28 a drain's `mount/unmount` call timed out. `HttpClient`
+reports a timeout as `TaskCanceledException`, which every rc catch site treated as
+shutdown. The exception killed the supervisor's single channel loop, and the
+orchestrator swallowed the loop's death as "normal shutdown". For 2.5 days no host
+was probed, drained, or remounted, and nothing said so. On 2026-10-01 the frozen
+instance was killed by Windows (AppHang). Its `rclone rcd` child survived, still
+holding the rc port with the dead instance's credential. Every later launch got
+HTTP 401 on `core/version` and showed the misleading "did not respond within 15s"
+on every host (bs-x57, bs-772, bs-o5x).
+
+The individual bugs are fixed in their own issues. This ADR covers the
+maintainer's requirement that comes out of them: **failures of this class must be
+caught and repaired by Bosun itself, or be fixable by the user in one click with
+an accurate explanation. Fixing them must not need a coding agent.**
+
+**Decision.**
+
+1. **The rcd child is bound to Bosun's lifetime by the OS.** It runs inside a
+   Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. However Bosun dies
+   (crash, AppHang kill, Task Manager), rclone dies with it.
+2. **A stale rcd is killed automatically.** At startup, if the rc port is held by
+   an `rclone.exe` whose command line is exactly Bosun's own
+   (`rcd --rc-addr 127.0.0.1:<rclone_rc_port>` and Bosun's `--config` path) and
+   which runs as the current user, Bosun kills it, logs that it did, and
+   continues. Any drives it held go away with it. That is consistent with I2,
+   and startup crash recovery plus a fresh probe (I1) remount them. Bosun never
+   kills a port holder that does not match exactly. It reports that holder by
+   PID and image path instead.
+3. **A watchdog checks the supervisor loop.** It runs independently of the loop it
+   watches. It compares the loop's liveness signal against a threshold that is
+   comfortably above the longest single bounded rc action (the 60 s
+   `mount/mount` timeout) and above the reconciliation cadence. When the loop has
+   died or stalled, the watchdog logs at Error and recovers by **restarting the
+   Bosun process**. The restart is rate-limited: at most 3 automatic restarts in
+   any 1 hour. Past that limit it stops trying and leaves the health banner up,
+   so a persistent fault cannot become a restart loop.
+4. **Health is a first-class, visible state.** Bosun keeps one application-health
+   model: rclone process status with its *real* cause, supervisor loop liveness,
+   and the watchdog's last action. When health is not OK, the window shows a
+   banner naming the specific cause, and the tray icon or tooltip reflects it.
+   Per-host rows are not used to carry an application-wide fault.
+5. **Repair actions, one click each:** *Restart rclone* (restart rcd, then
+   reconcile every host from scratch, per the E3 brief), *Unmount all &
+   re-probe*, and *Restart Bosun*.
+6. **Diagnostics bundle.** *Copy diagnostics* writes one zip, under
+   `%LOCALAPPDATA%\Bosun\diagnostics\`, and reveals it in Explorer. The zip
+   contains recent logs, the health model, every host's state and last
+   transition reason, the rclone processes and the rc port's owner, mapped drive
+   letters, and the version and build. Secrets are excluded: no rc credential,
+   and no key contents.
+7. **Application shutdown is bounded.** Exit completes within a fixed bound even
+   when the supervisor is wedged. If the loop has died, pending
+   `EnqueueAndWait` callers are failed rather than left waiting forever.
+
+**Reasoning.**
+
+*Why the process restart is the recovery and an in-process loop restart is not.*
+A stalled loop may still be awaiting inside an action that holds per-host state.
+Starting a second loop over the same state would break the one-consumer
+guarantee the state machine relies on. A process restart is the "reconcile from
+scratch" the E3 brief already requires after any rcd restart: the Job Object
+ends the old rcd, the startup crash-recovery path adopts or clears leftover
+mounts, and every host is probed before it is mounted (I1). It is the one
+recovery whose correctness the existing design already proves.
+
+*Why auto-kill a stale rcd and not ask.* The 2026-10-01 failure left every host
+broken until a human found a PID. The exact-command-line, same-user match
+identifies a process only Bosun would have launched. Leaving it alive helps no
+one, because Bosun cannot authenticate to it.
+
+**Consequences.**
+
+- `RcloneProcessService` gains a Job Object and a port-holder check. The
+  health-check fault message names the real cause (401 from another process,
+  port held, child exited with code N) (bs-o5x).
+- `MountSupervisor` exposes `IsLoopRunning` / `LastLoopActivityUtc` (bs-x57). The
+  watchdog depends on these, not on log scraping.
+- The single-instance mechanism must allow a self-restart handoff: the new
+  instance waits for the old one to exit.
+
+**Rejected alternatives.**
+
+*Restart only the loop in-process.* Rejected for the reason above.
+
+*Notify only, never auto-recover.* Rejected. The incident ran 2.5 days because
+nothing acted, and the maintainer asked for the opposite.
+
+*Unlimited automatic restarts.* Rejected. A deterministic startup fault would
+turn into a restart storm that hides the banner.
