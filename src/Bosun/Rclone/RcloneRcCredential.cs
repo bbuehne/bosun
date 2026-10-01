@@ -54,6 +54,11 @@ namespace Bosun.Rclone;
 /// </remarks>
 public sealed class RcloneRcCredential
 {
+    /// <summary>The fixed user name <see cref="CreateRandom"/> uses. Non-secret: only the password
+    /// carries entropy. The diagnostics redactor (bs-ds3) treats this exact name specially, because
+    /// it is also the product's name and cannot be scrubbed from every line without wrecking them.</summary>
+    public const string DefaultUserName = "bosun";
+
     /// <summary>Fixed, non-secret identifier -- only <see cref="Password"/> carries entropy.</summary>
     public string UserName { get; }
 
@@ -74,7 +79,7 @@ public sealed class RcloneRcCredential
     /// cryptographically unguessable, not merely varied.
     /// </summary>
     public static RcloneRcCredential CreateRandom() =>
-        new("bosun", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
+        new(DefaultUserName, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
 
     /// <summary>
     /// The value that goes after <c>Authorization: Basic </c> -- base64 of <c>user:pass</c>, per

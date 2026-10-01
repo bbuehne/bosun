@@ -169,7 +169,10 @@ public partial class App : Application
         IStatusReadModel statusReadModel = readModel;
         var launcher = new Win32ExternalLauncher(services.GetRequiredService<ILogger<Win32ExternalLauncher>>());
         var actionDispatcher = new HostActionDispatcher(
-            supervisor, launcher, services.GetRequiredService<ILogger<HostActionDispatcher>>());
+            supervisor,
+            launcher,
+            services.GetRequiredService<ILogger<HostActionDispatcher>>(),
+            services.GetRequiredService<Bosun.Diagnostics.CopyDiagnosticsCommand>());
 
         _mainWindow = new MainWindow { Logger = services.GetRequiredService<ILogger<MainWindow>>() };
         // bs-yyg: the one health model the orchestrator pushes into; the window banner and the tray

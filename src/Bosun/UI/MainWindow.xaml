@@ -56,7 +56,10 @@
                  form that opens next; it never writes a host by itself. -->
             <StackPanel Grid.Column="1" Orientation="Horizontal">
                 <Button x:Name="ImportBitviseButton" Content="Import from Bitvise..." Margin="0,0,8,0" Click="OnImportBitviseClick" />
-                <Button x:Name="AddHostButton" Content="Add Host..." Click="OnAddHostClick" />
+                <Button x:Name="AddHostButton" Content="Add Host..." Margin="0,0,8,0" Click="OnAddHostClick" />
+                <!-- bs-ds3 / ADR-020 Decision 6: one click captures the evidence for a failure. Lives
+                     in the header, not the health banner: the banner's action area is bs-aoz's. -->
+                <Button x:Name="CopyDiagnosticsButton" Content="Copy diagnostics" Click="OnCopyDiagnosticsClick" />
             </StackPanel>
         </Grid>
 

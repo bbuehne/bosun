@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net.Http;
 using Bosun.Configuration;
+using Bosun.Diagnostics;
 using Bosun.Health;
 using Bosun.Probe;
 using Bosun.Rclone;
@@ -248,6 +249,42 @@ public static class BosunHostFactory
             TimeProvider.System, logger: sp.GetRequiredService<ILogger<AppHealthService>>()));
         builder.Services.AddSingleton<IAppHealth>(sp => sp.GetRequiredService<AppHealthService>());
         builder.Services.AddSingleton<IAppHealthReporter>(sp => sp.GetRequiredService<AppHealthService>());
+
+        // bs-ds3 / ADR-020 Decision 6: "Copy diagnostics". Every constructor here is inert (no
+        // process enumeration, CIM query, Event Log read, or file touched until a bundle is
+        // actually built), so building a host stays safe from a worktree. The bundle is read-only:
+        // its one rc call is core/version, and it never mounts or unmounts anything.
+        builder.Services.AddSingleton<IPortOwnerResolver>(sp =>
+            new TcpPortOwnerResolver(sp.GetRequiredService<ITcpConnectionReader>()));
+        builder.Services.AddSingleton<IProcessInspector, CimProcessInspector>();
+        builder.Services.AddSingleton<IProcessLister, SystemProcessLister>();
+        builder.Services.AddSingleton<IDriveLister, SystemDriveLister>();
+        builder.Services.AddSingleton<IWindowsEventSource, ApplicationEventLogSource>();
+        builder.Services.AddSingleton<IEnvironmentInfoSource, AssemblyEnvironmentInfoSource>();
+        builder.Services.AddSingleton<IExplorerRevealer, ExplorerRevealer>();
+        builder.Services.AddSingleton<IDiagnosticsErrorPresenter, MessageBoxDiagnosticsErrorPresenter>();
+        builder.Services.AddSingleton<IDiagnosticsBundleBuilder>(sp => new DiagnosticsBundleBuilder(
+            DiagnosticsBundleOptions.ForLogDirectory(
+                options.LogDirectory,
+                options.ConfigPath,
+                () => sp.GetRequiredService<IHostConfigStore>().Current.Global.RcloneRcPort),
+            sp.GetRequiredService<IAppHealth>(),
+            sp.GetRequiredService<IMountSupervisor>(),
+            sp.GetRequiredService<IRcloneClient>(),
+            sp.GetRequiredService<IPortOwnerResolver>(),
+            sp.GetRequiredService<IProcessInspector>(),
+            sp.GetRequiredService<IProcessLister>(),
+            sp.GetRequiredService<IDriveLister>(),
+            sp.GetRequiredService<IWindowsEventSource>(),
+            sp.GetRequiredService<IEnvironmentInfoSource>(),
+            sp.GetRequiredService<RcloneRcCredential>(),
+            TimeProvider.System,
+            sp.GetRequiredService<ILogger<DiagnosticsBundleBuilder>>()));
+        builder.Services.AddSingleton(sp => new CopyDiagnosticsCommand(
+            sp.GetRequiredService<IDiagnosticsBundleBuilder>(),
+            sp.GetRequiredService<IExplorerRevealer>(),
+            sp.GetRequiredService<IDiagnosticsErrorPresenter>(),
+            sp.GetRequiredService<ILogger<CopyDiagnosticsCommand>>()));
 
         // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
         // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without
