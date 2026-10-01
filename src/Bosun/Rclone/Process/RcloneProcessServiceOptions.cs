@@ -36,4 +36,11 @@ public sealed record RcloneProcessServiceOptions
     /// <summary>How long <see cref="RcloneProcessService.StopAsync"/> waits for the killed
     /// process to confirm exit before giving up and returning anyway.</summary>
     public TimeSpan StopTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>How long <see cref="RcPortGuard"/> waits for a killed stale rcd to actually exit
+    /// before giving up and reporting the port as still held (ADR-020 §2).</summary>
+    public TimeSpan StaleKillTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Interval between "has the killed stale rcd exited yet?" checks.</summary>
+    public TimeSpan StaleKillPollInterval { get; init; } = TimeSpan.FromMilliseconds(100);
 }

@@ -49,9 +49,25 @@ public enum RcloneProcessFaultKind
     /// <summary>The executable exists but the process could not be started. Retried automatically.</summary>
     LaunchFailed,
 
-    /// <summary>The process started but never answered <c>core/version</c> within
-    /// <see cref="RcloneProcessServiceOptions.HealthCheckTimeout"/>. Retried automatically.</summary>
+    /// <summary>The process started but never answered <c>core/version</c> successfully within
+    /// <see cref="RcloneProcessServiceOptions.HealthCheckTimeout"/> (no response, timeout, or an
+    /// HTTP error other than 401). The fault message carries the real cause. Retried automatically.</summary>
     HealthCheckFailed,
+
+    /// <summary>Something on the rc port answered <c>core/version</c> with HTTP 401: it is not
+    /// our child, or our child's credential is not the one it holds -- typically an orphaned rcd
+    /// from a dead Bosun (bs-o5x). Retried automatically.</summary>
+    HealthCheckUnauthorized,
+
+    /// <summary>Our child exited before <c>core/version</c> ever succeeded, usually because it
+    /// could not bind the rc port. The message carries the exit code. Distinct from
+    /// <see cref="ProcessExitedUnexpectedly"/>, which is an exit AFTER being healthy. Retried automatically.</summary>
+    ProcessExitedBeforeHealthy,
+
+    /// <summary>The rc port is held by a process that is not a stale rcd of Bosun's own, so Bosun
+    /// declined to kill it (ADR-020 §2). The message names the PID and image path. Retried on
+    /// the normal restart delay, because the holder may go away.</summary>
+    PortHeldByOtherProcess,
 
     /// <summary>The process was <see cref="RcloneProcessStatus.Healthy"/> and then exited on its
     /// own (not because <see cref="RcloneProcessService"/> killed it). Retried automatically --

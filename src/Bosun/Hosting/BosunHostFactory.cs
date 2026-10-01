@@ -193,6 +193,10 @@ public static class BosunHostFactory
         // expanded at the point of use in this factory lambda, the same way
         // ConfigValidator.ExpandHome expands identity_file's leading `~` at its point of use
         // rather than at bind time.
+        // ADR-020 §1 (bs-772): one Job Object for the whole Bosun process, registered as an
+        // INSTANCE so the container never disposes it -- closing the handle is what kills rcd, and
+        // that must only ever happen when Bosun exits.
+        builder.Services.AddSingleton<IProcessJob>(new Bosun.Rclone.Process.Interop.Win32ProcessJob());
         builder.Services.AddSingleton<IRcloneProcessLauncher, Win32RcloneProcessLauncher>();
         builder.Services.AddSingleton(sp =>
         {
@@ -209,7 +213,9 @@ public static class BosunHostFactory
                 rcloneProcessOptions,
                 TimeProvider.System,
                 sp.GetRequiredService<ILogger<RcloneProcessService>>(),
-                sp.GetRequiredService<RcloneRcCredential>());
+                sp.GetRequiredService<RcloneRcCredential>(),
+                RcPortGuardFactory.CreateForCurrentUser(
+                    rcloneProcessOptions, TimeProvider.System, sp.GetRequiredService<ILoggerFactory>()));
         });
 
         // MountSupervisor (bs-psq; docs/ARCHITECTURE.md §4) -- registered as both its concrete

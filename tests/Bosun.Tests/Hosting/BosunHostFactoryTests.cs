@@ -48,6 +48,29 @@ public sealed class BosunHostFactoryTests : IDisposable
     }
 
     [Fact]
+    public void CreateHost_WiresTheJobObjectIntoTheRcloneLauncher()
+    {
+        // ADR-020 section 1 (bs-772). Win32RcloneProcessLauncher has a parameterless constructor
+        // (no job) and an injected one; if DI ever picked the wrong one the Job Object would be
+        // silently absent and rcd would again outlive a killed Bosun. Resolving only constructs
+        // the launcher; nothing is started and no job is created until a process is assigned.
+        using var host = BosunHostFactory.CreateHost(new BosunHostOptions
+        {
+            LogDirectory = _logDirectory,
+            ConfigPath = Path.Combine(_logDirectory, "hosts.toml"),
+        });
+
+        var job = host.Services.GetRequiredService<Bosun.Rclone.Process.IProcessJob>();
+        var launcher = host.Services.GetRequiredService<Bosun.Rclone.Process.IRcloneProcessLauncher>();
+
+        Assert.IsType<Bosun.Rclone.Process.Interop.Win32ProcessJob>(job);
+        var wiredJob = typeof(Bosun.Rclone.Process.Win32RcloneProcessLauncher)
+            .GetField("_job", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(launcher);
+        Assert.Same(job, wiredJob);
+    }
+
+    [Fact]
     public async Task Host_StartsAndStopsCleanlyWithoutAWindow()
     {
         // registerStartupOrchestrator: false -- per ADR-012's "fix the test, not the

@@ -41,6 +41,10 @@ internal sealed class FakeRcloneClient : IRcloneClient
 
     public void EnqueueVersionFailure(Exception exception) => _versionScript.Enqueue(() => Task.FromException<RcloneVersionInfo>(exception));
 
+    /// <summary>Scripts one GetVersionAsync call with arbitrary behaviour (e.g. a side effect such as
+    /// simulating the child process exiting, then a failure).</summary>
+    public void EnqueueVersionScript(Func<Task<RcloneVersionInfo>> script) => _versionScript.Enqueue(script);
+
     public Task<RcloneVersionInfo> GetVersionAsync(CancellationToken cancellationToken)
     {
         GetVersionCalls.Add("core/version");

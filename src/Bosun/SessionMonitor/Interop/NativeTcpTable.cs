@@ -6,10 +6,12 @@ using System.Runtime.InteropServices;
 namespace Bosun.SessionMonitor.Interop;
 
 /// <summary>
-/// <c>GetExtendedTcpTable</c> P/Invoke (bs-8je). This is the ONLY file in the project that
-/// declares a <c>DllImport</c> -- docs/ARCHITECTURE.md §3 requires every bit of raw interop to
-/// stay behind <c>ISessionMonitor</c> and confined to one file; if a second <c>DllImport</c>
-/// shows up anywhere else, that's an architecture violation, not a style nit.
+/// <c>GetExtendedTcpTable</c> P/Invoke (bs-8je). docs/ARCHITECTURE.md §3 requires raw interop to
+/// stay behind <c>ISessionMonitor</c> and confined to one file; a new <c>DllImport</c> anywhere
+/// else is an architecture violation, not a style nit. The one sanctioned exception is
+/// <c>Bosun.Rclone.Process.Interop.Win32ProcessJob</c> (Job Object, ADR-020 §1, bs-772), for
+/// which .NET has no managed API. This reader is also reused (not re-declared) by
+/// <c>TcpPortOwnerResolver</c> to find the owner of the rc port.
 /// </summary>
 /// <remarks>
 /// Two things reliably go wrong here, both handled deliberately (bs-8je):

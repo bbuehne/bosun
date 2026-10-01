@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Diag = System.Diagnostics;
 
 namespace Bosun.Rclone.Process;
@@ -13,6 +15,24 @@ namespace Bosun.Rclone.Process;
 /// </summary>
 public sealed class Win32RcloneProcessLauncher : IRcloneProcessLauncher
 {
+    private readonly IProcessJob? _job;
+    private readonly ILogger _logger;
+
+    /// <summary>No Job Object: the child is not tied to Bosun's lifetime. Used by tests that only
+    /// exercise start/exit/kill mechanics.</summary>
+    public Win32RcloneProcessLauncher()
+    {
+        _logger = NullLogger.Instance;
+    }
+
+    /// <summary>Production constructor: every child is assigned to <paramref name="job"/>
+    /// (ADR-020 §1, bs-772).</summary>
+    public Win32RcloneProcessLauncher(IProcessJob job, ILogger<Win32RcloneProcessLauncher> logger)
+    {
+        _job = job;
+        _logger = logger;
+    }
+
     /// <summary>Win32 <c>ERROR_FILE_NOT_FOUND</c>. This is the specific
     /// <see cref="Win32Exception.NativeErrorCode"/> <see cref="Diag.Process.Start()"/> throws when
     /// the executable cannot be located (including via PATH search) -- the signal
@@ -63,6 +83,31 @@ public sealed class Win32RcloneProcessLauncher : IRcloneProcessLauncher
         {
             process.Dispose();
             throw new RcloneProcessLaunchException(startInfo.ExecutablePath, ex);
+        }
+
+        // Job Object assignment (ADR-020 §1, bs-772). RACE WINDOW, NOT CLOSED: Process.Start
+        // returns after CreateProcess has already let the child run, so there is a gap of
+        // microseconds to a few milliseconds before the assignment below. If Bosun were killed
+        // inside that gap the child would be orphaned. Closing it would need CREATE_SUSPENDED (or
+        // PROC_THREAD_ATTRIBUTE_JOB_LIST), which Process.Start cannot express; it would mean
+        // replacing Process.Start with a hand-rolled CreateProcess plus redirected pipes and an
+        // environment block, a lot more interop for a window that is tiny. The residual case is
+        // covered by the OTHER half of ADR-020: the next launch finds the orphan holding the rc
+        // port and kills it (RcPortGuard). The assignment is also best-effort for children: rcd
+        // could in theory spawn a child before we assign; rclone does not do that at startup.
+        if (_job is not null)
+        {
+            try
+            {
+                JobAssignment.TryAssignOrWarn(_job, process.SafeHandle, startInfo.ExecutablePath, _logger);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+            {
+                // No usable process handle (it exited this instant). Same policy as a refused
+                // assignment: warn, never fail the start.
+                _logger.LogWarning(
+                    ex, "Could not obtain a handle for {Executable} to assign it to Bosun's Job Object", startInfo.ExecutablePath);
+            }
         }
 
         return new RealHandle(process);
