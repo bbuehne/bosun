@@ -19,10 +19,21 @@ namespace Bosun.Rclone;
 /// https://rclone.org/rc/ (e.g. <c>curl http://localhost:5572/core/version</c> via HTTP POST).
 /// A non-2xx response, or a 2xx response whose body cannot be parsed as the expected shape,
 /// becomes an <see cref="RcloneRcException"/>; anything that means the HTTP call itself could
-/// not be made (rcd unreachable, timeout, DNS) is left as whatever <see cref="HttpClient"/>
-/// throws (<see cref="HttpRequestException"/>, <see cref="TaskCanceledException"/>) -- see the
-/// remarks on <see cref="RcloneRcException"/> for why that distinction is preserved rather than
-/// collapsed into one exception type.
+/// not be made (rcd unreachable, DNS) is left as whatever <see cref="HttpClient"/> throws
+/// (<see cref="HttpRequestException"/>) -- see the remarks on <see cref="RcloneRcException"/> for
+/// why that distinction is preserved rather than collapsed into one exception type.
+/// </para>
+/// <para>
+/// <b>Per-call timeouts (bs-x57).</b> Every call carries its own explicit timeout (the
+/// <c>*Timeout</c> constants below), enforced here with a <see cref="TimeProvider"/>-driven timer
+/// on a linked token -- the same shape as <see cref="Probe.HostProbe"/> -- rather than by relying
+/// on <see cref="HttpClient.Timeout"/>'s 100 s default. A call that exceeds its timeout surfaces
+/// as <see cref="RcloneRcTimeoutException"/> (an <see cref="RcloneRcException"/>), never as a bare
+/// <see cref="TaskCanceledException"/>: callers that treat any
+/// <see cref="OperationCanceledException"/> as "shutting down" would otherwise misread a hung rc
+/// call as shutdown, which is exactly how the 2026-09-28 incident silently killed the supervisor
+/// loop. Only cancellation of the CALLER's token still surfaces as
+/// <see cref="OperationCanceledException"/>.
 /// </para>
 /// <para>
 /// <b>Authentication (bs-ard).</b> Verified against a real rclone v1.75.0 binary: every rc
@@ -45,14 +56,57 @@ public sealed class RcloneClient : IRcloneClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    private readonly HttpClient _httpClient;
+    // Per-endpoint timeouts (bs-x57). All calls go to rcd on loopback, so a call only takes long
+    // when rcd itself is blocked on something slower behind it (an SFTP session, a dead SSH
+    // channel, a VFS flush). The values below balance bounding how long ONE stuck call can hold
+    // MountSupervisor's single, globally-serialised channel loop (every other host waits behind
+    // it) against not abandoning a call that is merely slow but would succeed.
 
-    public RcloneClient(HttpClient httpClient, RcloneRcCredential credential)
+    /// <summary>core/version: answered from rcd's memory without touching any remote. It is the
+    /// health-check poll and ADR-017's "is rcd up" gate, so a slow answer means "not healthy" --
+    /// there is no value in waiting longer.</summary>
+    internal static readonly TimeSpan VersionTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>config/get and config/create: edit rcd's in-memory config (no remote I/O), so they
+    /// are quick, but they are not health pings and may serialise behind other config work.</summary>
+    internal static readonly TimeSpan ConfigTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>mount/listmounts: rcd's in-memory mount table, no remote I/O. It is the supervisor's
+    /// ground truth after every unmount attempt and is called on every drain retry, so it must be
+    /// short -- but it can queue behind rcd's mount-table lock while a mount/unmount is in flight,
+    /// hence not as short as core/version.</summary>
+    internal static readonly TimeSpan ListMountsTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>mount/unmount: the call most likely to stall -- over a dead SSH channel rclone
+    /// blocks flushing/closing the VFS against a peer that never answers. Deliberately longer than
+    /// the metadata calls so a slow-but-working unmount (large dirty cache) can finish, yet bounded:
+    /// the drain retries on its own cadence and verifies against listmounts, so giving up on one
+    /// attempt is cheap, while holding the global loop for minutes is not.</summary>
+    internal static readonly TimeSpan UnmountTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>mount/mount: connects the SFTP session and registers the WinFsp mount, so it does
+    /// real remote I/O plus WinFsp setup and is the slowest legitimate call here. A timed-out
+    /// mount/mount may nevertheless have taken effect inside rcd; that is safe, because the
+    /// supervisor treats the timeout as a mount failure and drains, and the drain's unmount +
+    /// listmounts verification clears any mount that did land.</summary>
+    internal static readonly TimeSpan MountTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>operations/list: the deep probe's call, a live SFTP round-trip. Callers that need a
+    /// tight bound (HostProbe, global.probe_timeout_seconds, default 5 s) impose their own via the
+    /// token and fire first; this is only the backstop for a caller that does not, and is well
+    /// above any sane probe timeout so it never pre-empts one.</summary>
+    internal static readonly TimeSpan ListTimeout = TimeSpan.FromSeconds(30);
+
+    private readonly HttpClient _httpClient;
+    private readonly TimeProvider _timeProvider;
+
+    public RcloneClient(HttpClient httpClient, RcloneRcCredential credential, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentNullException.ThrowIfNull(credential);
 
         _httpClient = httpClient;
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _httpClient.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Basic", credential.ToBasicAuthHeaderValue());
     }
@@ -75,7 +129,7 @@ public sealed class RcloneClient : IRcloneClient
 
     public async Task<RcloneVersionInfo> GetVersionAsync(CancellationToken cancellationToken)
     {
-        var body = await PostAsync("core/version", body: null, cancellationToken).ConfigureAwait(false);
+        var body = await PostAsync("core/version", body: null, VersionTimeout, cancellationToken).ConfigureAwait(false);
 
         return new RcloneVersionInfo
         {
@@ -100,7 +154,7 @@ public sealed class RcloneClient : IRcloneClient
             ["parameters"] = JsonSerializer.SerializeToNode(parameters, JsonOptions),
         };
 
-        await PostAsync("config/create", requestBody, cancellationToken).ConfigureAwait(false);
+        await PostAsync("config/create", requestBody, ConfigTimeout, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyDictionary<string, string>?> GetConfigAsync(string remoteName, CancellationToken cancellationToken)
@@ -113,13 +167,15 @@ public sealed class RcloneClient : IRcloneClient
         JsonObject body;
         try
         {
-            body = await PostAsync("config/get", new JsonObject { ["name"] = remoteName }, cancellationToken)
+            body = await PostAsync("config/get", new JsonObject { ["name"] = remoteName }, ConfigTimeout, cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (RcloneRcException)
+        catch (RcloneRcException ex) when (ex is not RcloneRcTimeoutException)
         {
             // Deliberately not distinguishing "remote does not exist" from any other rc-level
-            // failure here -- see the remarks on IRcloneClient.GetConfigAsync for why.
+            // failure here -- see the remarks on IRcloneClient.GetConfigAsync for why. A TIMEOUT is
+            // the one exception (bs-x57): rcd not answering says nothing about whether the remote
+            // exists, so reporting "absent" would make the provisioner overwrite a good remote.
             return null;
         }
 
@@ -146,7 +202,7 @@ public sealed class RcloneClient : IRcloneClient
         ArgumentException.ThrowIfNullOrEmpty(request.MountPoint);
 
         var requestBody = BuildMountBody(request);
-        var body = await PostAsync("mount/mount", requestBody, cancellationToken).ConfigureAwait(false);
+        var body = await PostAsync("mount/mount", requestBody, MountTimeout, cancellationToken).ConfigureAwait(false);
 
         return new RcloneMountResult
         {
@@ -203,14 +259,14 @@ public sealed class RcloneClient : IRcloneClient
         ArgumentException.ThrowIfNullOrEmpty(mountPoint);
 
         // Parameter name verified: https://rclone.org/rc/#mount-unmount.
-        await PostAsync("mount/unmount", new JsonObject { ["mountPoint"] = mountPoint }, cancellationToken)
+        await PostAsync("mount/unmount", new JsonObject { ["mountPoint"] = mountPoint }, UnmountTimeout, cancellationToken)
             .ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken cancellationToken)
     {
         // No parameters: https://rclone.org/rc/#mount-listmounts.
-        var body = await PostAsync("mount/listmounts", body: null, cancellationToken).ConfigureAwait(false);
+        var body = await PostAsync("mount/listmounts", body: null, ListMountsTimeout, cancellationToken).ConfigureAwait(false);
 
         if (!body.TryGetPropertyValue("mountPoints", out var node) || node is not JsonArray array)
         {
@@ -250,7 +306,7 @@ public sealed class RcloneClient : IRcloneClient
             ["remote"] = remote,
         };
 
-        var body = await PostAsync("operations/list", requestBody, cancellationToken).ConfigureAwait(false);
+        var body = await PostAsync("operations/list", requestBody, ListTimeout, cancellationToken).ConfigureAwait(false);
 
         if (!body.TryGetPropertyValue("list", out var node) || node is not JsonArray array)
         {
@@ -281,9 +337,33 @@ public sealed class RcloneClient : IRcloneClient
     /// POSTs <paramref name="body"/> (or <c>{}</c> when <see langword="null"/>) as JSON to
     /// <paramref name="endpoint"/> and returns the parsed response object. Throws
     /// <see cref="RcloneRcException"/> for a non-2xx response or a response body that is not a
-    /// JSON object.
+    /// JSON object, and <see cref="RcloneRcTimeoutException"/> if the whole exchange (request plus
+    /// reading the response) takes longer than <paramref name="timeout"/>. Cancellation of
+    /// <paramref name="cancellationToken"/> itself still throws
+    /// <see cref="OperationCanceledException"/>.
     /// </summary>
-    private async Task<JsonObject> PostAsync(string endpoint, JsonNode? body, CancellationToken cancellationToken)
+    private async Task<JsonObject> PostAsync(string endpoint, JsonNode? body, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        using var timeoutSource = new CancellationTokenSource();
+        using var timer = _timeProvider.CreateTimer(
+            static state => ((CancellationTokenSource)state!).Cancel(), timeoutSource, timeout, Timeout.InfiniteTimeSpan);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
+
+        try
+        {
+            return await SendAsync(endpoint, body, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The caller did not cancel, so this is a timeout: ours (timeoutSource) or, if
+            // HttpClient.Timeout is shorter than ours, HttpClient's own. Either way it must not
+            // leave here as a bare OperationCanceledException (see RcloneRcTimeoutException).
+            throw new RcloneRcTimeoutException(
+                endpoint, timeoutSource.IsCancellationRequested ? timeout : _httpClient.Timeout, ex);
+        }
+    }
+
+    private async Task<JsonObject> SendAsync(string endpoint, JsonNode? body, CancellationToken cancellationToken)
     {
         var requestJson = (body ?? new JsonObject()).ToJsonString(JsonOptions);
         using var content = new StringContent(requestJson, Encoding.UTF8, "application/json");

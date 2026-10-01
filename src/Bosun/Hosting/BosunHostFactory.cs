@@ -137,6 +137,12 @@ public static class BosunHostFactory
             var httpClient = new HttpClient
             {
                 BaseAddress = new Uri($"http://127.0.0.1:{global.RcloneRcPort}/"),
+
+                // bs-x57: RcloneClient enforces its own explicit per-endpoint timeout on every
+                // call (and reports it as RcloneRcTimeoutException). HttpClient's default blanket
+                // 100 s timeout would be a second, unrelated clock that surfaces as a bare
+                // TaskCanceledException -- the exception that silently killed the supervisor loop.
+                Timeout = Timeout.InfiniteTimeSpan,
             };
             return new RcloneClient(httpClient, sp.GetRequiredService<RcloneRcCredential>());
         });

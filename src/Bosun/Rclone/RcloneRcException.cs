@@ -8,7 +8,7 @@ namespace Bosun.Rclone;
 /// distinction matters to callers such as <see cref="RcloneRemoteProvisioner"/>, which treats
 /// "the rc API answered and said no" very differently from "we could not talk to rcd at all".
 /// </summary>
-public sealed class RcloneRcException : Exception
+public class RcloneRcException : Exception
 {
     /// <summary>The rc endpoint path this call was made against, e.g. <c>config/get</c>.</summary>
     public string Endpoint { get; }
