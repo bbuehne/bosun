@@ -15,6 +15,7 @@ internal sealed class FakeProbe : IProbe
     private readonly Dictionary<string, Queue<ShallowProbeResult>> shallowScripts = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Queue<DeepProbeResult>> deepScripts = new(StringComparer.OrdinalIgnoreCase);
 
+    private Exception? deepThrows;
     private ShallowProbeOutcome defaultShallowOutcome = ShallowProbeOutcome.Success;
     private DeepProbeOutcome defaultDeepOutcome = DeepProbeOutcome.Success;
 
@@ -80,9 +81,21 @@ internal sealed class FakeProbe : IProbe
         });
     }
 
+    /// <summary>Every deep probe throws <paramref name="exception"/> until
+    /// <see cref="StopThrowingFromDeep"/> -- a probe that breaks its never-throws contract
+    /// (bs-x57), so the supervisor's own defence against that can be proven.</summary>
+    public void MakeDeepThrow(Exception exception) => deepThrows = exception;
+
+    public void StopThrowingFromDeep() => deepThrows = null;
+
     public Task<DeepProbeResult> ProbeDeepAsync(string hostKey, TimeSpan timeout, CancellationToken cancellationToken)
     {
         DeepProbeCalls.Add(hostKey);
+
+        if (deepThrows is not null)
+        {
+            return Task.FromException<DeepProbeResult>(deepThrows);
+        }
 
         if (deepScripts.TryGetValue(hostKey, out var queue) && queue.Count > 0)
         {

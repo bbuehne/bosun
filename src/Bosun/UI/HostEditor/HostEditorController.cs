@@ -498,7 +498,7 @@ public sealed class HostEditorController
                 {
                     await _supervisor.RequestUnmountAsync(hostKey, cancellationToken).ConfigureAwait(false);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     _logger?.LogError(ex, "Could not unmount {HostKey} before deleting it; delete abandoned", hostKey);
                     return new HostEditorDeleteResult
