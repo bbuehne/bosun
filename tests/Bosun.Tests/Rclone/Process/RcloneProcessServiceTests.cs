@@ -82,8 +82,7 @@ public sealed class RcloneProcessServiceTests
 
         await service.StartAsync(CancellationToken.None);
         firstHandle.SimulateExit(1);
-        await PumpAsync();
-        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(2), () => service.Status == RcloneProcessStatus.Healthy);
+        await RestartAfterAsync(service, time, TimeSpan.FromSeconds(2));
 
         Assert.Equal(2, launcher.StartCalls.Count);
         Assert.All(launcher.StartCalls, s =>
@@ -126,10 +125,10 @@ public sealed class RcloneProcessServiceTests
         Assert.Equal(RcloneProcessStatus.Healthy, service.Status);
 
         neverHealthyHandle.SimulateExit(1);
-        await PumpAsync();
         var restartedHandle = new FakeRcloneProcessHandle();
         launcher.EnqueueSuccess(restartedHandle);
-        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(1), () => launcher.StartCalls.Count == 3);
+        await RestartAfterAsync(service, time, TimeSpan.FromSeconds(1));
+        Assert.Equal(3, launcher.StartCalls.Count);
 
         var stopTask = service.StopAsync(CancellationToken.None);
         await AdvanceUntilCompleteAsync(stopTask, time, TimeSpan.FromMilliseconds(50));
@@ -209,10 +208,10 @@ public sealed class RcloneProcessServiceTests
         Assert.Equal(RcloneProcessStatus.Healthy, service.Status);
 
         firstHandle.SimulateExit(1);
-        await PumpAsync();
+        await WhenSupervisorIsWaitingOutRestartDelayAsync(time);
         Assert.Equal(RcloneProcessFaultKind.ProcessExitedUnexpectedly, service.FaultKind);
 
-        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(2), () => service.Status == RcloneProcessStatus.Healthy);
+        await RestartAfterAsync(service, time, TimeSpan.FromSeconds(2));
 
         Assert.Equal(2, launcher.StartCalls.Count);
         Assert.Equal(RcloneProcessStatus.Healthy, service.Status);
@@ -314,6 +313,66 @@ public sealed class RcloneProcessServiceTests
         }
     }
 
+    /// <summary>
+    /// Only bounds how long a test that has already gone wrong may hang before it fails. A passing
+    /// run never waits on it: every wait below completes as soon as the awaited event happens.
+    /// </summary>
+    private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Completes when the supervise loop has noticed the process died and is waiting out
+    /// <c>RestartDelay</c> -- i.e. its delay timer exists on <paramref name="time"/> (bs-8e6).
+    /// </summary>
+    /// <remarks>
+    /// Replaces <c>await PumpAsync()</c> after <c>SimulateExit</c>. The supervise loop does NOT
+    /// resume on the calling stack when the fake handle "exits": the xunit test thread carries a
+    /// <see cref="SynchronizationContext"/>, and the .NET runtime never runs a task continuation
+    /// inline from a thread that has one -- it queues it to the thread pool. (Measured: right
+    /// after <c>SimulateExit</c>, <c>FaultKind</c> is still <c>None</c>.) So how long the loop
+    /// takes to reach its <c>Task.Delay</c> is up to the pool; 64 <c>Task.Yield()</c>s are a bet
+    /// on that, and with 0 of them this test fails every time. Advancing the fake clock before
+    /// that timer exists moves it past a timer that is not there yet, and the restart then never
+    /// comes. Waiting on the timer's existence is the actual precondition for advancing.
+    /// </remarks>
+    private static Task WhenSupervisorIsWaitingOutRestartDelayAsync(FakeTimeProvider time) =>
+        time.WhenActiveTimerCountAtLeastAsync(1).WaitAsync(HangGuard);
+
+    /// <summary>
+    /// Completes the next time <paramref name="service"/> raises <see cref="RcloneProcessService.StatusChanged"/>
+    /// with <paramref name="status"/>. Subscribe BEFORE causing the transition.
+    /// </summary>
+    private static Task WhenNextStatusAsync(RcloneProcessService service, RcloneProcessStatus status)
+    {
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnStatusChanged(object? sender, RcloneProcessStatusChangedEventArgs e)
+        {
+            if (e.Status == status)
+            {
+                service.StatusChanged -= OnStatusChanged;
+                reached.TrySetResult();
+            }
+        }
+
+        service.StatusChanged += OnStatusChanged;
+        return reached.Task.WaitAsync(HangGuard);
+    }
+
+    /// <summary>
+    /// From "the supervise loop is waiting out <c>RestartDelay</c>" to "rcd has been relaunched and
+    /// is Healthy again": waits for the delay timer to exist, advances past it, and waits for the
+    /// Healthy status the relaunch raises. Every step waits for the event itself, so none of it is
+    /// a bet on thread-pool timing.
+    /// </summary>
+    private static async Task RestartAfterAsync(RcloneProcessService service, FakeTimeProvider time, TimeSpan restartDelay)
+    {
+        await WhenSupervisorIsWaitingOutRestartDelayAsync(time);
+
+        var healthyAgain = WhenNextStatusAsync(service, RcloneProcessStatus.Healthy);
+        time.Advance(restartDelay);
+        await healthyAgain;
+    }
+
     private static async Task AdvanceUntilCompleteAsync(Task task, FakeTimeProvider time, TimeSpan step)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
@@ -361,9 +420,13 @@ public sealed class RcloneProcessServiceTests
     }
 
     /// <summary>Yields control repeatedly so any continuation scheduled onto the thread pool by a
-    /// fired <see cref="FakeTimeProvider"/> timer gets a chance to run before assertions --
-    /// belt-and-braces alongside FakeTimeProvider's own synchronous-firing design; not a real
-    /// wait (no timer, no clock, bounded iteration count).</summary>
+    /// fired <see cref="FakeTimeProvider"/> timer gets a chance to run before assertions -- not a
+    /// real wait (no timer, no clock, bounded iteration count).
+    /// <b>Only for asserting that something did NOT happen</b> ("no second launch after Stop"),
+    /// where being too short can only let a regression slip through, never fail a correct run.
+    /// Never use it to wait for something that SHOULD happen: how many yields the thread pool
+    /// needs is not knowable (bs-8e6). Use <see cref="WhenSupervisorIsWaitingOutRestartDelayAsync"/>
+    /// or <see cref="WhenNextStatusAsync"/>.</summary>
     private static async Task PumpAsync()
     {
         for (var i = 0; i < 64; i++)

@@ -127,6 +127,16 @@ public sealed class HostConfigWriterTests : IDisposable
         Probe = new ProbeConfig { IntervalSeconds = 30, DeepProbe = true },
     };
 
+    /// <summary>
+    /// <c>Assert.True(result.Succeeded)</c> says nothing about WHY a write failed; this reports the
+    /// writer's own diagnosis (I/O message or validation errors), so a rare environmental failure
+    /// names its mechanism instead of arriving as a bare "Expected: True, Actual: False" (bs-8e6).
+    /// </summary>
+    private static void AssertSucceeded(HostConfigWriteResult result) =>
+        Assert.True(
+            result.Succeeded,
+            $"write failed. Error='{result.Error}'; ValidationErrors=[{string.Join("; ", result.ValidationErrors)}]");
+
     // -- validation runs before the write ------------------------------------------------------
 
     [Fact]
@@ -183,7 +193,7 @@ public sealed class HostConfigWriterTests : IDisposable
 
         var result = await harness.Writer.SaveHostAsync(ValidNewHost());
 
-        Assert.True(result.Succeeded);
+        AssertSucceeded(result);
         Assert.True(File.Exists(harness.ConfigPath));
 
         var written = File.ReadAllText(harness.ConfigPath);
@@ -231,6 +241,42 @@ public sealed class HostConfigWriterTests : IDisposable
         Assert.Equal(originalBytes, File.ReadAllText(harness.ConfigPath));
         // The failed attempt's temp file must not litter the directory either.
         Assert.DoesNotContain(Directory.GetFiles(_tempDirectory), f => f != harness.ConfigPath);
+        // A lock that never lifts is retried a bounded number of times, then reported -- not forever.
+        Assert.Equal(5, harness.WriterTime.Delays.Count);
+    }
+
+    /// <summary>
+    /// bs-8e6. Something else (an antivirus scanner, the search indexer) briefly holds the
+    /// existing <c>hosts.toml</c> open without delete-sharing, so the final replace is refused
+    /// with "Access to the path is denied" although nothing is wrong with the file. The writer
+    /// must back off and replace it once the hold lifts, rather than reporting a failed save.
+    /// The hold is real (an open handle on the real file), and is released at the exact moment the
+    /// writer first backs off, so the ordering is deterministic and nothing waits on a clock.
+    /// </summary>
+    [Fact]
+    public async Task SaveHostAsync_DestinationBrieflyHeldOpenByAnotherProcess_SucceedsOnceTheHoldLifts()
+    {
+        using var harness = Harness.WithTwoHosts(_tempDirectory);
+        var transientHold = new FileStream(harness.ConfigPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        harness.WriterTime.BeforeDelayCompletes = _ => transientHold.Dispose();
+
+        try
+        {
+            var result = await harness.Writer.SaveHostAsync(ValidNewHost());
+
+            AssertSucceeded(result);
+            // It really did have to back off once -- otherwise this proved nothing about the retry.
+            Assert.Single(harness.WriterTime.Delays);
+        }
+        finally
+        {
+            transientHold.Dispose();
+        }
+
+        var written = ConfigParser.Parse(File.ReadAllText(harness.ConfigPath), "written");
+        Assert.True(written.Hosts.ContainsKey("new-host"));
+        Assert.True(harness.Store.Current.Hosts.ContainsKey("new-host"));
+        Assert.Single(Directory.GetFiles(_tempDirectory)); // and no temp file left behind
     }
 
     /// <summary>
@@ -270,6 +316,9 @@ public sealed class HostConfigWriterTests : IDisposable
             Assert.False(result.Succeeded);
             Assert.NotNull(result.Error);
             Assert.Equal(originalBytes, File.ReadAllText(harness.ConfigPath));
+            // Failing to create the temp file is a real permission problem, not a transient hold:
+            // it must be reported at once, not retried.
+            Assert.Empty(harness.WriterTime.Delays);
         }
         finally
         {
@@ -288,7 +337,7 @@ public sealed class HostConfigWriterTests : IDisposable
         var edited = harness.Store.Current.Hosts["nas"] with { Hostname = "nas-v2.example.internal" };
         var result = await harness.Writer.SaveHostAsync(edited);
 
-        Assert.True(result.Succeeded);
+        AssertSucceeded(result);
         Assert.Equal(2, harness.Store.Current.Hosts.Count);
         Assert.Equal("nas-v2.example.internal", harness.Store.Current.Hosts["nas"].Hostname);
     }
@@ -320,7 +369,7 @@ public sealed class HostConfigWriterTests : IDisposable
 
         var result = await harness.Writer.SaveHostAsync(ValidNewHost());
 
-        Assert.True(result.Succeeded);
+        AssertSucceeded(result);
         // No harness.Time.Advance(...) call anywhere -- if this passes, Current updated
         // synchronously from the write itself, not from the debounced file-watcher path.
         Assert.True(harness.Store.Current.Hosts.ContainsKey("new-host"));
@@ -405,7 +454,7 @@ public sealed class HostConfigWriterTests : IDisposable
 
         var result = await harness.Writer.DeleteHostAsync("jump");
 
-        Assert.True(result.Succeeded);
+        AssertSucceeded(result);
         Assert.False(harness.Store.Current.Hosts.ContainsKey("jump"));
         Assert.True(harness.Store.Current.Hosts.ContainsKey("nas"));
 
@@ -434,6 +483,7 @@ public sealed class HostConfigWriterTests : IDisposable
         public required FakeConfigFileReader Reader { get; init; }
         public required FakeConfigFileWatcher Watcher { get; init; }
         public required FakeTimeProvider Time { get; init; }
+        public required RecordingDelayTimeProvider WriterTime { get; init; }
         public required HostConfigStoreOptions Options { get; init; }
         public required string ConfigPath { get; init; }
 
@@ -453,7 +503,8 @@ public sealed class HostConfigWriterTests : IDisposable
             var options = new HostConfigStoreOptions();
 
             var store = HostConfigStore.Load("hosts.toml", reader, watcher, time, AlwaysExists, options);
-            var writer = new HostConfigWriter(configPath, store, identityFileExists ?? AlwaysExists);
+            var writerTime = new RecordingDelayTimeProvider();
+            var writer = new HostConfigWriter(configPath, store, identityFileExists ?? AlwaysExists, writerTime);
 
             return new Harness
             {
@@ -462,6 +513,7 @@ public sealed class HostConfigWriterTests : IDisposable
                 Reader = reader,
                 Watcher = watcher,
                 Time = time,
+                WriterTime = writerTime,
                 Options = options,
                 ConfigPath = configPath,
             };
