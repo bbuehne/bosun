@@ -167,11 +167,11 @@ public sealed class HealthBannerViewModelTests
     }
 
     // ------------------------------------------------------------------------------------------
-    // Actions placeholder
+    // Actions (filled from RepairActionPlan once UseActions supplies commands: see RepairActionPlanTests)
     // ------------------------------------------------------------------------------------------
 
     [Fact]
-    public void The_actions_collection_exists_and_is_empty_until_the_repair_actions_arrive()
+    public void The_actions_collection_exists_and_is_empty_until_a_command_source_is_supplied()
     {
         var vm = NewViewModel();
         vm.Update(Health(Issue("a.b")), AggregateHealth.Healthy);

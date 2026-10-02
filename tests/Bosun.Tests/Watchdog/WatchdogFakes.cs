@@ -17,6 +17,9 @@ internal sealed class FakeRestarter : IAppRestarter
 {
     public List<string> Reasons { get; } = [];
 
+    /// <summary>The <see cref="RestartKind"/> of each request, parallel to <see cref="Reasons"/>.</summary>
+    public List<RestartKind> Kinds { get; } = [];
+
     public bool Result { get; set; } = true;
 
     public Exception? Throws { get; set; }
@@ -24,9 +27,10 @@ internal sealed class FakeRestarter : IAppRestarter
     /// <summary>Runs at the moment of each request -- lets a test inspect state as the restarter sees it.</summary>
     public Action? OnRequest { get; set; }
 
-    public Task<bool> RestartAsync(string reason, CancellationToken cancellationToken)
+    public Task<bool> RestartAsync(string reason, RestartKind kind, CancellationToken cancellationToken)
     {
         Reasons.Add(reason);
+        Kinds.Add(kind);
         OnRequest?.Invoke();
 
         return Throws is not null ? Task.FromException<bool>(Throws) : Task.FromResult(Result);
@@ -41,9 +45,13 @@ internal sealed class InMemoryRestartHistory : IRestartHistoryStore
 
     public int SaveCount { get; private set; }
 
+    public LastRestart? Last { get; set; }
+
     public IReadOnlyList<DateTimeOffset> Load() => [.. Stored];
 
-    public void Save(IReadOnlyList<DateTimeOffset> restarts)
+    public LastRestart? LoadLast() => Last;
+
+    public void Save(IReadOnlyList<DateTimeOffset> restarts, LastRestart? last = null)
     {
         if (SaveThrows is not null)
         {
@@ -52,6 +60,7 @@ internal sealed class InMemoryRestartHistory : IRestartHistoryStore
 
         SaveCount++;
         Stored = [.. restarts];
+        Last = last;
     }
 }
 

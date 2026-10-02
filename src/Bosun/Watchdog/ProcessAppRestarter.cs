@@ -55,8 +55,8 @@ public sealed record RestartContext(string ExecutablePath, IReadOnlyList<string>
 
 /// <summary>
 /// The real <see cref="IAppRestarter"/> (bs-6to). Launches a new Bosun with the same arguments plus
-/// <c>--restarted-by-watchdog &lt;thisPid&gt;</c>, then shuts this process down under the bounded
-/// <see cref="ShutdownGuard"/>.
+/// <c>--restarted-by-watchdog &lt;thisPid&gt;</c> (or <c>--restarted-by-user</c> for a restart the
+/// user asked for, bs-aoz), then shuts this process down under the bounded <see cref="ShutdownGuard"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -84,7 +84,7 @@ public sealed class ProcessAppRestarter(
     ShutdownGuard shutdownGuard,
     ILogger<ProcessAppRestarter> logger) : IAppRestarter
 {
-    public Task<bool> RestartAsync(string reason, CancellationToken cancellationToken)
+    public Task<bool> RestartAsync(string reason, RestartKind kind, CancellationToken cancellationToken)
     {
         if (shutdownGuard.IsShuttingDown)
         {
@@ -92,7 +92,7 @@ public sealed class ProcessAppRestarter(
             return Task.FromResult(false);
         }
 
-        var arguments = RestartHandoffArguments.ForRestart(context.Arguments, context.ProcessId);
+        var arguments = RestartHandoffArguments.ForRestart(context.Arguments, context.ProcessId, kind);
 
         try
         {
@@ -104,15 +104,19 @@ public sealed class ProcessAppRestarter(
             return Task.FromResult(false);
         }
 
-        logger.LogError(
-            "Restarting Bosun ({Reason}): launched a replacement ({Executable} {Arguments}); shutting this instance down",
+        // A watchdog restart is a fault being recovered from and is logged as one. A restart the user
+        // asked for is an ordinary event.
+        logger.Log(
+            kind == RestartKind.Watchdog ? LogLevel.Error : LogLevel.Information,
+            "Restarting Bosun ({Kind}: {Reason}): launched a replacement ({Executable} {Arguments}); shutting this instance down",
+            kind,
             reason,
             context.ExecutablePath,
             string.Join(' ', arguments));
 
         // Armed BEFORE the request: if the UI thread is the thing that is wedged, the request never
         // reaches OnExit, and only a deadline that is already running can end this process.
-        shutdownGuard.BeginShutdown($"watchdog restart: {reason}");
+        shutdownGuard.BeginShutdown($"{(kind == RestartKind.Watchdog ? "watchdog" : "manual")} restart: {reason}");
         applicationShutdown.RequestShutdown();
         return Task.FromResult(true);
     }

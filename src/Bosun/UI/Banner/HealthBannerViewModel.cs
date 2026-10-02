@@ -4,17 +4,33 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
 using Bosun.Health;
+using Bosun.Repair;
 using Bosun.Status;
 
 namespace Bosun.UI.Banner;
 
 /// <summary>
-/// A button in the banner's action panel. Nothing creates these yet: the repair actions
-/// (Restart rclone, Unmount all and re-probe, Restart Bosun) are bs-aoz, and they will add items
-/// to <see cref="HealthBannerViewModel.Actions"/>. The panel is already bound, so adding one needs
-/// no XAML change.
+/// A button in the banner's action panel. <see cref="HealthBannerViewModel"/> fills
+/// <see cref="HealthBannerViewModel.Actions"/> with the repair actions (bs-aoz) once it is given a
+/// command source (<see cref="HealthBannerViewModel.UseActions"/>); the panel is bound to the collection.
 /// </summary>
 public sealed record HealthBannerAction(string Label, ICommand Command);
+
+/// <summary>A minimal <see cref="ICommand"/> over a delegate. Always executable: the repair commands
+/// guard against a second click themselves (bs-aoz), so the button need not.</summary>
+public sealed class RelayCommand(Action execute) : ICommand
+{
+    // Never raised: CanExecute never changes. Declared to satisfy ICommand.
+    public event EventHandler? CanExecuteChanged
+    {
+        add { }
+        remove { }
+    }
+
+    public bool CanExecute(object? parameter) => true;
+
+    public void Execute(object? parameter) => execute();
+}
 
 /// <summary>One issue as the banner lists it, for the "N more" expansion.</summary>
 public sealed record HealthBannerIssueItem(string Code, HealthLevel Level, string Title, string Detail, string SinceText);
@@ -44,6 +60,9 @@ public sealed class HealthBannerViewModel : INotifyPropertyChanged
     private string headerText = HeaderFor(AppHealth.Healthy, AggregateHealth.Healthy);
     private bool isExpanded;
     private IReadOnlyList<HealthBannerIssueItem> otherIssues = [];
+    private Func<RepairActionKind, ICommand>? commandFor;
+    private IReadOnlyList<RepairActionKind>? shownActions;
+    private string? lastTopIssueCode;
 
     /// <param name="timeZone">Used to render "since" times; the local zone when omitted. Injected so
     /// tests are not machine-dependent.</param>
@@ -131,9 +150,43 @@ public sealed class HealthBannerViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Action buttons. Empty until the repair actions land (bs-aoz); the banner's action
-    /// panel is already bound to it.</summary>
+    /// <summary>
+    /// Action buttons, in order (bs-aoz). Empty while the banner is hidden, and empty until
+    /// <see cref="UseActions"/> supplies the commands. Which buttons, and in what order, is
+    /// <see cref="RepairActionPlan.ForIssue"/> applied to the top issue; the collection is rebuilt only
+    /// when that list changes, so the buttons do not flicker or lose a pending click on every refresh tick.
+    /// </summary>
     public ObservableCollection<HealthBannerAction> Actions { get; } = [];
+
+    /// <summary>
+    /// Supplies the command behind each button (bs-aoz). Call once, from the composition root; the
+    /// banner then shows the buttons <see cref="RepairActionPlan"/> prescribes for the top issue.
+    /// </summary>
+    public void UseActions(Func<RepairActionKind, ICommand> commandFor)
+    {
+        ArgumentNullException.ThrowIfNull(commandFor);
+        this.commandFor = commandFor;
+        shownActions = null; // force a rebuild on the next Update
+        RefreshActions(lastTopIssueCode);
+    }
+
+    private void RefreshActions(string? topIssueCode)
+    {
+        lastTopIssueCode = topIssueCode;
+
+        IReadOnlyList<RepairActionKind> wanted = commandFor is null ? [] : RepairActionPlan.ForIssue(topIssueCode);
+        if (shownActions is not null && shownActions.SequenceEqual(wanted))
+        {
+            return;
+        }
+
+        shownActions = wanted;
+        Actions.Clear();
+        foreach (var kind in wanted)
+        {
+            Actions.Add(new HealthBannerAction(RepairActionPlan.Label(kind), commandFor!(kind)));
+        }
+    }
 
     /// <summary>The window header: reflects the level, not just "Error" -- "Bosun — Faulted",
     /// "Bosun — Degraded", "Bosun — Starting…", "Bosun — Hosts need attention", "Bosun — Healthy".</summary>
@@ -155,6 +208,8 @@ public sealed class HealthBannerViewModel : INotifyPropertyChanged
         Title = top?.Title ?? string.Empty;
         Detail = top?.Detail ?? string.Empty;
         SinceText = top is null ? string.Empty : BuildSince(top);
+
+        RefreshActions(top?.Code);
 
         var others = appHealth.Issues
             .Skip(1)

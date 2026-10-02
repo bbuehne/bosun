@@ -15,13 +15,33 @@ public interface IAppRestarter
     /// Starts a replacement Bosun process and then shuts this one down, boundedly.
     /// </summary>
     /// <param name="reason">Why, for the log.</param>
+    /// <param name="kind">Who asked. The replacement is told (see <see cref="RestartKind"/>), because the
+    /// two behave differently on arrival: a watchdog restart starts hidden and says what happened; a
+    /// restart the user asked for shows the window.</param>
     /// <returns>
     /// <see langword="true"/> if a replacement was launched and this process has begun shutting down.
     /// <see langword="false"/> if nothing was launched -- the launch failed, or the application is
     /// already shutting down -- in which case this process carries on unchanged. The restarter
     /// reports the cause in the log; the caller decides what to do next.
     /// </returns>
-    Task<bool> RestartAsync(string reason, CancellationToken cancellationToken);
+    Task<bool> RestartAsync(string reason, RestartKind kind, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Who asked for a restart (bs-aoz). Carried to the new instance on its command line
+/// (<see cref="RestartHandoffArguments"/>).
+/// </summary>
+public enum RestartKind
+{
+    /// <summary>The supervisor watchdog (ADR-020 Decision 3). Counts against its hourly limit, which is the
+    /// watchdog's own bookkeeping, not the restarter's. The new instance starts with no window, however
+    /// it was originally launched: a 3 a.m. recovery must not pop a window up.</summary>
+    Watchdog,
+
+    /// <summary>The user chose "Restart Bosun" (bs-aoz). Never recorded in the watchdog's history, so a
+    /// person restarting Bosun cannot use up the allowance that protects them from a restart loop. The
+    /// new instance shows its window, because the user just asked for it.</summary>
+    Manual,
 }
 
 /// <summary>Whether the application has begun exiting. The watchdog and the restarter consult it so

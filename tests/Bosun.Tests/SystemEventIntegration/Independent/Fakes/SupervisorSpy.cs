@@ -130,6 +130,12 @@ internal sealed class SupervisorSpy : IMountSupervisor
         return Task.CompletedTask;
     }
 
+    public Task RepairAllAsync(CancellationToken cancellationToken = default)
+    {
+        Calls.Add(nameof(RepairAllAsync));
+        return Task.CompletedTask;
+    }
+
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default)
     {
         Calls.Add(nameof(SetMountingAvailabilityAsync));

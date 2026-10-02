@@ -57,6 +57,25 @@ internal sealed class FakeMountSupervisor : IMountSupervisor
 
     public Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
+    public int RepairAllCalls { get; private set; }
+
+    /// <summary>When set, <see cref="RepairAllAsync"/> returns this task instead of completing -- lets a
+    /// test hold a repair "in flight" to exercise the double-click guard.</summary>
+    public Task? RepairAllBlocker { get; set; }
+
+    public Exception? RepairAllException { get; set; }
+
+    public Task RepairAllAsync(CancellationToken cancellationToken = default)
+    {
+        RepairAllCalls++;
+        if (RepairAllException is not null)
+        {
+            return Task.FromException(RepairAllException);
+        }
+
+        return RepairAllBlocker?.WaitAsync(cancellationToken) ?? Task.CompletedTask;
+    }
+
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 

@@ -42,7 +42,7 @@ public sealed class RestartMechanicsTests
     {
         var h = new RestarterHarness(["--autostart"]);
 
-        var restarted = await h.Restarter.RestartAsync("supervisor stalled", CancellationToken.None);
+        var restarted = await h.Restarter.RestartAsync("supervisor stalled", RestartKind.Watchdog, CancellationToken.None);
 
         Assert.True(restarted);
         var launch = Assert.Single(h.Launcher.Launches);
@@ -60,7 +60,7 @@ public sealed class RestartMechanicsTests
         var restarter = new ProcessAppRestarter(
             new RestartContext(Exe, [], 1), launcher, h.AppShutdown, h.Guard, h.Log);
 
-        await restarter.RestartAsync("x", CancellationToken.None);
+        await restarter.RestartAsync("x", RestartKind.Watchdog, CancellationToken.None);
 
         Assert.Equal(0, shutdownRequestedWhenLaunching);
         Assert.Equal(1, h.AppShutdown.Requests);
@@ -78,7 +78,7 @@ public sealed class RestartMechanicsTests
         var h = new RestarterHarness();
         h.Launcher.Throws = new InvalidOperationException("cannot start");
 
-        var restarted = await h.Restarter.RestartAsync("x", CancellationToken.None);
+        var restarted = await h.Restarter.RestartAsync("x", RestartKind.Watchdog, CancellationToken.None);
 
         Assert.False(restarted);
         Assert.Equal(0, h.AppShutdown.Requests);
@@ -92,7 +92,7 @@ public sealed class RestartMechanicsTests
         var h = new RestarterHarness();
         h.Guard.BeginShutdown("user chose Exit");
 
-        var restarted = await h.Restarter.RestartAsync("x", CancellationToken.None);
+        var restarted = await h.Restarter.RestartAsync("x", RestartKind.Watchdog, CancellationToken.None);
 
         Assert.False(restarted);
         Assert.Empty(h.Launcher.Launches);
@@ -103,7 +103,7 @@ public sealed class RestartMechanicsTests
     public async Task A_restart_arms_the_exit_deadline_so_a_wedged_instance_cannot_outlive_it()
     {
         var h = new RestarterHarness();
-        await h.Restarter.RestartAsync("x", CancellationToken.None);
+        await h.Restarter.RestartAsync("x", RestartKind.Watchdog, CancellationToken.None);
 
         // The orderly shutdown never finishes (nothing in this test completes it).
         h.Time.Advance(ShutdownGuard.DefaultBound);

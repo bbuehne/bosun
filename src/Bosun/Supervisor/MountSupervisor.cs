@@ -204,6 +204,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         /// it still belongs in the snapshot as an administratively-disabled entry, whereas a REMOVED
         /// key has nothing left to describe.</summary>
         ConfigRemoved,
+
+        /// <summary>"Unmount all and re-probe" (<see cref="RepairAllAsync"/>, bs-aoz). Drains exactly
+        /// like <see cref="Automatic"/> -- the host is re-enabled, so it re-probes and a persistent
+        /// host remounts -- and deliberately NOT like <see cref="UserUnmount"/>: the host is not
+        /// parked. A repair means "drop everything and start clean", not "keep these hosts down".
+        /// Kept as its own cause (rather than reusing <see cref="Automatic"/>) so the log says why,
+        /// and so a future change to <see cref="Automatic"/> cannot silently change a repair.</summary>
+        Repair,
     }
 
     /// <summary>Mutable per-host runtime state. Deliberately a private nested class: nothing
@@ -574,6 +582,63 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             // ADR-008's "unknown until acted on", because it is confidently wrong rather than blank.
             host.Backoff = BackoffState.Initial;
             await ForceImmediateIdleProbeAsync(host, "network change: bypass backoff", ct).ConfigureAwait(false);
+        }
+    }, cancellationToken);
+
+    public Task RepairAllAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
+    {
+        if (suspended)
+        {
+            logger.LogWarning("Repair (unmount all and re-probe) ignored: the system is suspended");
+            return;
+        }
+
+        var mounted = hosts.Values.Where(h => h.State is MountState.Mounting or MountState.Mounted).ToList();
+        logger.LogInformation(
+            "Repair: unmount all and re-probe requested; draining {Count} mounted host(s), then re-probing every enabled host. " +
+            "Hosts are not parked by this (a host the user parked earlier stays parked)",
+            mounted.Count);
+
+        // 1. Drain everything that is mounted. Each drain is the ordinary one: unmount, then verify
+        //    against listmounts; a drain that cannot be confirmed stays Draining and retries on its
+        //    own schedule, and the host only reaches Disabled once the unmount is confirmed.
+        var drained = new HashSet<HostRuntime>();
+        foreach (var host in mounted)
+        {
+            await BeginDrainAsync(host, "repair: unmount all and re-probe", DrainCause.Repair, ct).ConfigureAwait(false);
+            drained.Add(host);
+        }
+
+        // 2. A host whose drain confirmed is re-enabled by CompleteDrainAsync (queued behind this
+        //    command, so every drain above has finished first). Everything else that is enabled is
+        //    re-probed now, with its backoff reset.
+        foreach (var host in hosts.Values.Where(h => h.AdministrativelyEnabled && !drained.Contains(h)).ToList())
+        {
+            switch (host.State)
+            {
+                case MountState.Ready:
+                case MountState.Unreachable:
+                    // No tier split, as for ResumeAsync/NetworkChangedAsync: the user asked, and it is
+                    // one bounded probe per host. A persistent host that was unreachable and now
+                    // answers goes Ready and mounts (unless parked) -- after this probe, never before.
+                    host.Backoff = BackoffState.Initial;
+                    await ForceImmediateIdleProbeAsync(host, "repair: re-probe", ct).ConfigureAwait(false);
+                    break;
+
+                case MountState.Disabled:
+                    // Waiting out a failed-mount pacing timer. A repair is a fresh start: try now,
+                    // from the first rung. A failure still paces the next attempt.
+                    host.ProbeTimer?.Dispose();
+                    host.ProbeTimer = null;
+                    host.MountRetryBackoff = BackoffState.Initial;
+                    await EnableHostAsync(host, "repair: re-probe", ct).ConfigureAwait(false);
+                    break;
+
+                default:
+                    // Draining (started before this command): owns its own re-enable. Probing and
+                    // Mounting/Mounted cannot be observed between channel continuations.
+                    break;
+            }
         }
     }, cancellationToken);
 
@@ -1643,7 +1708,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             }
             else
             {
-                Enqueue(ct2 => EnableHostAsync(host, "auto re-enable after drain", ct2));
+                // Repair is not a parking cause (the UserUnmount block above is the only one): the
+                // host is re-enabled exactly as after any automatic drain, and a persistent host
+                // remounts only after the probe that re-enable runs (Invariant I1).
+                var trigger = host.DrainCause == DrainCause.Repair
+                    ? "repair: re-probe after unmount all"
+                    : "auto re-enable after drain";
+                Enqueue(ct2 => EnableHostAsync(host, trigger, ct2));
             }
         }
 

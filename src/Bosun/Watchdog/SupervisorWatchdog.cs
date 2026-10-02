@@ -216,7 +216,10 @@ public sealed class SupervisorWatchdog : IHostedService, IDisposable
         List<DateTimeOffset> updated = [.. restarts, now];
         try
         {
-            history.Save(updated);
+            // The reason goes in with the timestamp so the replacement can tell the user why it exists
+            // (the watchdog.restarted notice, bs-aoz). Same write, so it cannot be recorded without
+            // the restart being counted, or the reverse.
+            history.Save(updated, new LastRestart(now, reason));
         }
         catch (Exception ex)
         {
@@ -250,7 +253,7 @@ public sealed class SupervisorWatchdog : IHostedService, IDisposable
         var launched = false;
         try
         {
-            launched = await restarter.RestartAsync(reason, CancellationToken.None).ConfigureAwait(false);
+            launched = await restarter.RestartAsync(reason, RestartKind.Watchdog, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

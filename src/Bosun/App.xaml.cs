@@ -4,6 +4,8 @@ using Bosun.Configuration;
 using Bosun.Health;
 using Bosun.Hosting;
 using Bosun.Import;
+using Bosun.Rclone.Process;
+using Bosun.Repair;
 using Bosun.SessionMonitor;
 using Bosun.Status;
 using Bosun.Supervisor;
@@ -102,7 +104,9 @@ public partial class App : Application
         // process outlives the wait nothing is killed: TryBecomePrimary decides as the mutex allows
         // (a held mutex means this launch just activates the running instance and exits), and the
         // overrun is recorded.
-        if (RestartHandoffArguments.TryGetOldProcessId(e.Args, out var oldProcessId))
+        // Either restart flag (the watchdog's, or the user's own "Restart Bosun", bs-aoz) names a
+        // process to wait for.
+        if (RestartHandoffArguments.TryGetHandoff(e.Args, out var restartKind, out var oldProcessId))
         {
             try
             {
@@ -111,7 +115,8 @@ public partial class App : Application
                 if (handoff == HandoffWaitResult.TimedOut)
                 {
                     _bootstrap.RecordPreLoggerFailure(
-                        $"Bosun was restarted by its watchdog, but the previous instance (pid {oldProcessId}) was still " +
+                        $"Bosun was restarted ({(restartKind == RestartKind.Manual ? "at the user's request" : "by its watchdog")}), " +
+                        $"but the previous instance (pid {oldProcessId}) was still " +
                         $"running after {OldInstanceWaiter.DefaultTimeout.TotalSeconds:0} s. Nothing was killed; this " +
                         "instance is proceeding as the single-instance lock allows, which usually means it exits.",
                         null);
@@ -207,16 +212,43 @@ public partial class App : Application
         _statusReadModel = readModel;
         IStatusReadModel statusReadModel = readModel;
         var launcher = new Win32ExternalLauncher(services.GetRequiredService<ILogger<Win32ExternalLauncher>>());
+
+        // bs-yyg: the one health model the orchestrator pushes into; the window banner and the tray
+        // both read it, so they cannot disagree.
+        var appHealth = services.GetRequiredService<IAppHealth>();
+
+        // bs-aoz: the repair actions. rclone is resolved on demand, not here: RcloneProcessService
+        // reads the config when it is first resolved, and if the config never loaded that throws. A
+        // Restart rclone click then reports "nothing to restart" instead of this method failing.
+        var repairCommands = new RepairCommands(
+            supervisor,
+            () =>
+            {
+                try
+                {
+                    return services.GetService<RcloneProcessService>();
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "rclone's process service could not be resolved for Restart rclone");
+                    return null;
+                }
+            },
+            () => services.GetService<IAppRestarter>(),
+            new MessageBoxRepairPrompt(),
+            services.GetRequiredService<TimeProvider>(),
+            appHealth,
+            services.GetRequiredService<ILogger<RepairCommands>>());
+
         var actionDispatcher = new HostActionDispatcher(
             supervisor,
             launcher,
             services.GetRequiredService<ILogger<HostActionDispatcher>>(),
-            services.GetRequiredService<Bosun.Diagnostics.CopyDiagnosticsCommand>());
+            services.GetRequiredService<Bosun.Diagnostics.CopyDiagnosticsCommand>(),
+            repairCommands,
+            services.GetService<IRestartNotice>());
 
         _mainWindow = new MainWindow { Logger = services.GetRequiredService<ILogger<MainWindow>>() };
-        // bs-yyg: the one health model the orchestrator pushes into; the window banner and the tray
-        // both read it, so they cannot disagree.
-        var appHealth = services.GetRequiredService<IAppHealth>();
         _mainWindow.Configure(statusReadModel, actionDispatcher, appHealth);
 
         // bs-ww9.8 / ADR-019: host create/edit/delete. IHostConfigWriter is registered by the
