@@ -64,6 +64,15 @@ public interface IAppHealthReporter
     /// watchdog's call (bs-6to, via <see cref="ReportIssue"/>), because judging staleness needs the
     /// watchdog's thresholds.</summary>
     void ObserveSupervisorLoop(bool started, bool isRunning);
+
+    /// <summary>
+    /// Bosun is exiting on purpose (bs-6to). From here on, "rclone is not running" and "the supervisor
+    /// loop has stopped" are the shutdown itself, not faults, so they stop being derived as issues;
+    /// otherwise a normal exit flashes a Faulted banner while the children are being stopped. Issues
+    /// a source reported explicitly (<see cref="ReportIssue"/>) are untouched. One-way: there is no
+    /// un-shutdown.
+    /// </summary>
+    void BeginShutdown();
 }
 
 /// <summary>Options for <see cref="AppHealthService"/>.</summary>

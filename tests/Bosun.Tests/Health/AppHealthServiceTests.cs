@@ -513,4 +513,41 @@ public sealed class AppHealthServiceTests
         Assert.False(h.Now.IsStarting);
         Assert.Equal(HealthIssueCodes.RcloneNotRunning, Assert.Single(h.Now.Issues).Code);
     }
+
+    [Fact]
+    public void BeginShutdown_stops_rclone_and_the_loop_ending_from_being_issues()
+    {
+        // bs-6to: on a normal exit rclone stops and the loop ends. That is the shutdown, not a fault.
+        using var h = new Harness(grace: TimeSpan.Zero);
+        h.Health.ObserveRclone(RcloneProcessStatus.Healthy, RcloneProcessFaultKind.None, null);
+        h.Health.ObserveSupervisorLoop(started: true, isRunning: true);
+        Assert.True(h.Now.IsOk);
+
+        h.Health.BeginShutdown();
+        h.Health.ObserveRclone(RcloneProcessStatus.Stopped, RcloneProcessFaultKind.None, null);
+        h.Health.ObserveSupervisorLoop(started: true, isRunning: false);
+
+        Assert.True(h.Now.IsOk, string.Join(", ", h.Now.Issues.Select(i => i.Code)));
+    }
+
+    [Fact]
+    public void BeginShutdown_leaves_explicitly_reported_issues_alone()
+    {
+        using var h = new Harness(grace: TimeSpan.Zero);
+        h.Health.ReportIssue(HealthIssueCodes.WatchdogSupervisorStalled, HealthLevel.Faulted, "stalled", "detail");
+
+        h.Health.BeginShutdown();
+
+        Assert.Contains(h.Now.Issues, i => i.Code == HealthIssueCodes.WatchdogSupervisorStalled);
+    }
+
+    [Fact]
+    public void Without_BeginShutdown_rclone_stopping_is_an_issue()
+    {
+        // The counterpart that makes the two tests above mean something.
+        using var h = new Harness(grace: TimeSpan.Zero);
+        h.Health.ObserveRclone(RcloneProcessStatus.Stopped, RcloneProcessFaultKind.None, null);
+
+        Assert.Equal(HealthIssueCodes.RcloneNotRunning, Assert.Single(h.Now.Issues).Code);
+    }
 }
