@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using Bosun.Hosting;
+using Microsoft.Win32.SafeHandles;
 
 namespace Bosun.Tests.Hosting;
 
@@ -99,14 +101,29 @@ public sealed class MutexSingleInstanceGuardTests
         // already created the object) on a background OS thread, and let that thread exit
         // WITHOUT calling ReleaseMutex. Mutex ownership in Windows is per-thread, so the thread
         // terminating abandons it -- exactly what happens when the owning process crashes.
+        //
+        // Thread.Join() is NOT a sufficient signal that the mutex has been abandoned (bs-8e6).
+        // It returns when the runtime considers the managed thread finished; the kernel abandons
+        // the mutexes a thread still owns only while tearing the OS thread down, a moment later.
+        // Under CPU contention that gap is wide enough to land in: TryAcquire's WaitOne(0) then
+        // sees a mutex "held by a live thread" and returns false, with no
+        // AbandonedMutexException. Reproduced (1 in 80 isolated runs with every core saturated;
+        // the failure's own DIAGNOSIS text read "no AbandonedMutexException; WaitOne(0) returned
+        // False"). The kernel signals a thread object only AFTER its owned mutexes have been
+        // abandoned, so waiting on the abandoning thread's OS handle is the deterministic signal.
+        using var osThreadTerminated = new OsThreadTerminationSignal();
         var thread = new Thread(() =>
         {
+            osThreadTerminated.CaptureCurrentThread();
             using var abandoned = new Mutex(initiallyOwned: false, name, out _);
             abandoned.WaitOne();
             // Deliberately no ReleaseMutex() here.
         });
         thread.Start();
         thread.Join();
+        Assert.True(
+            osThreadTerminated.Wait(TimeSpan.FromSeconds(30)),
+            "The abandoning thread's OS handle was never signalled, so the mutex cannot have been abandoned.");
 
         using var guard = new MutexSingleInstanceGuard(name);
 
@@ -120,12 +137,11 @@ public sealed class MutexSingleInstanceGuardTests
         // of what the handler did. Verified: with the AbandonedMutexException handler deliberately
         // broken, the single-attempt version fails (correct) and the retrying version PASSES.
         //
-        // This test failed once on CI while passing on the run before it with byte-identical test
-        // code (the commit between them was documentation only). It could not be reproduced
-        // locally in 2000 iterations, nor in a further 2000 with the process pinned to a single
-        // core to force contention. The mechanism is therefore UNKNOWN -- see bs-vyj. The obvious
-        // timing story (the OS marking abandonment fractionally after Thread.Join returns) is
-        // unconfirmed and both experiments argue against it; do not write it down as the cause.
+        // This test failed intermittently (bs-vyj on CI, bs-8e6 locally). The mechanism is now
+        // known and fixed above: Thread.Join() returned before the kernel had abandoned the
+        // mutex. It was reproduced only with every core saturated, which is why 4000 quiet local
+        // iterations never saw it.
+        //
         var acquired = guard.TryAcquire();
 
         // Captured only on failure, so that the next CI occurrence reports the MECHANISM instead
@@ -250,6 +266,70 @@ public sealed class MutexSingleInstanceGuardTests
         var exception = Record.Exception(guard.Dispose);
 
         Assert.Null(exception);
+    }
+
+    /// <summary>
+    /// Becomes signalled once the OS thread that called <see cref="CaptureCurrentThread"/> has
+    /// fully terminated. Test-only; the single use is making "the previous holder died" an
+    /// observable fact rather than a bet on scheduling (see
+    /// <see cref="TryAcquire_TreatsAnAbandonedMutex_AsASuccessfulAcquisition"/>).
+    /// </summary>
+    /// <remarks>
+    /// The one place the test project needs raw interop: no managed API exposes "this OS thread
+    /// is gone". It is deliberately tiny and unrelated to <c>ISessionMonitor</c>'s interop, which
+    /// is about product behaviour; nothing here ships.
+    /// </remarks>
+    private sealed class OsThreadTerminationSignal : IDisposable
+    {
+        private const uint Synchronize = 0x00100000;
+
+        private readonly ManualResetEventSlim _captured = new(initialState: false);
+        private SafeWaitHandle? _threadHandle;
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern SafeWaitHandle OpenThread(uint desiredAccess, bool inheritHandle, uint threadId);
+
+        /// <summary>Must be called from the thread whose termination is to be observed.</summary>
+        public void CaptureCurrentThread()
+        {
+            var handle = OpenThread(Synchronize, inheritHandle: false, GetCurrentThreadId());
+            if (handle.IsInvalid)
+            {
+                throw new InvalidOperationException($"OpenThread failed (Win32 error {Marshal.GetLastWin32Error()}).");
+            }
+
+            _threadHandle = handle;
+            _captured.Set();
+        }
+
+        public bool Wait(TimeSpan timeout)
+        {
+            if (!_captured.Wait(timeout) || _threadHandle is null)
+            {
+                return false;
+            }
+
+            using var waitHandle = new ThreadWaitHandle(_threadHandle);
+            return waitHandle.WaitOne(timeout);
+        }
+
+        public void Dispose()
+        {
+            _threadHandle?.Dispose();
+            _captured.Dispose();
+        }
+
+        private sealed class ThreadWaitHandle : WaitHandle
+        {
+            public ThreadWaitHandle(SafeWaitHandle handle)
+            {
+                // Not owned: the enclosing signal disposes the handle exactly once.
+                SafeWaitHandle = new SafeWaitHandle(handle.DangerousGetHandle(), ownsHandle: false);
+            }
+        }
     }
 
     /// <summary>
