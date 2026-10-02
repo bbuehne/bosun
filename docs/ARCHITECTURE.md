@@ -305,6 +305,12 @@ right before building any UI.
    mean a drive the user explicitly unmounted returns when they change some other
    host's tab colour. Only an explicit action clears what an explicit action set.
 
+   The **repair** "Unmount all & re-probe" (`RepairAllAsync`, ADR-020's `bs-aoz`
+   amendment) neither parks nor un-parks. It drains every mounted host with its own
+   drain cause; a persistent host then re-enters through `Probing -> Ready` and
+   remounts after a fresh probe, an on-demand host rests in `Ready`, and a host the
+   user parked earlier stays parked.
+
 ### Backoff
 
 `Unreachable → Probing` uses the configured backoff ladder, default

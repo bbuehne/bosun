@@ -116,6 +116,8 @@ These cannot be automated and must be run by hand before any release.
 | Profile lost its colours or font after a rename | Terminal derives profile identity from the GUID, and Bosun derives that GUID from the host's **config key**, not `display_name` (ADR-013). Renaming `display_name` should be safe; renaming the TOML key is what creates a new profile. |
 | Terminal profiles duplicated | Something wrote to `settings.json`. Invariant I5 violation. |
 | Files fail to save from an editor | `vfs_cache_mode` below `writes`. Validation should have caught this. |
+| The health banner is showing, or a drive is stuck | Use the repair buttons in the banner, or **Repair** in the tray menu (ADR-020). *Restart rclone* replaces `rclone rcd` and reconciles every host. *Unmount all & re-probe* drops every mounted drive and brings persistent hosts back after a fresh check (it does not park hosts or un-park ones you unmounted). *Restart Bosun* starts a fresh Bosun and shows its window; it does not count against the watchdog's restart limit. Each asks first if a drive would disconnect. Use **Copy diagnostics** before restarting if you want to keep the evidence. |
+| "Bosun restarted itself" notice | The watchdog found the mount supervisor stalled and restarted Bosun (the window stays hidden for that). The notice gives the time and reason; **Dismiss** removes it, or it goes after 24 hours. The log has the details. |
 
 ## Logs
 

@@ -1425,3 +1425,53 @@ left open, recorded so they are not relitigated:
 - *Pending supervisor commands fail, they do not wait.* When the loop exits for any
   reason, every command waiting on it fails with `SupervisorStoppedException`, and later
   commands fail at once. A caller's cancellation token now releases its wait.
+
+**Amendment (`bs-aoz`): how Decision 5 (the repair actions) was built, and two follow-ups from
+`bs-6to`.** Choices the decision text left open:
+
+- *"Unmount all & re-probe" is a repair, so it does not park (ADR-015).* A user unmount parks a
+  host because it says "keep this down". A repair says "drop everything and start clean". The
+  supervisor therefore has a separate command, `IMountSupervisor.RepairAllAsync`, whose drain
+  cause (`DrainCause.Repair`) re-enables the host exactly as an automatic drain does and never
+  sets `UserParked`. A persistent host remounts only through `Disabled -> Probing -> Ready ->
+  Mounting`, so it is probed (shallow, then deep) after the unmount and before the remount
+  (Invariant I1). An on-demand host rests in `Ready` and stays unmounted. All mounted hosts drain
+  before any host is re-enabled, and a host whose unmount rclone does not confirm stays `Draining`
+  rather than reaching `Disabled`. Every other enabled host is re-probed at once with its backoff
+  reset; one waiting out a failed-mount pacing timer gets a fresh attempt from the first rung.
+  The command is refused while suspended (Invariant I8).
+- *A repair does not un-park either.* A host the user unmounted earlier is not mounted, so there
+  is nothing to drain, and it stays parked (still probed). ADR-015's amendment says only an
+  explicit action on that host clears a park; a repair click for another problem is not one.
+  The alternative, remounting everything the repair touches, would bring back a drive the user
+  took down on purpose to run a backup, with nothing on screen to say why.
+- *"Restart rclone" adds one public method, `RcloneProcessService.RestartAsync`, and no second
+  launch path.* It stops the supervise loop (so the loop does not read the kill as a crash), kills
+  the old rcd and waits for it to exit, then calls the same `AttemptStartAsync` the first start
+  and every crash restart use. The port guard, Job Object and fault messages all apply. The
+  status goes to `Starting` before the old process is touched, which closes the mounting gate.
+  The supervisor learns that rcd's mounts are gone from the `Healthy` transition that
+  `StartupOrchestrator` already turns into `OnRcloneRestartedAsync` (reconcile against
+  `mount/listmounts`). Nothing assumes it.
+- *Restart Bosun reuses `IAppRestarter` with a `RestartKind`.* A manual restart launches the
+  replacement with `--restarted-by-user <pid>` (the watchdog's flag is `--restarted-by-watchdog`),
+  and drops `--autostart` so the window shows. It is never recorded in the watchdog's restart
+  history: the repair command has no reference to that store, so it cannot be. A manual restart
+  neither counts against the 3-per-hour limit nor is blocked by it.
+- *A watchdog restart starts hidden.* `--restarted-by-watchdog` is a `LaunchContext` of its own
+  that does not show the window, whether or not `--autostart` was present. The user's restart
+  shows it.
+- *The "Bosun restarted itself" notice (`watchdog.restarted`, Degraded).* The old instance writes
+  the reason into the restart-history file in the same write that counts the restart
+  (`Last: { At, Reason }`); the new instance reads it. The restarts list is unchanged, so an old
+  file loads (no reason) and an old build reading a new file still enforces the limit. A record
+  older than 10 minutes belongs to an earlier restart and is not used. The notice then says the
+  reason was not recorded. It clears on Dismiss or 24 hours after it appears.
+- *Where the buttons are and in what order.* The tray has a "Repair" submenu and the banner has
+  the same actions, both through `HostActionDispatcher.Repair`. All three repairs are always
+  offered while the banner is up. `rclone.*` issues lead with Restart rclone; every other issue
+  leads with Restart Bosun; the restart notice leads with Dismiss.
+- *Confirmation.* A `MessageBox` behind `IRepairPrompt` (the repo's existing pattern). Unmount all
+  and Restart rclone ask only when a drive is mounted. Restart Bosun always asks.
+- *A stuck Unmount all does not lock out Restart Bosun.* Each repair has its own in-flight guard,
+  and Unmount all gives up after 90 s and says so.
