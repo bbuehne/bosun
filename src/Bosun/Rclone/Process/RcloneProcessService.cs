@@ -54,11 +54,19 @@ public sealed class RcloneProcessService(
     TimeProvider timeProvider,
     ILogger<RcloneProcessService> logger,
     RcloneRcCredential credential,
-    IRcPortGuard? portGuard = null) : IHostedService, IAsyncDisposable
+    IRcPortGuard? portGuard = null) : IHostedService, IAsyncDisposable, IRcloneProcessRestarter
 {
     private readonly object _gate = new();
+
+    // Serialises RestartAsync callers with each other and with StopAsync, so a restart can never
+    // be half-way through launching a process while shutdown is tearing the previous one down.
+    private readonly SemaphoreSlim _restartGate = new(1, 1);
     private IRcloneProcessHandle? _handle;
     private CancellationTokenSource? _lifetimeCts;
+
+    // One per supervise loop, linked to _lifetimeCts. RestartAsync cancels just the loop (to stop it
+    // racing the restart it is performing) without ending the service's lifetime.
+    private CancellationTokenSource? _loopCts;
     private Task? _superviseLoopTask;
     private string? _lastPortHeldMessage;
 
@@ -85,12 +93,128 @@ public sealed class RcloneProcessService(
         // Everything else -- success, or a retriable fault -- hands off to the background loop,
         // which either waits for the healthy process to exit, or keeps retrying. StartAsync
         // itself must return promptly rather than block host startup on indefinite retries.
-        _superviseLoopTask = SuperviseAsync(_lifetimeCts.Token);
+        StartSuperviseLoop();
+    }
+
+    private void StartSuperviseLoop()
+    {
+        _loopCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts!.Token);
+        _superviseLoopTask = SuperviseAsync(_loopCts.Token);
+    }
+
+    /// <summary>
+    /// Stops the current <c>rclone rcd</c> and starts a fresh one, on request (bs-aoz, ADR-020
+    /// Decision 5 "Restart rclone"). Returns <see langword="true"/> if the new process answered
+    /// <c>core/version</c>; <see langword="false"/> if it did not (the fault is on
+    /// <see cref="Status"/>/<see cref="FaultKind"/> and the supervise loop keeps retrying a
+    /// retriable one, exactly as after a crash) or if the service is not running or is stopping.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One launch path.</b> The new process comes from <see cref="AttemptStartAsync"/> -- the
+    /// same method the first start and every crash restart use -- so the port guard, the Job
+    /// Object assignment and the accurate fault messages all apply, and a successful restart ends in
+    /// the same <see cref="RcloneProcessStatus.Healthy"/> transition. That transition is what makes
+    /// <c>StartupOrchestrator</c> reconcile every host from scratch
+    /// (<c>IMountSupervisor.OnRcloneRestartedAsync</c>); this method never tells the supervisor
+    /// anything itself, and never mounts or unmounts. The mounts rcd held die with it. Bosun learns
+    /// that through the reconciliation against <c>mount/listmounts</c>, not by assuming.
+    /// </para>
+    /// <para>
+    /// <b>Order.</b> (1) the status goes to <see cref="RcloneProcessStatus.Starting"/> first, which
+    /// closes the mounting gate before the old process is touched; (2) the supervise loop is
+    /// stopped, so it cannot see the kill as an unexpected death and launch a second process;
+    /// (3) the old process is killed and its exit confirmed (bounded by
+    /// <see cref="RcloneProcessServiceOptions.StopTimeout"/>); (4) only then is the new process
+    /// started. A second concurrent call waits for the first.
+    /// </para>
+    /// </remarks>
+    public async Task<bool> RestartAsync(CancellationToken cancellationToken = default)
+    {
+        var lifetime = _lifetimeCts;
+        if (lifetime is null || lifetime.IsCancellationRequested)
+        {
+            logger.LogWarning("rclone rcd restart requested but the service is not running (or is stopping); ignoring");
+            return false;
+        }
+
+        await _restartGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (lifetime.IsCancellationRequested)
+            {
+                logger.LogWarning("rclone rcd restart requested but the service is stopping; ignoring");
+                return false;
+            }
+
+            logger.LogInformation("Restarting rclone rcd on request (current status {Status})", Status);
+
+            // 1. Close the mounting gate before the old process is touched.
+            SetStatus(RcloneProcessStatus.Starting, RcloneProcessFaultKind.None, null);
+
+            // 2. The loop must not observe the kill below as the process dying on its own.
+            _loopCts?.Cancel();
+            if (_superviseLoopTask is not null)
+            {
+                await _superviseLoopTask.ConfigureAwait(false);
+            }
+
+            _loopCts?.Dispose();
+            _loopCts = null;
+
+            var succeeded = false;
+            try
+            {
+                // 3. The old process, if any, is gone before the new one exists.
+                await KillAndConfirmExitAsync(cancellationToken).ConfigureAwait(false);
+
+                // 4. The one launch path. Linked so shutdown (the lifetime) and the caller can both stop it.
+                using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
+                succeeded = await AttemptStartAsync(attemptCts.Token, announceStarting: false).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutdown or the caller gave up; the finally block decides about the loop.
+                logger.LogInformation("rclone rcd restart was cancelled");
+            }
+            finally
+            {
+                // The loop is what keeps retrying a retriable fault and what notices a later
+                // crash, so it always comes back -- except when the fault is terminal
+                // (ExecutableNotFound: retrying cannot help) or the service is shutting down.
+                var terminal = !succeeded && FaultKind == RcloneProcessFaultKind.ExecutableNotFound;
+                if (!terminal && !lifetime.IsCancellationRequested)
+                {
+                    StartSuperviseLoop();
+                }
+            }
+
+            if (succeeded)
+            {
+                logger.LogInformation("rclone rcd restarted and is healthy");
+            }
+            else
+            {
+                logger.LogWarning(
+                    "rclone rcd restart did not produce a healthy process: {Kind}: {Message}", FaultKind, LastFaultMessage);
+            }
+
+            return succeeded;
+        }
+        finally
+        {
+            _restartGate.Release();
+        }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         _lifetimeCts?.Cancel();
+
+        // A restart in flight sees the cancelled lifetime and unwinds; wait for it, so the process
+        // it may have just launched is the one KillAndConfirmExitAsync below stops.
+        await _restartGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        _restartGate.Release();
 
         // Deliberately a plain await, not Task.WaitAsync(cancellationToken): empirically,
         // Task.WaitAsync's continuation is not guaranteed to run inline on the thread that
@@ -115,6 +239,7 @@ public sealed class RcloneProcessService(
     {
         _lifetimeCts?.Cancel();
         _lifetimeCts?.Dispose();
+        _loopCts?.Dispose();
 
         IRcloneProcessHandle? handle;
         lock (_gate)
@@ -227,9 +352,12 @@ public sealed class RcloneProcessService(
     /// <see cref="Status"/>/<see cref="FaultKind"/> and raises <see cref="StatusChanged"/>
     /// exactly once for the outcome. Returns <see langword="true"/> only on a confirmed-healthy
     /// process.</summary>
-    private async Task<bool> AttemptStartAsync(CancellationToken cancellationToken)
+    private async Task<bool> AttemptStartAsync(CancellationToken cancellationToken, bool announceStarting = true)
     {
-        SetStatus(RcloneProcessStatus.Starting, RcloneProcessFaultKind.None, null);
+        if (announceStarting)
+        {
+            SetStatus(RcloneProcessStatus.Starting, RcloneProcessFaultKind.None, null);
+        }
 
         // ADR-020 §2: never launch into a held port. A stale rcd of Bosun's own is killed; any
         // other holder is reported by PID and image path, and the caller's RestartDelay loop

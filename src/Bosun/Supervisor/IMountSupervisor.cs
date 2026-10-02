@@ -115,6 +115,25 @@ public interface IMountSupervisor
     /// <see cref="ResumeAsync"/> (ADR-014).</summary>
     Task NetworkChangedAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// "Unmount all and re-probe" (bs-aoz, ADR-020 Decision 5): a repair, not a preference. Every
+    /// host in <see cref="MountState.Mounted"/> or <see cref="MountState.Mounting"/> drains through
+    /// the ordinary drain path (unmount, verified against <c>mount/listmounts</c>); once a host's
+    /// unmount is confirmed it re-enters <c>Disabled -&gt; Probing -&gt; Ready</c> like any other
+    /// re-enable, so a persistent host remounts only after a fresh successful probe (Invariant I1)
+    /// and an on-demand host rests in <see cref="MountState.Ready"/> until the user asks. Every
+    /// idle host is re-probed immediately with its backoff reset.
+    /// </summary>
+    /// <remarks>
+    /// <b>Parking (ADR-015; amended by ADR-020's bs-aoz amendment).</b> This command neither parks a
+    /// host nor un-parks one. The drain is <c>DrainCause.Repair</c>, not a user unmount, so nothing
+    /// that was unparked becomes parked. A host the user parked earlier is not mounted, so there is
+    /// nothing to drain, and it stays parked (still probed): ADR-015 lets only an explicit action on
+    /// that host clear a park, and a repair click for some other problem is not one.
+    /// Refused (logged, no effect) while the system is suspended (Invariant I8 in reverse).
+    /// </remarks>
+    Task RepairAllAsync(CancellationToken cancellationToken = default);
+
     /// <summary>Call whenever <c>RcloneProcessService.StatusChanged</c> reports
     /// <c>RcloneProcessStatus.Healthy</c> -- including the very first start. A restarted
     /// <c>rclone rcd</c> knows nothing about mounts this supervisor believes are up

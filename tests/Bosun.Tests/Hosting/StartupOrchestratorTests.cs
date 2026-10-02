@@ -292,6 +292,37 @@ public sealed class StartupOrchestratorTests
     }
 
     [Fact]
+    public async Task RestartingRcloneOnRequest_ReconcilesTheSupervisorFromTheHealthyTransition_AndRemountsPersistentHosts()
+    {
+        // bs-aoz "Restart rclone": RcloneProcessService.RestartAsync kills rcd (and with it every
+        // mount it held) and starts a fresh one. Nothing tells the supervisor directly. It learns
+        // from the Healthy transition the orchestrator already turns into OnRcloneRestartedAsync,
+        // which reconciles against listmounts, drains the host, and remounts it after a new probe.
+        var hostToml = HostBlock("nas", MountMode.Persistent, drive: "P:");
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostToml));
+        await harness.StartAsync();
+        Assert.Single(harness.RcloneClient.MountCalls);
+        Assert.Equal(MountState.Mounted, harness.MountSupervisor.GetSnapshot().Single(h => h.HostKey == "nas").State);
+
+        // What a fresh rcd's mount/listmounts looks like: the old process's mounts are gone.
+        await harness.RcloneClient.UnmountAsync("P:", CancellationToken.None);
+        harness.RcloneClient.UnmountCalls.Clear();
+        var rcloneService = harness.Services.GetRequiredService<RcloneProcessService>();
+
+        var restarted = await rcloneService.RestartAsync();
+
+        Assert.True(restarted);
+        Assert.Equal(2, harness.Launcher.StartCalls.Count);
+
+        // SupervisorTime is deliberately NOT advanced (step zero): the 30 s reconciliation tick must
+        // not be what recovers the mount. Only the Healthy-transition reconcile can.
+        await AdvanceUntilAsync(harness.SupervisorTime, TimeSpan.Zero, () => harness.RcloneClient.MountCalls.Count == 2);
+
+        Assert.Equal(MountState.Mounted, harness.MountSupervisor.GetSnapshot().Single(h => h.HostKey == "nas").State);
+        Assert.Equal(2, harness.RcloneClient.MountCalls.Count);
+    }
+
+    [Fact]
     public async Task ProvisioningFailsForOneHostButNotOthers()
     {
         var hostA = HostBlock("host-a", MountMode.None);

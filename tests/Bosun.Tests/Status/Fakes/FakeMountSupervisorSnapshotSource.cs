@@ -44,6 +44,8 @@ internal sealed class FakeMountSupervisorSnapshotSource : IMountSupervisor
 
     public Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
+    public Task RepairAllAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException();
 
