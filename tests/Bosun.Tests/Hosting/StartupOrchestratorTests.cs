@@ -477,6 +477,54 @@ public sealed class StartupOrchestratorTests
     }
 
     [Fact]
+    public async Task Stop_WithAWedgedSupervisor_FinishesWhenItsTokenIsCancelled_InsteadOfHangingForever()
+    {
+        // bs-6to / ADR-020 Decision 7. The 2026-10-01 AppHang: the supervisor loop was wedged, so the
+        // StopAsync command queued behind it was never reached, and shutdown waited on it forever.
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]));
+        await harness.StartAsync();
+
+        // Wedge the loop inside an action that ignores cancellation, like a real blocked call.
+        var wedged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.MountSupervisor.Enqueue(async _ =>
+        {
+            parked.SetResult();
+            await wedged.Task;
+        });
+        await parked.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        using var stopToken = new CancellationTokenSource();
+        var stop = harness.Orchestrator.StopAsync(stopToken.Token);
+        Assert.False(stop.IsCompleted, "Stop should be waiting on the wedged supervisor");
+
+        stopToken.Cancel();
+
+        await stop.WaitAsync(TimeSpan.FromSeconds(10));
+        wedged.SetResult(); // let the parked action go so teardown is clean
+    }
+
+    [Fact]
+    public async Task Stop_DoesNotTurnTheShutdownItselfIntoAHealthIssue()
+    {
+        // bs-6to: while Bosun is exiting, rclone stopping and the supervisor loop ending are the
+        // shutdown, not faults -- the banner must not flash "rclone is not running" on a normal exit.
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]), withHealth: true);
+        await harness.StartAsync();
+        Assert.True(harness.Health.Current.IsOk);
+
+        await harness.StopAsync();
+        harness.HealthTime.Advance(TimeSpan.FromMinutes(5)); // well past the startup grace period
+        var reporter = harness.Services.GetRequiredService<IAppHealthReporter>();
+        reporter.ObserveRclone(RcloneProcessStatus.Stopped, RcloneProcessFaultKind.None, null);
+        reporter.ObserveSupervisorLoop(started: true, isRunning: false);
+
+        Assert.True(harness.Health.Current.IsOk, string.Join(", ", harness.Health.Current.Issues.Select(i => i.Code)));
+    }
+
+    [Fact]
     public async Task Health_RcloneRecoveringAtRuntime_ClearsTheIssue()
     {
         var host = HostBlock("nas", MountMode.None);

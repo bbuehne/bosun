@@ -11,6 +11,7 @@ using Bosun.UI;
 using Bosun.UI.Autostart;
 using Bosun.UI.HostEditor;
 using Bosun.UI.Tray;
+using Bosun.Watchdog;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -53,6 +54,11 @@ public partial class App : Application
     // constructing an App.
     private readonly BootstrapOrchestrator _bootstrap;
 
+    // bs-6to / ADR-020 Decision 7: bounds how long exit may take. Created here, not by the host,
+    // because exit must be bounded even when no host exists (it failed to build, or never started),
+    // and shared with the host so the watchdog's restart and OnExit use one deadline.
+    private readonly ShutdownGuard _shutdownGuard;
+
     private IHost? _host;
     private ILogger<App>? _logger;
 
@@ -73,8 +79,13 @@ public partial class App : Application
     {
         _singleInstanceGuard = new MutexSingleInstanceGuard();
         SingleInstance = new SingleInstanceOrchestrator(_singleInstanceGuard, new EventWaitHandleActivationChannel());
+        _shutdownGuard = new ShutdownGuard(
+            TimeProvider.System,
+            new EnvironmentProcessExiter(),
+            () => _logger,
+            message => _bootstrap?.RecordPreLoggerFailure(message, null));
         _bootstrap = new BootstrapOrchestrator(
-            () => BosunHostFactory.CreateHost(),
+            () => BosunHostFactory.CreateHost(shutdownGuard: _shutdownGuard),
             new MessageBoxCatastrophicStartupNotifier(),
             new BootstrapDiagnosticSink(),
             _singleInstanceGuard);
@@ -83,6 +94,34 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // bs-6to / ADR-020 Consequences: a Bosun that the watchdog launched to replace a stalled one
+        // starts while the old one still holds the single-instance mutex, so it waits -- boundedly --
+        // for the old process to be gone BEFORE trying to take it. Nothing else has happened yet (no
+        // host, no log directory), which is what lets this sit ahead of TryBecomePrimary. If the old
+        // process outlives the wait nothing is killed: TryBecomePrimary decides as the mutex allows
+        // (a held mutex means this launch just activates the running instance and exits), and the
+        // overrun is recorded.
+        if (RestartHandoffArguments.TryGetOldProcessId(e.Args, out var oldProcessId))
+        {
+            try
+            {
+                var handoff = await new OldInstanceWaiter(new SystemProcessExitProbe(), TimeProvider.System)
+                    .WaitForExitAsync(oldProcessId, OldInstanceWaiter.DefaultTimeout);
+                if (handoff == HandoffWaitResult.TimedOut)
+                {
+                    _bootstrap.RecordPreLoggerFailure(
+                        $"Bosun was restarted by its watchdog, but the previous instance (pid {oldProcessId}) was still " +
+                        $"running after {OldInstanceWaiter.DefaultTimeout.TotalSeconds:0} s. Nothing was killed; this " +
+                        "instance is proceeding as the single-instance lock allows, which usually means it exits.",
+                        null);
+                }
+            }
+            catch (Exception ex)
+            {
+                _bootstrap.RecordPreLoggerFailure("The restart handoff wait failed; proceeding without it.", ex);
+            }
+        }
 
         // Must be the first thing this method does with side effects (see the field's doc
         // comment). A second launch has, by the time TryBecomePrimary returns false, already
@@ -245,8 +284,13 @@ public partial class App : Application
         _mainWindowController.Initialize(LaunchContextDetector.Detect(args));
     }
 
-    protected override async void OnExit(ExitEventArgs e)
+    protected override void OnExit(ExitEventArgs e)
     {
+        // bs-6to / ADR-020 Decision 7: from this line, the process is forced to exit if exit has not
+        // finished within ShutdownGuard.DefaultBound, whatever it is stuck on. The UI hung on
+        // 2026-10-01 because exit waited on a wedged supervisor and Windows killed the process.
+        _shutdownGuard.BeginShutdown("application exit");
+
         // Persists whatever geometry the window currently has, whether or not it is visible right
         // now -- harmless when HideToTray already persisted it (the common path), and the only
         // thing that captures a final geometry for a user who exits via the tray's "Exit" item
@@ -261,22 +305,36 @@ public partial class App : Application
 
         if (_host is not null)
         {
-            using var cts = new CancellationTokenSource(HostStopTimeout);
-            try
+            // Run on the thread pool and waited on here, rather than awaited: this method is
+            // synchronous so the process cannot proceed past exit while the stop is still running
+            // (an async void OnExit returns at its first await). The stop never needs the UI thread,
+            // so blocking it cannot deadlock. How long this can take is bounded twice: cooperatively
+            // by HostStopTimeout, which every wait in the stop path honours, and absolutely by
+            // _shutdownGuard, which does not depend on anything below cooperating.
+            var host = _host;
+            Task.Run(async () =>
             {
-                await _host.StopAsync(cts.Token);
-                _logger?.LogInformation("Bosun host stopped.");
-            }
-            catch (OperationCanceledException)
-            {
-                _logger?.LogWarning(
-                    "Bosun host did not stop within {Timeout}; proceeding with shutdown anyway.",
-                    HostStopTimeout);
-            }
-            finally
-            {
-                _host.Dispose();
-            }
+                using var cts = new CancellationTokenSource(HostStopTimeout);
+                try
+                {
+                    await host.StopAsync(cts.Token);
+                    _logger?.LogInformation("Bosun host stopped.");
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger?.LogWarning(
+                        "Bosun host did not stop within {Timeout}; proceeding with shutdown anyway.",
+                        HostStopTimeout);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogError(ex, "Bosun host failed while stopping; proceeding with shutdown anyway.");
+                }
+                finally
+                {
+                    host.Dispose();
+                }
+            }).GetAwaiter().GetResult();
         }
 
         // Releases the named Mutex (so a restart or the next launch acquires cleanly rather than
@@ -284,6 +342,9 @@ public partial class App : Application
         // thread. Only meaningful when this was the primary instance -- the secondary-launch path
         // above already disposed it before reaching Shutdown().
         SingleInstance.Dispose();
+
+        // Finished in time: disarm the deadline.
+        _shutdownGuard.Complete();
 
         base.OnExit(e);
     }

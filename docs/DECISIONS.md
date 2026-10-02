@@ -1398,3 +1398,30 @@ nothing acted, and the maintainer asked for the opposite.
 
 *Unlimited automatic restarts.* Rejected. A deterministic startup fault would
 turn into a restart storm that hides the banner.
+
+**Amendment (`bs-6to`): how Decisions 3 and 7 were built.** Choices the decision text
+left open, recorded so they are not relitigated:
+
+- *Threshold: 3 minutes.* The loop stamps its liveness at every action boundary and when
+  every rc call or probe returns, so the longest honest silence is one call: 60 s for
+  `mount/mount`. 3 minutes is 3x that and 6x the 30 s reconciliation tick. Dead and
+  stalled loops are judged the same way, from the last stamp, so a dead loop is acted on
+  after the same threshold, not sooner. Checked every 15 s.
+- *Waking from sleep is not a stall.* A gap between two watchdog checks of more than
+  4 intervals means the machine slept; the watchdog then measures silence from the wake,
+  not from the loop's stamp from before the sleep.
+- *The restart limit survives the restart.* History is a small JSON file
+  (`%LOCALAPPDATA%\Bosun\watchdog-restarts.json`, beside `hosts.toml`) written before the
+  restart is requested. If it cannot be written, the watchdog does not restart and says
+  so. A launch that fails still counts against the limit.
+- *Handoff.* The old instance launches the new one with `--restarted-by-watchdog <pid>`
+  first, then exits. The new instance waits up to 30 s for that pid to exit before it
+  tries the single-instance mutex. If the old process outlives the wait nothing is killed:
+  the mutex decides, and the overrun is recorded.
+- *Bounded exit: 15 s.* A deadline timer is armed when exit begins (a watchdog restart
+  arms it too). If shutdown has not finished, it logs at Error and calls
+  `Environment.Exit`, with a 5 s backstop thread that terminates the process outright if
+  `Exit` itself blocks. 30 s for the handoff wait is twice that.
+- *Pending supervisor commands fail, they do not wait.* When the loop exits for any
+  reason, every command waiting on it fails with `SupervisorStoppedException`, and later
+  commands fail at once. A caller's cancellation token now releases its wait.

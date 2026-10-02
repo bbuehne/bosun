@@ -44,6 +44,7 @@ public sealed class AppHealthService : IAppHealth, IAppHealthReporter, IDisposab
     private List<Spec> startupSpecs = [];
     private bool loopStarted;
     private bool loopRunning;
+    private bool shuttingDown;
     private readonly Dictionary<string, Spec> reported = new(StringComparer.Ordinal);
 
     private AppHealth current;
@@ -180,6 +181,8 @@ public sealed class AppHealthService : IAppHealth, IAppHealthReporter, IDisposab
             loopRunning = isRunning;
         });
 
+    public void BeginShutdown() => Mutate(() => shuttingDown = true);
+
     public void Dispose()
     {
         ITimer? timer;
@@ -260,7 +263,7 @@ public sealed class AppHealthService : IAppHealth, IAppHealthReporter, IDisposab
 
         // rclone. A config that never loaded means rclone was never started, so "rclone is not
         // running" would only repeat the real cause (startup.config-invalid) under another name.
-        if (!configInvalid && rcloneStatus != RcloneProcessStatus.Healthy)
+        if (!shuttingDown && !configInvalid && rcloneStatus != RcloneProcessStatus.Healthy)
         {
             if (rcloneFault is { } fault)
             {
@@ -288,7 +291,7 @@ public sealed class AppHealthService : IAppHealth, IAppHealthReporter, IDisposab
             specs[spec.Code] = spec;
         }
 
-        if (loopStarted && !loopRunning)
+        if (!shuttingDown && loopStarted && !loopRunning)
         {
             var spec = new Spec(
                 HealthIssueCodes.SupervisorLoopStopped,

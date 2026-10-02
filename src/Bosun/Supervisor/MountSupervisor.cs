@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using Bosun.Configuration;
 using Bosun.Probe;
 using Bosun.Rclone;
+using Bosun.Watchdog;
 using Microsoft.Extensions.Logging;
 
 namespace Bosun.Supervisor;
@@ -46,7 +47,7 @@ namespace Bosun.Supervisor;
 /// <c>HostProbe</c>/<c>RcloneProcessService</c> tests.
 /// </para>
 /// </remarks>
-public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
+public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAsyncDisposable
 {
     // No config field exists for these two (docs/CONFIG-SCHEMA.md has no drain-retry, drain-confirm,
     // or reconciliation-interval setting). Reasonable internal defaults; flagged as discovered work
@@ -148,7 +149,12 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         ILogger<MountSupervisor> logger)
     {
         this.configStore = configStore;
-        this.rcloneClient = rcloneClient;
+
+        // bs-6to: every rc call stamps loop activity when it returns, so a legitimately long
+        // composite action (StartAsync or ResumeAsync walking many hosts, one rc call after
+        // another) keeps proving it is alive. Without this, the only stamps are an action's begin
+        // and end, and a 20-host StartAsync could look "stalled" to the watchdog while working.
+        this.rcloneClient = new ActivityStampingRcloneClient(rcloneClient, TouchLoopActivity);
         this.probe = probe;
         this.timeProvider = timeProvider;
         this.logger = logger;
@@ -302,6 +308,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         }
 
         started = true;
+        Volatile.Write(ref startedFlag, 1);
         global = configStore.Current.Global;
 
         foreach (var (key, hostConfig) in configStore.Current.Hosts)
@@ -350,6 +357,7 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         }
 
         started = false;
+        Volatile.Write(ref startedFlag, 0);
         return Task.CompletedTask;
     }, cancellationToken);
 
@@ -683,6 +691,12 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
         finally
         {
             SetLoopRunning(false);
+
+            // bs-6to / ADR-020 Decision 7: whatever the reason the loop ended -- shutdown, a fault,
+            // the channel being completed -- nothing will ever read the channel again, so nothing
+            // may be left waiting on it. Every pending EnqueueAndWait caller is failed (they used to
+            // wait forever, which is what hung the UI on 2026-10-01), and later callers fail fast.
+            MarkLoopDeadAndFailPending();
         }
     }
 
@@ -741,6 +755,23 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
     private long lastLoopActivityTicks;
     private int loopRunning;
+    private int startedFlag;
+    private int loopExited;
+
+    /// <summary>
+    /// True from the moment <see cref="StartAsync"/> has begun until <see cref="StopAsync"/> has run:
+    /// the supervisor is supposed to be doing work, so a quiet loop means something is wrong (an
+    /// idle, never-started supervisor legitimately has no activity). A thread-safe mirror of the
+    /// private <c>started</c> field, which is only touched on the loop. (bs-6to)
+    /// </summary>
+    public bool IsStarted => Volatile.Read(ref startedFlag) == 1;
+
+    /// <summary>
+    /// Pending <see cref="EnqueueAndWait"/> callers, so the loop's death can fail them (bs-6to). An
+    /// entry is added before the command is queued and removed when it completes for any reason.
+    /// </summary>
+    private readonly ConcurrentDictionary<long, TaskCompletionSource> pendingCommands = new();
+    private long nextPendingCommandId;
 
     /// <summary>True from the moment <see cref="RunAsync"/> starts until it exits for any reason
     /// (shutdown, fault, or channel completion). False before it has started. Safe to read from
@@ -749,15 +780,16 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
 
     /// <summary>
     /// The injected clock's time when the loop last started, began an action, or finished an
-    /// action (or exited). <see cref="DateTimeOffset.MinValue"/> until <see cref="RunAsync"/> has
-    /// started. Safe to read from any thread.
+    /// action (or exited), or got a reply from an rc call or a probe (bs-6to: so a long composite
+    /// action keeps stamping). <see cref="DateTimeOffset.MinValue"/> until <see cref="RunAsync"/>
+    /// has started. Safe to read from any thread.
     /// </summary>
     /// <remarks>
     /// A stale value only means "wedged" when interpreted against the work the loop is expected to
     /// have: while the supervisor is started, the reconciliation timer enqueues an action every
     /// <see cref="ReconciliationInterval"/>, so a healthy started loop touches this at least that
-    /// often, plus the duration of the slowest single action (bounded by the per-call rc timeouts
-    /// in <see cref="RcloneClient"/>). An idle, never-started supervisor legitimately goes stale.
+    /// often, plus the duration of the slowest single rc call or probe (bounded by the per-call
+    /// timeouts in <see cref="RcloneClient"/>). An idle, never-started supervisor legitimately goes stale.
     /// </remarks>
     public DateTimeOffset LastLoopActivityUtc =>
         new(Volatile.Read(ref lastLoopActivityTicks), TimeSpan.Zero);
@@ -779,6 +811,43 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
     private Task EnqueueAndWait(Func<CancellationToken, Task> action, CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var id = Interlocked.Increment(ref nextPendingCommandId);
+
+        // Order matters (bs-6to). Register as pending FIRST, then check whether the loop is already
+        // dead, then queue. MarkLoopDeadAndFailPending sets the dead flag BEFORE it sweeps the
+        // pending set, so a caller is always either swept (registered before the sweep) or sees the
+        // flag (registered after it). There is no window in which a caller can wait on a loop that
+        // is gone.
+        pendingCommands[id] = completion;
+        if (Volatile.Read(ref loopExited) == 1)
+        {
+            pendingCommands.TryRemove(id, out _);
+            return Task.FromException(new SupervisorStoppedException());
+        }
+
+        // A caller that gives up (the exit deadline, a UI cancellation) must not stay blocked until
+        // the loop happens to reach its command -- if the loop is wedged, that is never. The queued
+        // command stays in the channel; it is harmless once its completion is already settled.
+        var registration = cancellationToken.CanBeCanceled
+            ? cancellationToken.Register(
+                static state =>
+                {
+                    var (tcs, token) = ((TaskCompletionSource, CancellationToken))state!;
+                    tcs.TrySetCanceled(token);
+                },
+                (completion, cancellationToken))
+            : default;
+
+        _ = completion.Task.ContinueWith(
+            settled =>
+            {
+                registration.Dispose();
+                pendingCommands.TryRemove(id, out _);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
         channel.Writer.TryWrite(async ct =>
         {
             try
@@ -796,6 +865,35 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
             }
         });
         return completion.Task;
+    }
+
+    /// <summary>
+    /// Runs once, when <see cref="RunAsync"/> exits for any reason (bs-6to): closes the command
+    /// channel and fails every command still waiting on it with <see cref="SupervisorStoppedException"/>.
+    /// </summary>
+    private void MarkLoopDeadAndFailPending()
+    {
+        // The flag first, then the channel, then the sweep -- see EnqueueAndWait for why that order.
+        Volatile.Write(ref loopExited, 1);
+        channel.Writer.TryComplete();
+
+        var failed = 0;
+        foreach (var (id, completion) in pendingCommands)
+        {
+            if (completion.TrySetException(new SupervisorStoppedException()))
+            {
+                failed++;
+            }
+
+            pendingCommands.TryRemove(id, out _);
+        }
+
+        if (failed > 0)
+        {
+            logger.LogWarning(
+                "The supervisor loop stopped with {Count} command(s) still waiting; each was failed rather than left to wait forever",
+                failed);
+        }
     }
 
     private HostRuntime RequireHost(string hostKey) =>
@@ -2224,6 +2322,11 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 Detail = ex.Message,
             };
         }
+        finally
+        {
+            // bs-6to: a probe that returned is progress, same as an rc reply.
+            TouchLoopActivity();
+        }
     }
 
     /// <summary>Deep-probe counterpart of <see cref="ProbeShallowSafelyAsync"/>. Matters most in
@@ -2244,6 +2347,10 @@ public sealed class MountSupervisor : IMountSupervisor, IAsyncDisposable
                 Elapsed = TimeSpan.Zero,
                 Detail = ex.Message,
             };
+        }
+        finally
+        {
+            TouchLoopActivity();
         }
     }
 

@@ -105,4 +105,14 @@ public static class HealthIssueCodes
 
     // Supervisor loop.
     public const string SupervisorLoopStopped = "supervisor.loop-stopped";
+
+    // Watchdog (bs-6to). Reported by SupervisorWatchdog, not derived.
+
+    /// <summary>The supervisor loop is dead or has made no progress past the stall threshold. Shown
+    /// while the watchdog restarts Bosun, and kept showing if it is not allowed to.</summary>
+    public const string WatchdogSupervisorStalled = "watchdog.supervisor-stalled";
+
+    /// <summary>The watchdog has used its restart allowance for the hour and has stopped restarting
+    /// Bosun automatically. A person has to act.</summary>
+    public const string WatchdogRestartLimit = "watchdog.restart-limit";
 }
