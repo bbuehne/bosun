@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using Bosun.Health;
+using Bosun.Repair;
 using Bosun.Supervisor;
 using Bosun.UI.Autostart;
 using H.NotifyIcon;
@@ -215,6 +216,20 @@ public sealed class TrayIconController : IDisposable
         };
         autostartItem.Click += (_, _) => ToggleAutostart(autostartItem.IsChecked);
         menu.Items.Add(autostartItem);
+
+        // bs-aoz / ADR-020 Decision 5: the repair actions. The same dispatcher call the health banner's
+        // buttons make, so the two surfaces cannot drift. Always enabled: a repair is exactly what the
+        // user reaches for when something is wrong, and each one confirms before doing anything that
+        // disconnects a drive.
+        var repairMenu = new MenuItem { Header = "Repair" };
+        foreach (var kind in RepairActionPlan.TrayOrder)
+        {
+            var repairItem = new MenuItem { Header = RepairActionPlan.Label(kind) };
+            repairItem.Click += (_, _) => _actionDispatcher.Repair(kind);
+            repairMenu.Items.Add(repairItem);
+        }
+
+        menu.Items.Add(repairMenu);
 
         // bs-ds3: same dispatcher the window's button uses, so both do exactly the same thing.
         var diagnosticsItem = new MenuItem { Header = "Copy diagnostics" };

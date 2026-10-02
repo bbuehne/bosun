@@ -73,7 +73,7 @@ internal sealed class FakeMountSupervisor : IMountSupervisor
             return Task.FromException(RepairAllException);
         }
 
-        return RepairAllBlocker ?? Task.CompletedTask;
+        return RepairAllBlocker?.WaitAsync(cancellationToken) ?? Task.CompletedTask;
     }
 
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>

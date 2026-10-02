@@ -347,6 +347,19 @@ public static class BosunHostFactory
                 TimeProvider.System,
                 sp.GetRequiredService<ILogger<SupervisorWatchdog>>(),
                 sp.GetRequiredService<IShutdownState>()));
+
+            // bs-aoz: after a watchdog restart, say so. Reads which restart flag (if any) this
+            // process was launched with, and the reason the old instance left in the restart history.
+            // Also the IRestartNotice the banner's Dismiss button calls.
+            builder.Services.AddSingleton(RestartLaunchInfo.ForCurrentProcess());
+            builder.Services.AddSingleton(sp => new WatchdogRestartNotice(
+                sp.GetRequiredService<RestartLaunchInfo>(),
+                sp.GetRequiredService<IRestartHistoryStore>(),
+                sp.GetRequiredService<IAppHealthReporter>(),
+                TimeProvider.System,
+                sp.GetRequiredService<ILogger<WatchdogRestartNotice>>()));
+            builder.Services.AddSingleton<IRestartNotice>(sp => sp.GetRequiredService<WatchdogRestartNotice>());
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<WatchdogRestartNotice>());
         }
 
         builtHost = builder.Build();

@@ -1,5 +1,7 @@
 using Bosun.Diagnostics;
+using Bosun.Repair;
 using Bosun.Supervisor;
+using Bosun.Watchdog;
 using Microsoft.Extensions.Logging;
 using Bosun.Status;
 
@@ -26,12 +28,16 @@ public sealed class HostActionDispatcher
     private readonly IExternalLauncher _launcher;
     private readonly ILogger<HostActionDispatcher>? _logger;
     private readonly CopyDiagnosticsCommand? _diagnostics;
+    private readonly RepairCommands? _repair;
+    private readonly IRestartNotice? _restartNotice;
 
     public HostActionDispatcher(
         IMountSupervisor supervisor,
         IExternalLauncher launcher,
         ILogger<HostActionDispatcher>? logger = null,
-        CopyDiagnosticsCommand? diagnostics = null)
+        CopyDiagnosticsCommand? diagnostics = null,
+        RepairCommands? repair = null,
+        IRestartNotice? restartNotice = null)
     {
         ArgumentNullException.ThrowIfNull(supervisor);
         ArgumentNullException.ThrowIfNull(launcher);
@@ -40,6 +46,44 @@ public sealed class HostActionDispatcher
         _launcher = launcher;
         _logger = logger;
         _diagnostics = diagnostics;
+        _repair = repair;
+        _restartNotice = restartNotice;
+    }
+
+    /// <summary>
+    /// A repair action (bs-aoz, ADR-020 Decision 5): Restart rclone, Unmount all and re-probe, or
+    /// Restart Bosun. The one path both the tray's Repair menu and the health banner's buttons use, so
+    /// they cannot drift. Returns immediately; <see cref="RepairCommands"/> confirms, guards against a
+    /// second click while it is running, and reports its own failure. Nothing here mounts or unmounts:
+    /// Unmount all goes through <see cref="IMountSupervisor.RepairAllAsync"/>.
+    /// </summary>
+    public void Repair(RepairActionKind kind)
+    {
+        if (kind == RepairActionKind.DismissNotice)
+        {
+            DismissRestartNotice();
+            return;
+        }
+
+        if (_repair is null)
+        {
+            _logger?.LogWarning("Repair action {Kind} was requested but no repair commands are configured", kind);
+            return;
+        }
+
+        _ = _repair.RunAsync(kind);
+    }
+
+    /// <summary>Dismisses the "Bosun restarted itself" notice (bs-aoz).</summary>
+    public void DismissRestartNotice()
+    {
+        if (_restartNotice is null)
+        {
+            _logger?.LogWarning("Dismiss was requested but no restart notice is configured");
+            return;
+        }
+
+        _restartNotice.Dismiss();
     }
 
     /// <summary>

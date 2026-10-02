@@ -56,7 +56,8 @@ public sealed class MainWindowController
 
     /// <summary>Loads (and clamps -- see <see cref="WindowPlacementClamper"/>) the persisted
     /// placement, applies it to the window, and shows the window only if
-    /// <paramref name="context"/> is <see cref="LaunchContext.Manual"/> (ADR-018 rule 2). Call
+    /// <paramref name="context"/> is <see cref="LaunchContext.Manual"/> or <see cref="LaunchContext.UserRestart"/>
+    /// (ADR-018 rule 2; a watchdog restart stays hidden like autostart, bs-aoz). Call
     /// exactly once, before any other method on this class.</summary>
     public void Initialize(LaunchContext context)
     {
@@ -68,7 +69,7 @@ public sealed class MainWindowController
 
         _window.ApplyPlacement(placement);
 
-        if (context == LaunchContext.Manual)
+        if (context.ShowsWindowAtStartup())
         {
             ShowAndActivate();
         }

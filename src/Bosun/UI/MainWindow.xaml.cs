@@ -87,6 +87,10 @@ public partial class MainWindow : Window, IAppWindow
         _statusReadModel = statusReadModel;
         _appHealth = appHealth;
         _actionDispatcher = actionDispatcher;
+
+        // bs-aoz: the banner's repair buttons run through the same dispatcher the tray's Repair menu
+        // uses, so the two surfaces cannot behave differently (ADR-018).
+        _healthBanner.UseActions(kind => new RelayCommand(() => actionDispatcher.Repair(kind)));
         RefreshRows();
         _refreshTimer.Start();
     }

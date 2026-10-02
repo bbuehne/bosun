@@ -58,7 +58,7 @@
                 <Button x:Name="ImportBitviseButton" Content="Import from Bitvise..." Margin="0,0,8,0" Click="OnImportBitviseClick" />
                 <Button x:Name="AddHostButton" Content="Add Host..." Margin="0,0,8,0" Click="OnAddHostClick" />
                 <!-- bs-ds3 / ADR-020 Decision 6: one click captures the evidence for a failure. Lives
-                     in the header, not the health banner: the banner's action area is bs-aoz's. -->
+                     in the header, not the health banner: the banner's action area holds the repairs (bs-aoz). -->
                 <Button x:Name="CopyDiagnosticsButton" Content="Copy diagnostics" Click="OnCopyDiagnosticsClick" />
             </StackPanel>
         </Grid>
@@ -107,20 +107,21 @@
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="12,0,0,0">
                     <!--
-                        ACTION BUTTONS GO HERE (bs-aoz: Restart rclone, Unmount all and re-probe,
-                        Restart Bosun). Empty today: HealthBannerViewModel.Actions has no items, so
-                        nothing renders. Adding a HealthBannerAction to that collection is all it
-                        takes to add a button, with no change to this file.
+                        bs-aoz: the repair buttons (Restart rclone, Unmount all and re-probe, Restart
+                        Bosun, and Dismiss for the "Bosun restarted itself" notice). The collection is
+                        filled by HealthBannerViewModel from RepairActionPlan, so the order follows the
+                        top issue. A WrapPanel with a width cap, so up to four buttons wrap onto a
+                        second line instead of squeezing the message text.
                     -->
-                    <ItemsControl x:Name="HealthBannerActions" ItemsSource="{Binding Actions}">
+                    <ItemsControl x:Name="HealthBannerActions" ItemsSource="{Binding Actions}" MaxWidth="330">
                         <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
-                                <StackPanel Orientation="Horizontal" />
+                                <WrapPanel Orientation="Horizontal" />
                             </ItemsPanelTemplate>
                         </ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <Button Content="{Binding Label}" Command="{Binding Command}" Margin="0,0,8,0" Padding="10,3" />
+                                <Button Content="{Binding Label}" Command="{Binding Command}" Margin="0,0,8,4" Padding="10,3" />
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>

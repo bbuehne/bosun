@@ -115,4 +115,10 @@ public static class HealthIssueCodes
     /// <summary>The watchdog has used its restart allowance for the hour and has stopped restarting
     /// Bosun automatically. A person has to act.</summary>
     public const string WatchdogRestartLimit = "watchdog.restart-limit";
+
+    /// <summary>This Bosun was started by the watchdog to replace a stalled one (bs-aoz). Degraded: it is
+    /// an explanation, not a fault, and mounts are being managed again. Reported by
+    /// <c>WatchdogRestartNotice</c> in the new instance; cleared when the user dismisses it or after 24
+    /// hours.</summary>
+    public const string WatchdogRestarted = "watchdog.restarted";
 }
