@@ -184,6 +184,11 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
 
         stopped = true;
 
+        // bs-6to: from here "rclone is not running" and "the supervisor loop has stopped" are the
+        // shutdown itself, not faults. Said first, before anything below stops either of them, so
+        // the banner never flashes a Faulted state on a normal exit.
+        health?.BeginShutdown();
+
         // Unsubscribes from ISystemEventSource's events, then from the real static
         // SystemEvents/NetworkChange classes underneath it (bs-ohk). Torn down first, before
         // anything else here: SystemEvents holds its subscriber via a STATIC event (see
@@ -212,20 +217,32 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             // Must happen BEFORE cancelling the loop below: IMountSupervisor.StopAsync posts to
             // the same command channel RunAsync pumps, and deadlocks forever if nothing is still
             // dequeuing it.
+            //
+            // Every wait below honours cancellationToken (bs-6to / ADR-020 Decision 7). A wedged
+            // supervisor never reaches the StopAsync command, so an un-cancellable wait here is
+            // what hung exit on 2026-10-01. Failures are logged and shutdown carries on to the
+            // next step: nothing in a shutdown is allowed to stop the steps after it.
             try
             {
                 await mountSupervisor.StopAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception ex)
             {
-                logger.LogWarning(ex, "MountSupervisor.StopAsync failed during shutdown");
+                LogStopFailure(ex, "MountSupervisor.StopAsync", cancellationToken);
             }
         }
 
         supervisorLoopCts?.Cancel();
         if (supervisorLoopTask is not null)
         {
-            await supervisorLoopTask.ConfigureAwait(false);
+            try
+            {
+                await supervisorLoopTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogStopFailure(ex, "Waiting for the supervisor loop to exit", cancellationToken);
+            }
         }
 
         if (rcloneProcessService is not null)
@@ -234,10 +251,23 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             {
                 await rcloneProcessService.StopAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception ex)
             {
-                logger.LogWarning(ex, "RcloneProcessService.StopAsync failed during shutdown");
+                LogStopFailure(ex, "RcloneProcessService.StopAsync", cancellationToken);
             }
+        }
+    }
+
+    private void LogStopFailure(Exception ex, string step, CancellationToken cancellationToken)
+    {
+        if (ex is OperationCanceledException && cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                "{Step} did not finish before the shutdown deadline; carrying on with the rest of shutdown", step);
+        }
+        else
+        {
+            logger.LogWarning(ex, "{Step} failed during shutdown", step);
         }
     }
 

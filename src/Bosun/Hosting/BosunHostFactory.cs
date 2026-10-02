@@ -10,6 +10,8 @@ using Bosun.SessionMonitor.Interop;
 using Bosun.Supervisor;
 using Bosun.SystemEventIntegration;
 using Bosun.Terminal;
+using Bosun.UI;
+using Bosun.Watchdog;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -50,7 +52,15 @@ public static class BosunHostFactory
     /// <c>IHostConfigStore</c> staying unresolved through <c>host.StartAsync()</c> — fix the test
     /// (build without the orchestrator), not the architecture.
     /// </param>
-    public static IHost CreateHost(BosunHostOptions? options = null, bool registerStartupOrchestrator = true)
+    /// <param name="shutdownGuard">
+    /// The exit-deadline guard (bs-6to). <c>App</c> creates it before any host exists, because exit
+    /// must be bounded even when the host failed to build, and passes the same instance here so the
+    /// watchdog's restart and <c>App.OnExit</c> share one deadline. Omitted (tests), a private one is
+    /// created whose forced exit is the real one -- never reached, since nothing in a test begins a
+    /// shutdown.
+    /// </param>
+    public static IHost CreateHost(
+        BosunHostOptions? options = null, bool registerStartupOrchestrator = true, ShutdownGuard? shutdownGuard = null)
     {
         options ??= BosunHostOptions.CreateDefault();
 
@@ -252,6 +262,7 @@ public static class BosunHostFactory
         // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
         // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without
         // it -- see the parameter doc above.
+        IHost? builtHost = null;
         if (registerStartupOrchestrator)
         {
             builder.Services.AddSingleton<IFirstRunConfigBootstrapper, FirstRunConfigBootstrapper>();
@@ -262,8 +273,46 @@ public static class BosunHostFactory
                 sp.GetRequiredService<IWinFspDetector>(),
                 sp.GetRequiredService<ILogger<StartupOrchestrator>>()));
             builder.Services.AddHostedService(sp => sp.GetRequiredService<StartupOrchestrator>());
+
+            // bs-6to / ADR-020 Decision 3 + 7: the supervisor watchdog, the process restart it
+            // asks for, and the bounded-shutdown guard. Registered AFTER the orchestrator on
+            // purpose: hosted services stop in reverse order, so the watchdog is stopped before the
+            // orchestrator tears the supervisor down and cannot mistake the teardown for a stall.
+            var guard = shutdownGuard ?? new ShutdownGuard(
+                TimeProvider.System,
+                new EnvironmentProcessExiter(),
+                () => builtHost?.Services.GetService<ILogger<ShutdownGuard>>());
+            builder.Services.AddSingleton(guard);
+            builder.Services.AddSingleton<IShutdownState>(guard);
+            builder.Services.AddSingleton<ISupervisorLiveness>(sp => new ServiceProviderSupervisorLiveness(sp));
+            builder.Services.AddSingleton<IApplicationShutdown, WpfApplicationShutdown>();
+            builder.Services.AddSingleton<IBosunProcessLauncher, SystemBosunProcessLauncher>();
+            builder.Services.AddSingleton<IAppRestarter>(sp => new ProcessAppRestarter(
+                RestartContext.ForCurrentProcess(),
+                sp.GetRequiredService<IBosunProcessLauncher>(),
+                sp.GetRequiredService<IApplicationShutdown>(),
+                sp.GetRequiredService<ShutdownGuard>(),
+                sp.GetRequiredService<ILogger<ProcessAppRestarter>>()));
+
+            // Beside hosts.toml, so OPERATIONS.md can keep saying "config and logs are under
+            // %LOCALAPPDATA%\Bosun". Derived from the injected config path, not hardcoded, so a
+            // test that points ConfigPath at a temp directory cannot write the real one.
+            var restartHistoryPath = Path.Combine(
+                Path.GetDirectoryName(Path.GetFullPath(options.ConfigPath)) ?? ".",
+                JsonRestartHistoryStore.DefaultFileName);
+            builder.Services.AddSingleton<IRestartHistoryStore>(sp => new JsonRestartHistoryStore(
+                restartHistoryPath, sp.GetRequiredService<ILogger<JsonRestartHistoryStore>>()));
+            builder.Services.AddHostedService(sp => new SupervisorWatchdog(
+                sp.GetRequiredService<ISupervisorLiveness>(),
+                sp.GetRequiredService<IAppHealthReporter>(),
+                sp.GetRequiredService<IAppRestarter>(),
+                sp.GetRequiredService<IRestartHistoryStore>(),
+                TimeProvider.System,
+                sp.GetRequiredService<ILogger<SupervisorWatchdog>>(),
+                sp.GetRequiredService<IShutdownState>()));
         }
 
-        return builder.Build();
+        builtHost = builder.Build();
+        return builtHost;
     }
 }
