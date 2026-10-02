@@ -25,11 +25,61 @@ internal sealed class FakeTimeProvider : TimeProvider
 
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
+        FakeTimer timer;
+        List<TaskCompletionSource>? satisfied = null;
+
         lock (_gate)
         {
-            var timer = new FakeTimer(this, callback, state, dueTime, period);
+            timer = new FakeTimer(this, callback, state, dueTime, period);
             _timers.Add(timer);
-            return timer;
+
+            var active = _timers.Count(t => !t.IsDisposed);
+            for (var i = _waiters.Count - 1; i >= 0; i--)
+            {
+                if (active >= _waiters[i].Count)
+                {
+                    (satisfied ??= []).Add(_waiters[i].Tcs);
+                    _waiters.RemoveAt(i);
+                }
+            }
+        }
+
+        // Outside the lock; the waiters' continuations are asynchronous (see below), so nothing
+        // awaiting one can re-enter this provider on this stack.
+        if (satisfied is not null)
+        {
+            foreach (var tcs in satisfied)
+            {
+                tcs.TrySetResult();
+            }
+        }
+
+        return timer;
+    }
+
+    private readonly List<(int Count, TaskCompletionSource Tcs)> _waiters = [];
+
+    /// <summary>
+    /// Completes once at least <paramref name="count"/> timers are scheduled and not yet fired or
+    /// disposed -- immediately, if that is already true. The deterministic answer to "has the code
+    /// under test reached its <c>Task.Delay</c>/timer yet?", for code whose continuation hops to
+    /// the thread pool (any continuation completed from a thread carrying a
+    /// <see cref="SynchronizationContext"/> -- which every xunit test thread does -- is queued
+    /// rather than run inline). Calling <see cref="Advance"/> before that point moves the clock
+    /// past a timer that does not exist yet, and the timer is then due a full delay later.
+    /// </summary>
+    public Task WhenActiveTimerCountAtLeastAsync(int count)
+    {
+        lock (_gate)
+        {
+            if (_timers.Count(t => !t.IsDisposed) >= count)
+            {
+                return Task.CompletedTask;
+            }
+
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _waiters.Add((count, tcs));
+            return tcs.Task;
         }
     }
 
