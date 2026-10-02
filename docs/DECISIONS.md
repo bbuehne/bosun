@@ -1435,9 +1435,14 @@ left open, recorded so they are not relitigated:
   cause (`DrainCause.Repair`) re-enables the host exactly as an automatic drain does and never
   sets `UserParked`. A persistent host remounts only through `Disabled -> Probing -> Ready ->
   Mounting`, so it is probed (shallow, then deep) after the unmount and before the remount
-  (Invariant I1). An on-demand host rests in `Ready` and stays unmounted. All mounted hosts drain
-  before any host is re-enabled, and a host whose unmount rclone does not confirm stays `Draining`
-  rather than reaching `Disabled`. Every other enabled host is re-probed at once with its backoff
+  (Invariant I1). An on-demand host rests in `Ready` and stays unmounted. The repair issues its
+  first drain attempt for every mounted host before it re-enables anything. After that, each host
+  comes back on its own as soon as rclone confirms *its* unmount. A host whose unmount rclone does
+  not confirm stays `Draining` (retrying) rather than reaching `Disabled`, and it does **not** hold
+  back the others. (An earlier wording of this paragraph said all drains complete before any host
+  is re-enabled. Read literally, one wedged drive would then keep every host down for good; the
+  independent bs-aoz tests caught the contradiction, and this is the intended behaviour.) Every
+  other enabled host is re-probed at once with its backoff
   reset; one waiting out a failed-mount pacing timer gets a fresh attempt from the first rung.
   The command is refused while suspended (Invariant I8).
 - *A repair does not un-park either.* A host the user unmounted earlier is not mounted, so there

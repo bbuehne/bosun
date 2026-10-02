@@ -391,22 +391,20 @@ public sealed class RepairAllSpecTests
     }
 
     /// <summary>
-    /// The literal reading of the amendment's "All mounted hosts drain before any host is
-    /// re-enabled", for a drain that does not confirm on its first attempt: one drive takes three
-    /// unmount calls (~10 s, through the forced-unmount escalation) to go, and no host may leave
-    /// Disabled until it has.
+    /// A drain that does not confirm on its first attempt: one drive takes three unmount calls
+    /// (~10 s, through the forced-unmount escalation) to go. The hosts whose unmounts confirmed at
+    /// once must come back without waiting for it.
     /// </summary>
     /// <remarks>
-    /// <b>Fails against b3b0df3, so it is skipped pending a decision.</b> The build re-enables
-    /// (and remounts) the hosts whose drains confirmed on the first attempt at t=0, while the slow
-    /// host is still Draining; the slow host re-enables on its own at t=10. Either the ADR text is
-    /// wrong (and the barrier is "the end of the repair's first drain pass") or the code is. The
-    /// literal reading also has a gap of its own: with a drive that NEVER confirms, every other
-    /// host would stay down for good. Remove the Skip to reproduce.
+    /// <b>Decided (ADR-020 bs-aoz amendment, corrected 2026-10-01):</b> the barrier is the end of the
+    /// repair's first drain pass, NOT the completion of every drain. The earlier ADR wording, read
+    /// literally, would let one drive whose unmount never confirms keep every other host down for
+    /// good. So a slow drain must NOT hold back hosts whose unmounts already confirmed, and the slow
+    /// host must still come back on its own -- through Disabled and a fresh probe -- once rclone
+    /// confirms it.
     /// </remarks>
-    [Fact(Skip = "bs-aoz finding, needs-decision: ADR-020 bs-aoz amendment says all drains complete before any " +
-                 "re-enable; the build re-enables quick hosts while a slow drain is still unconfirmed. See remarks.")]
-    public async Task A_slow_drain_holds_back_the_reenable_of_every_other_host()
+    [Fact]
+    public async Task A_slow_drain_does_not_hold_back_hosts_whose_unmounts_already_confirmed()
     {
         var harness = new RepairHarness(HostFixtures.Build(
             HostFixtures.Global(),
@@ -426,13 +424,14 @@ public sealed class RepairAllSpecTests
             harness.Dump());
 
         var since = harness.HistorySince(mark).ToList();
-        var lastDrainDone = since.FindLastIndex(t => t.From == MountState.Draining && t.To == MountState.Disabled);
-        var firstReEnable = since.FindIndex(t => t.From == MountState.Disabled);
-        Assert.True(lastDrainDone >= 0 && firstReEnable >= 0, harness.Dump());
+        var alphaBackUp = since.FindIndex(t => t.HostKey == "alpha" && t.To == MountState.Mounted);
+        var bravoConfirmed = since.FindIndex(t => t.HostKey == "bravo" && t.From == MountState.Draining && t.To == MountState.Disabled);
+        var bravoReEnabled = since.FindIndex(t => t.HostKey == "bravo" && t.From == MountState.Disabled);
+        Assert.True(alphaBackUp >= 0 && bravoConfirmed >= 0 && bravoReEnabled >= 0, harness.Dump());
         Assert.True(
-            firstReEnable > lastDrainDone,
-            $"a host was re-enabled (transition {mark + firstReEnable}) before every drain had completed " +
-            $"(last Draining -> Disabled at {mark + lastDrainDone}).{Environment.NewLine}{harness.Dump()}");
+            alphaBackUp < bravoConfirmed,
+            $"alpha was held back until bravo's slow drain confirmed.{Environment.NewLine}{harness.Dump()}");
+        Assert.True(bravoReEnabled > bravoConfirmed, harness.Dump());
         Assert.Equal(3, since.Count(t => t.From == MountState.Draining && t.To == MountState.Disabled));
         Assert.Equal(MountState.Ready, harness.State("charlie"));
     }
