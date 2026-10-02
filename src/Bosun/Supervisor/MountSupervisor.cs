@@ -780,15 +780,16 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
     /// <summary>
     /// The injected clock's time when the loop last started, began an action, or finished an
-    /// action (or exited). <see cref="DateTimeOffset.MinValue"/> until <see cref="RunAsync"/> has
-    /// started. Safe to read from any thread.
+    /// action (or exited), or got a reply from an rc call or a probe (bs-6to: so a long composite
+    /// action keeps stamping). <see cref="DateTimeOffset.MinValue"/> until <see cref="RunAsync"/>
+    /// has started. Safe to read from any thread.
     /// </summary>
     /// <remarks>
     /// A stale value only means "wedged" when interpreted against the work the loop is expected to
     /// have: while the supervisor is started, the reconciliation timer enqueues an action every
     /// <see cref="ReconciliationInterval"/>, so a healthy started loop touches this at least that
-    /// often, plus the duration of the slowest single action (bounded by the per-call rc timeouts
-    /// in <see cref="RcloneClient"/>). An idle, never-started supervisor legitimately goes stale.
+    /// often, plus the duration of the slowest single rc call or probe (bounded by the per-call
+    /// timeouts in <see cref="RcloneClient"/>). An idle, never-started supervisor legitimately goes stale.
     /// </remarks>
     public DateTimeOffset LastLoopActivityUtc =>
         new(Volatile.Read(ref lastLoopActivityTicks), TimeSpan.Zero);

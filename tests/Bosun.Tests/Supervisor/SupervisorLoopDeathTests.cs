@@ -162,40 +162,75 @@ public sealed class SupervisorLoopDeathTests
     [Fact]
     public async Task Each_rc_call_stamps_loop_activity_so_a_long_action_keeps_proving_it_is_alive()
     {
-        // A StartAsync that walks a host needs several rc calls (listmounts, then mount). The loop's
-        // activity stamp must advance as EACH returns, not only when the whole action begins and ends
-        // -- otherwise a many-host start would look stalled to the watchdog while working.
-        var time = new FakeTimeProvider(new DateTimeOffset(2026, 10, 1, 9, 0, 0, TimeSpan.Zero));
-        var rclone = new FakeRcloneMountClient();
+        // One action -- unmounting a host -- makes two rc calls back to back (unmount, then
+        // listmounts to verify). The loop's activity stamp must advance as EACH returns, not only
+        // when the whole action begins and ends; otherwise a start or resume that walks many hosts
+        // would look stalled to the watchdog while it is working.
+        // A clock that moves forward as rc calls "take time" without firing any timer: advancing a
+        // real fake clock would fire the reconciliation timer, whose action makes more rc calls.
+        var time = new Bosun.Tests.Watchdog.SleepableTimeProvider(new FakeTimeProvider(new DateTimeOffset(2026, 10, 1, 9, 0, 0, TimeSpan.Zero)));
+        var observing = false;
+        var observed = new List<(string Call, DateTimeOffset Now, DateTimeOffset LastActivity)>();
         MountSupervisor? supervisor = null;
-        var observed = new List<(DateTimeOffset Now, DateTimeOffset LastActivity)>();
-        var slow = new SlowRcloneClient(rclone, () =>
+        var slow = new SlowRcloneClient(new FakeRcloneMountClient(), call =>
         {
-            observed.Add((time.GetUtcNow(), supervisor!.LastLoopActivityUtc));
-            time.Advance(TimeSpan.FromSeconds(100));
+            if (!observing)
+            {
+                return;
+            }
+
+            observed.Add((call, time.GetUtcNow(), supervisor!.LastLoopActivityUtc));
+            time.Sleep(TimeSpan.FromSeconds(100)); // each rc call takes 100 s
         });
         supervisor = new MountSupervisor(
-            new FakeHostConfigStore(HostFixtures.Build(HostFixtures.Global(), HostFixtures.Persistent("alpha", drive: "P:"))),
+            new FakeHostConfigStore(HostFixtures.Build(HostFixtures.Global(), HostFixtures.OnDemand("archive", drive: "Q:"))),
             slow, new FakeProbe(), time, new CapturingLogger<MountSupervisor>());
 
-        var start = supervisor.StartAsync();
-        await supervisor.DrainAsync();
-        await start;
+        await Run(supervisor, supervisor.StartAsync());
+        await Run(supervisor, supervisor.RequestMountAsync("archive"));
+        observing = true;
+        await Run(supervisor, supervisor.RequestUnmountAsync("archive"));
 
-        Assert.True(observed.Count >= 2, $"expected at least two rc calls in StartAsync, saw {observed.Count}");
+        var unmountIndex = observed.FindIndex(o => o.Call == nameof(IRcloneClient.UnmountAsync));
+        Assert.True(unmountIndex >= 0 && unmountIndex + 1 < observed.Count, "expected an unmount followed by another rc call");
+        var next = observed[unmountIndex + 1];
+        Assert.Equal(nameof(IRcloneClient.ListMountsAsync), next.Call);
 
-        // At every rc call after the first, the stamp was the moment the previous call returned --
-        // 100 s ago would be the action's start.
-        foreach (var (now, lastActivity) in observed.Skip(1))
-        {
-            Assert.Equal(now, lastActivity);
-        }
+        // When the second call began, the stamp was the instant the first returned (== now), not
+        // 100 s earlier when the action began.
+        Assert.Equal(next.Now, next.LastActivity);
     }
 
-    /// <summary>Delegates to a fake and runs a hook at the start of each call the supervisor makes.</summary>
-    private sealed class SlowRcloneClient(IRcloneClient inner, Action onCall) : IRcloneClient
+    private static async Task Run(MountSupervisor supervisor, Task command)
     {
-        public Task<RcloneVersionInfo> GetVersionAsync(CancellationToken ct) { onCall(); return inner.GetVersionAsync(ct); }
+        await supervisor.DrainAsync();
+        await command;
+    }
+
+    [Fact]
+    public async Task The_stamping_decorator_stamps_after_every_call_including_a_failing_one()
+    {
+        var stamps = 0;
+        var inner = new FakeRcloneMountClient();
+        var client = new ActivityStampingRcloneClient(inner, () => stamps++);
+
+        await client.GetVersionAsync(CancellationToken.None);
+        await client.ListMountsAsync(CancellationToken.None);
+        inner.MakeListMountsThrow(new InvalidOperationException("boom"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.ListMountsAsync(CancellationToken.None));
+
+        Assert.Equal(3, stamps);
+    }
+
+    /// <summary>Delegates to a fake and runs a hook, told which call it is, at the start of each call
+    /// the supervisor makes.</summary>
+    private sealed class SlowRcloneClient(IRcloneClient inner, Action<string> onCall) : IRcloneClient
+    {
+        public Task<RcloneVersionInfo> GetVersionAsync(CancellationToken ct)
+        {
+            onCall(nameof(GetVersionAsync));
+            return inner.GetVersionAsync(ct);
+        }
 
         public Task CreateConfigAsync(string remoteName, string type, IReadOnlyDictionary<string, string> parameters, CancellationToken ct) =>
             inner.CreateConfigAsync(remoteName, type, parameters, ct);
@@ -203,11 +238,23 @@ public sealed class SupervisorLoopDeathTests
         public Task<IReadOnlyDictionary<string, string>?> GetConfigAsync(string remoteName, CancellationToken ct) =>
             inner.GetConfigAsync(remoteName, ct);
 
-        public Task<RcloneMountResult> MountAsync(RcloneMountRequest request, CancellationToken ct) { onCall(); return inner.MountAsync(request, ct); }
+        public Task<RcloneMountResult> MountAsync(RcloneMountRequest request, CancellationToken ct)
+        {
+            onCall(nameof(MountAsync));
+            return inner.MountAsync(request, ct);
+        }
 
-        public Task UnmountAsync(string mountPoint, CancellationToken ct) { onCall(); return inner.UnmountAsync(mountPoint, ct); }
+        public Task UnmountAsync(string mountPoint, CancellationToken ct)
+        {
+            onCall(nameof(UnmountAsync));
+            return inner.UnmountAsync(mountPoint, ct);
+        }
 
-        public Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken ct) { onCall(); return inner.ListMountsAsync(ct); }
+        public Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken ct)
+        {
+            onCall(nameof(ListMountsAsync));
+            return inner.ListMountsAsync(ct);
+        }
 
         public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken ct) =>
             inner.ListAsync(fs, remote, ct);
