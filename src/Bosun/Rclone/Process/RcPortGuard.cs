@@ -1,3 +1,4 @@
+using Bosun.Logging;
 using Microsoft.Extensions.Logging;
 
 namespace Bosun.Rclone.Process;
@@ -74,6 +75,10 @@ public sealed class RcPortGuard(
     TimeProvider timeProvider,
     ILogger<RcPortGuard> logger) : IRcPortGuard
 {
+    // bs-qcs: EnsureFreeAsync runs on every start attempt (every RestartDelay while rclone is
+    // down), so a condition that persists across attempts is logged once and then as a reminder.
+    private readonly RepeatingFaultLogger faults = new(timeProvider);
+
     public async Task<RcPortCheck> EnsureFreeAsync(CancellationToken cancellationToken)
     {
         int? holder;
@@ -85,9 +90,15 @@ public sealed class RcPortGuard(
         {
             // Cannot tell. Launching is harmless: if the port IS held, our child exits on its
             // bind failure and the service reports that, naming the holder via DescribeHolder.
-            logger.LogWarning(ex, "Could not determine who holds rc port {Port}; launching anyway", options.RcloneRcPort);
+            logger.LogRepeatingFault(
+                faults, "resolve-holder", ex.GetType().Name, LogLevel.Warning, ex,
+                $"Could not determine who holds rc port {options.RcloneRcPort}; launching anyway",
+                $"Could not determine who holds rc port {options.RcloneRcPort}", $"{ex.GetType().Name}: {ex.Message}",
+                "attempts");
             return new RcPortCheck(RcPortCheckOutcome.Free);
         }
+
+        logger.LogFaultRecovered(faults, "resolve-holder", $"Resolving the holder of rc port {options.RcloneRcPort}", "attempts");
 
         if (holder is not { } pid)
         {
@@ -119,7 +130,10 @@ public sealed class RcPortGuard(
         }
         catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Killing stale rclone rcd PID {ProcessId} failed", pid);
+            logger.LogRepeatingFault(
+                faults, "kill-stale", $"PID {pid}: {ex.GetType().Name}", LogLevel.Warning, ex,
+                $"Killing stale rclone rcd PID {pid} failed",
+                $"Killing stale rclone rcd PID {pid}", $"{ex.GetType().Name}: {ex.Message}", "attempts");
             killRequested = false;
         }
 

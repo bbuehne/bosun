@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Management;
 using System.Runtime.InteropServices;
+using Bosun.Logging;
 using Microsoft.Extensions.Logging;
 
 namespace Bosun.SessionMonitor;
@@ -46,9 +47,13 @@ public interface ISshProcessEnumerator
 /// Production only. Enumeration itself is not unit-tested against real processes (bs-8dr
 /// acceptance) -- see <see cref="SshCommandLineParser"/> for the part that is.
 /// </remarks>
-public sealed class CimSshProcessEnumerator(ILogger<CimSshProcessEnumerator> logger) : ISshProcessEnumerator
+public sealed class CimSshProcessEnumerator(
+    ILogger<CimSshProcessEnumerator> logger, TimeProvider? timeProvider = null) : ISshProcessEnumerator
 {
     private const string ProcessName = "ssh";
+
+    // bs-qcs: runs on the UI status poll, so a persistent CIM failure must not log every second.
+    private readonly RepeatingFaultLogger faults = new(timeProvider ?? TimeProvider.System);
 
     public IReadOnlyList<SshProcessInfo> Enumerate()
     {
@@ -60,7 +65,7 @@ public sealed class CimSshProcessEnumerator(ILogger<CimSshProcessEnumerator> log
                 return [];
             }
 
-            var commandLines = QueryCommandLines(logger);
+            var commandLines = QueryCommandLines();
             var results = new List<SshProcessInfo>(processes.Length);
 
             foreach (var process in processes)
@@ -112,7 +117,7 @@ public sealed class CimSshProcessEnumerator(ILogger<CimSshProcessEnumerator> log
         }
     }
 
-    private static Dictionary<int, string> QueryCommandLines(ILogger logger)
+    private Dictionary<int, string> QueryCommandLines()
     {
         var map = new Dictionary<int, string>();
         try
@@ -139,11 +144,15 @@ public sealed class CimSshProcessEnumerator(ILogger<CimSshProcessEnumerator> log
         }
         catch (Exception ex) when (ex is ManagementException or UnauthorizedAccessException or COMException)
         {
-            logger.LogWarning(
-                ex,
-                "CIM query for ssh.exe command lines failed; sessions will not correlate to a host this tick");
+            logger.LogRepeatingFault(
+                faults, "cim-query", ex.GetType().Name, LogLevel.Warning, ex,
+                $"CIM query for ssh.exe command lines failed ({ex.GetType().Name}: {ex.Message}); " +
+                "sessions will not correlate to a host this tick",
+                "CIM query for ssh.exe command lines", $"{ex.GetType().Name}: {ex.Message}", "polls");
+            return map;
         }
 
+        logger.LogFaultRecovered(faults, "cim-query", "CIM query for ssh.exe command lines", "polls");
         return map;
     }
 }

@@ -2,7 +2,10 @@ using System.Net;
 using Bosun.Configuration;
 using Bosun.SessionMonitor;
 using Bosun.SessionMonitor.Interop;
+using Bosun.Tests.Configuration.Fakes;
 using Bosun.Tests.SessionMonitor.Fakes;
+using Bosun.Tests.Supervisor.Independent.RcTimeout;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Bosun.Tests.SessionMonitor;
@@ -242,6 +245,29 @@ public sealed class SshSessionMonitorTests
 
         var session = Assert.Single(monitor.GetActiveSessions());
         Assert.Equal("example-nas", session.HostKey);
+    }
+
+    [Fact]
+    public void A_failure_that_persists_across_an_hour_of_one_second_polls_is_logged_once_then_as_reminders()
+    {
+        // bs-qcs: the status read model polls every second, so each log call here is a line per second.
+        var enumerator = new FakeSshProcessEnumerator();
+        enumerator.ThrowOnEnumerate(new InvalidOperationException("CIM unavailable"));
+        var tcp = new FakeTcpConnectionReader();
+        var time = new FakeTimeProvider();
+        var log = new LevelRecordingLogger<SshSessionMonitor>();
+        var monitor = new SshSessionMonitor(enumerator, tcp, new FakeHostConfigStore(ConfigWithHosts("example-nas")), log, time);
+
+        for (var second = 0; second < 3600; second++)
+        {
+            Assert.Empty(monitor.GetActiveSessions());
+            time.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        Assert.Single(log.Entries, e => e.Message.Contains("ssh.exe enumeration failed", StringComparison.Ordinal));
+        Assert.Equal(5, log.Entries.Count(e => e.Message.Contains("still failing", StringComparison.Ordinal)));
+        Assert.Equal(6, log.Entries.Count);
+        Assert.All(log.Entries, e => Assert.True(e.Level >= LogLevel.Warning));
     }
 
     private static SshSessionMonitor CreateMonitor(
