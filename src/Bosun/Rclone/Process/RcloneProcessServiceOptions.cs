@@ -43,4 +43,9 @@ public sealed record RcloneProcessServiceOptions
 
     /// <summary>Interval between "has the killed stale rcd exited yet?" checks.</summary>
     public TimeSpan StaleKillPollInterval { get; init; } = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>How often a fault that keeps repeating across start attempts is mentioned again
+    /// after the first full report (bs-qcs). The supervise loop retries every
+    /// <see cref="RestartDelay"/> forever; without this the same Error is written every attempt.</summary>
+    public TimeSpan FaultReminderInterval { get; init; } = TimeSpan.FromMinutes(10);
 }
