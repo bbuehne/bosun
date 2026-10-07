@@ -67,15 +67,19 @@ public static class BosunHostFactory
 
         Directory.CreateDirectory(options.LogDirectory);
 
-        var serilogLogger = new LoggerConfiguration()
-            .MinimumLevel.Debug()
+        // bs-qcs: Information in production, Debug only on request (BOSUN_LOG_LEVEL), and a capped
+        // file sink. At Debug with Serilog's default 1 GB x 31 files, a dead rclone filled ~200 MB a day.
+        var logConfiguration = new LoggerConfiguration();
+        BosunLogging.ApplyLevels(logConfiguration, BosunLogging.ResolveMinimumLevel(options.LogLevel, out var logLevelProblem));
+        logConfiguration
             .Enrich.FromLogContext()
-            .WriteTo.Debug(outputTemplate: LogOutputTemplate)
-            .WriteTo.File(
-                Path.Combine(options.LogDirectory, "bosun-.log"),
-                rollingInterval: RollingInterval.Day,
-                outputTemplate: LogOutputTemplate)
-            .CreateLogger();
+            .WriteTo.Debug(outputTemplate: LogOutputTemplate);
+        BosunLogging.WriteToCappedFile(logConfiguration, options.LogDirectory, LogOutputTemplate);
+        var serilogLogger = logConfiguration.CreateLogger();
+        if (logLevelProblem is not null)
+        {
+            serilogLogger.Warning("{Problem}", logLevelProblem);
+        }
 
         var builder = Host.CreateApplicationBuilder();
 
