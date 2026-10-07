@@ -1,4 +1,5 @@
 using Bosun.Health;
+using Bosun.Logging;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -67,6 +68,7 @@ public sealed class SupervisorWatchdog : IHostedService, IDisposable
     private volatile bool restartInProgress;
     private volatile bool stopped;
     private int checkBusy;
+    private readonly RepeatingFaultLogger checkFaults;
 
     public SupervisorWatchdog(
         ISupervisorLiveness liveness,
@@ -86,6 +88,7 @@ public sealed class SupervisorWatchdog : IHostedService, IDisposable
         this.logger = logger;
         this.shutdown = shutdown;
         this.options = options ?? new WatchdogOptions();
+        checkFaults = new RepeatingFaultLogger(timeProvider);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -134,10 +137,15 @@ public sealed class SupervisorWatchdog : IHostedService, IDisposable
         try
         {
             await CheckCoreAsync().ConfigureAwait(false);
+            logger.LogFaultRecovered(checkFaults, "watchdog-check", "The supervisor watchdog's check", "checks");
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "The supervisor watchdog's check failed; it will check again at the next interval");
+            // Every 15 s: a check that keeps throwing the same thing must not write a stack each time.
+            logger.LogRepeatingFault(
+                checkFaults, "watchdog-check", ex.GetType().Name, LogLevel.Error, ex,
+                "The supervisor watchdog's check failed; it will check again at the next interval",
+                "The supervisor watchdog's check", $"{ex.GetType().Name}: {ex.Message}", "checks");
         }
         finally
         {

@@ -1,4 +1,5 @@
 using Bosun.Configuration;
+using Bosun.Logging;
 using Bosun.SessionMonitor.Interop;
 using Microsoft.Extensions.Logging;
 
@@ -22,8 +23,13 @@ public sealed class SshSessionMonitor(
     ISshProcessEnumerator processEnumerator,
     ITcpConnectionReader tcpConnectionReader,
     IHostConfigStore configStore,
-    ILogger<SshSessionMonitor> logger) : ISessionMonitor
+    ILogger<SshSessionMonitor> logger,
+    TimeProvider? timeProvider = null) : ISessionMonitor
 {
+    // bs-qcs: GetActiveSessions runs on the UI status poll (every second). A persistent CIM or
+    // TCP-table failure used to log a Warning with a stack on every call.
+    private readonly RepeatingFaultLogger faults = new(timeProvider ?? TimeProvider.System);
+
     public IReadOnlyList<SshSession> GetActiveSessions()
     {
         var processes = SafeEnumerateProcesses();
@@ -128,11 +134,16 @@ public sealed class SshSessionMonitor(
     {
         try
         {
-            return processEnumerator.Enumerate();
+            var processes = processEnumerator.Enumerate();
+            logger.LogFaultRecovered(faults, "ssh-enumeration", "ssh.exe enumeration", "polls");
+            return processes;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            logger.LogWarning(ex, "ssh.exe enumeration failed; reporting no sessions this tick");
+            logger.LogRepeatingFault(
+                faults, "ssh-enumeration", ex.GetType().Name, LogLevel.Warning, ex,
+                $"ssh.exe enumeration failed ({ex.GetType().Name}: {ex.Message}); reporting no sessions this tick",
+                "ssh.exe enumeration", $"{ex.GetType().Name}: {ex.Message}", "polls");
             return [];
         }
     }
@@ -141,11 +152,16 @@ public sealed class SshSessionMonitor(
     {
         try
         {
-            return tcpConnectionReader.GetConnections();
+            var connections = tcpConnectionReader.GetConnections();
+            logger.LogFaultRecovered(faults, "tcp-table", "TCP table read", "polls");
+            return connections;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            logger.LogWarning(ex, "TCP table read failed; sessions will report Unknown socket state this tick");
+            logger.LogRepeatingFault(
+                faults, "tcp-table", ex.GetType().Name, LogLevel.Warning, ex,
+                $"TCP table read failed ({ex.GetType().Name}: {ex.Message}); sessions will report Unknown socket state this tick",
+                "TCP table read", $"{ex.GetType().Name}: {ex.Message}", "polls");
             return [];
         }
     }

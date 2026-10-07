@@ -1,4 +1,5 @@
 using System.Net.Http;
+using Bosun.Logging;
 using Bosun.Rclone;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -68,7 +69,11 @@ public sealed class RcloneProcessService(
     // racing the restart it is performing) without ending the service's lifetime.
     private CancellationTokenSource? _loopCts;
     private Task? _superviseLoopTask;
-    private string? _lastPortHeldMessage;
+
+    // bs-qcs: the supervise loop retries every RestartDelay forever, so one persistent fault would
+    // otherwise write the same Error every few seconds. Faults are logged once, then as a reminder.
+    private const string AttemptFaultSource = "rclone rcd start";
+    private readonly RepeatingFaultLogger _attemptFaults = new(timeProvider, options.FaultReminderInterval);
 
     public RcloneProcessStatus Status { get; private set; } = RcloneProcessStatus.Stopped;
     public RcloneProcessFaultKind FaultKind { get; private set; } = RcloneProcessFaultKind.None;
@@ -367,18 +372,15 @@ public sealed class RcloneProcessService(
             var check = await portGuard.EnsureFreeAsync(cancellationToken).ConfigureAwait(false);
             if (check.Outcome == RcPortCheckOutcome.HeldByOtherProcess)
             {
-                // Logged at Warning once per distinct message; the 5 s retry would otherwise
-                // repeat the same line forever.
-                logger.Log(
-                    check.Message == _lastPortHeldMessage ? LogLevel.Debug : LogLevel.Warning,
-                    "{Message}",
-                    check.Message);
-                _lastPortHeldMessage = check.Message;
+                // Once per distinct message, then a reminder; the 5 s retry would otherwise repeat
+                // the same line forever.
+                var heldMessage = check.Message ?? $"rc port {options.RcloneRcPort} is held by another process";
+                logger.LogRepeatingFault(
+                    _attemptFaults, AttemptFaultSource, heldMessage, LogLevel.Warning, null, heldMessage,
+                    "rclone rcd start", heldMessage, "attempts");
                 SetStatus(RcloneProcessStatus.Faulted, RcloneProcessFaultKind.PortHeldByOtherProcess, check.Message);
                 return false;
             }
-
-            _lastPortHeldMessage = null;
         }
 
         IRcloneProcessHandle handle;
@@ -394,7 +396,9 @@ public sealed class RcloneProcessService(
         }
         catch (RcloneProcessLaunchException ex)
         {
-            logger.LogError(ex, "rclone rcd failed to start");
+            logger.LogRepeatingFault(
+                _attemptFaults, AttemptFaultSource, "launch failed: " + ex.Message, LogLevel.Error, ex,
+                "rclone rcd failed to start", "rclone rcd start", "launch failed: " + ex.Message, "attempts");
             SetStatus(RcloneProcessStatus.Faulted, RcloneProcessFaultKind.LaunchFailed, ex.Message);
             return false;
         }
@@ -407,7 +411,9 @@ public sealed class RcloneProcessService(
         var health = await WaitUntilHealthyAsync(handle, cancellationToken).ConfigureAwait(false);
         if (!health.Healthy)
         {
-            logger.LogError("{Message}", health.Message);
+            logger.LogRepeatingFault(
+                _attemptFaults, AttemptFaultSource, health.Message!, LogLevel.Error, null, health.Message!,
+                "rclone rcd start", health.Message!, "attempts");
 
             handle.Kill();
             lock (_gate)
@@ -419,6 +425,7 @@ public sealed class RcloneProcessService(
             return false;
         }
 
+        logger.LogFaultRecovered(_attemptFaults, AttemptFaultSource, "rclone rcd start", "attempts");
         logger.LogInformation("rclone rcd is healthy on loopback port {Port}", options.RcloneRcPort);
         SetStatus(RcloneProcessStatus.Healthy, RcloneProcessFaultKind.None, null);
         return true;
@@ -435,6 +442,7 @@ public sealed class RcloneProcessService(
     {
         var deadline = timeProvider.GetUtcNow() + options.HealthCheckTimeout;
         Exception? lastFailure = null;
+        string? lastLoggedKind = null;
 
         // Cancelled when the child exits, to cut short both an in-flight poll and the delay.
         using var exitSignal = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -477,7 +485,20 @@ public sealed class RcloneProcessService(
                 catch (Exception ex) when (ex is not OutOfMemoryException)
                 {
                     lastFailure = ex;
-                    logger.LogDebug(ex, "core/version health check attempt failed, will retry if time remains");
+
+                    // bs-qcs: a poll every 250 ms against a dead or foreign rcd used to log every
+                    // time, with a stack. Say it once per attempt, and again only if the kind of
+                    // failure changes (401 -> refused). The attempt's own Error, logged by the
+                    // caller, carries the final cause. Only unexpected exception types keep a stack.
+                    var kind = RcFaultKinds.Kind(ex);
+                    if (kind != lastLoggedKind)
+                    {
+                        lastLoggedKind = kind;
+                        logger.LogDebug(
+                            RcFaultKinds.ForLog(ex),
+                            "core/version health check attempt failed ({Kind}); will retry if time remains",
+                            kind);
+                    }
                 }
 
                 if (handle.HasExited)

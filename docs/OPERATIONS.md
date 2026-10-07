@@ -12,7 +12,7 @@ Decision 4):
 
 ```
 %LOCALAPPDATA%\Bosun\hosts.toml   -- your configuration
-%LOCALAPPDATA%\Bosun\logs\        -- rolling daily logs
+%LOCALAPPDATA%\Bosun\logs\        -- rolling daily logs, capped at 200 MB (see Logs)
 ```
 
 On first run, if `hosts.toml` does not exist yet, Bosun creates the directory and
@@ -124,3 +124,43 @@ These cannot be automated and must be run by hand before any release.
 `%LOCALAPPDATA%\Bosun\logs\` — rolling daily. Every state transition is logged
 with the host, from-state, to-state, and trigger. When filing a bug, this is the
 part that matters.
+
+**Level.** The log is at Information. For a more detailed trace, set the
+`BOSUN_LOG_LEVEL` environment variable to `Debug` (or `Verbose`) and restart
+Bosun:
+
+```
+setx BOSUN_LOG_LEVEL Debug       -- then quit and start Bosun again
+setx BOSUN_LOG_LEVEL ""          -- back to Information
+```
+
+It is read once at startup, from the environment Bosun is launched in, so a Bosun
+started at login needs you to sign out and in again after `setx`. A value that is
+not a level name is ignored, and the log says so in its first lines. Debug is meant
+for a session spent chasing a problem, not for leaving on. The level is an
+environment variable and not a `hosts.toml` key because the logger starts before
+the configuration is read, and a failure to read it is exactly when you want Debug.
+`Microsoft.*` and `System.*` log only warnings and errors at every level.
+
+**Size.** Each day gets its own file, `bosun-yyyyMMdd.log`. A file that reaches
+20 MB rolls to `bosun-yyyyMMdd_001.log`, then `_002`, and so on, and Bosun keeps
+the newest 10 files. The log directory therefore never holds more than 200 MB. On
+an ordinary day that means about ten days of history.
+
+**A fault that keeps happening is logged once.** When something fails on a timer
+(rclone not answering, `mount/listmounts` failing, an unmount that cannot get
+through), the log shows the first failure in full, then nothing, then a short line
+about every ten minutes:
+
+```
+rclone rcd start: still failing: rclone rcd started but did not become healthy ... HTTP 401 ... (41 attempts since 09:14)
+```
+
+A change in the kind of failure (HTTP 401 becoming connection refused) is logged at
+once, and so is recovery (`... working again after 150 failed attempts since 09:14`).
+So a long outage reads as a few lines, not thousands. Stack traces appear only for
+exceptions Bosun did not expect; a 401, a refused connection or an rc timeout is
+described in words.
+
+**What a bundle holds.** *Copy diagnostics* includes every `*.log` file modified in
+the last three days, rolled `_001` files included.

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Bosun.Configuration;
+using Bosun.Logging;
 using Bosun.Probe;
 using Bosun.Rclone;
 using Bosun.Watchdog;
@@ -102,6 +103,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     private bool started;
     private bool suspended;
     private bool loggedFailuresBeforeUnmountClamp;
+
+    /// <summary>bs-qcs: rc failures that recur on a timer (reconciliation every 30 s, a stuck drain
+    /// every 5 s) are logged once, then as a reminder every ten minutes, not once per tick.</summary>
+    private readonly RepeatingFaultLogger repeatingFaults;
     private ITimer? reconciliationTimer;
 
     /// <summary>Process-wide mounting-availability gate (bs-yvw.1). Defaults to available so every
@@ -158,6 +163,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         this.probe = probe;
         this.timeProvider = timeProvider;
         this.logger = logger;
+        repeatingFaults = new RepeatingFaultLogger(timeProvider);
     }
 
     /// <summary>
@@ -961,6 +967,20 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
     }
 
+    /// <summary>
+    /// Logs an rc failure that is retried on a timer (bs-qcs): in full the first time (with a stack
+    /// only if the exception type is unexpected), as a short reminder once per ten minutes, and not
+    /// at all in between. A change in the kind of failure (HTTP 401 to connection refused) is logged
+    /// at once.
+    /// </summary>
+    private void LogRepeatedRcFault(string source, Exception failure, string message, string context)
+    {
+        var kind = RcFaultKinds.Kind(failure);
+        logger.LogRepeatingFault(
+            repeatingFaults, source, kind, LogLevel.Warning, RcFaultKinds.ForLog(failure),
+            $"{message} ({kind}: {failure.Message})", context, $"{kind}: {failure.Message}");
+    }
+
     private HostRuntime RequireHost(string hostKey) =>
         hosts.TryGetValue(hostKey, out var host)
             ? host
@@ -1551,12 +1571,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         try
         {
             await rcloneClient.UnmountAsync(mountPoint, ct).ConfigureAwait(false);
+            logger.LogFaultRecovered(repeatingFaults, $"drain-unmount:{host.Key}", $"mount/unmount for {host.Key} at {mountPoint}");
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(
-                ex, "mount/unmount call failed for {HostKey} at {MountPoint}; will re-verify against listmounts",
-                host.Key, mountPoint);
+            LogRepeatedRcFault(
+                $"drain-unmount:{host.Key}", ex,
+                $"mount/unmount call failed for {host.Key} at {mountPoint}; will re-verify against listmounts",
+                $"mount/unmount for {host.Key} at {mountPoint}");
         }
 
         if (await IsStillMountedAsync(mountPoint, ct).ConfigureAwait(false) is false)
@@ -1634,9 +1656,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             // Per docs/ARCHITECTURE.md §4 rule 4: never assume a drive is gone. If we cannot even
             // ask, assume the worst (still mounted) so the caller keeps retrying rather than
             // declaring victory on missing information.
-            logger.LogWarning(ex, "mount/listmounts failed while verifying unmount of {MountPoint}; assuming still mounted", mountPoint);
+            LogRepeatedRcFault(
+                $"verify-listmounts:{mountPoint}", ex,
+                $"mount/listmounts failed while verifying unmount of {mountPoint}; assuming still mounted",
+                $"mount/listmounts verifying {mountPoint}");
             return true;
         }
+
+        logger.LogFaultRecovered(repeatingFaults, $"verify-listmounts:{mountPoint}", $"mount/listmounts verifying {mountPoint}");
 
         return mounts.Any(m => string.Equals(m.MountPoint, mountPoint, StringComparison.OrdinalIgnoreCase));
     }
@@ -1873,6 +1900,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// any unmount-call failure). A host NOT believed <c>Mounted</c> (and not mid-transition) whose
     /// drive rclone DOES report is an orphan and is force-unmounted directly.
     /// </summary>
+    private const string ReconcileFaultSource = "reconcile-listmounts";
+
     private async Task ReconcileAsync(CancellationToken ct)
     {
         IReadOnlyList<RcloneMountInfo> mounts;
@@ -1882,9 +1911,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "Reconciliation: mount/listmounts failed; skipping this tick");
+            LogRepeatedRcFault(
+                ReconcileFaultSource, ex, "Reconciliation: mount/listmounts failed; skipping this tick",
+                "Reconciliation: mount/listmounts");
             return;
         }
+
+        logger.LogFaultRecovered(repeatingFaults, ReconcileFaultSource, "Reconciliation: mount/listmounts", "ticks");
 
         var actual = new HashSet<string>(mounts.Select(m => m.MountPoint), StringComparer.OrdinalIgnoreCase);
 

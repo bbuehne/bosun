@@ -1,4 +1,5 @@
 using Bosun.Configuration;
+using Bosun.Logging;
 using Bosun.SessionMonitor;
 using Bosun.Supervisor;
 using Microsoft.Extensions.Logging;
@@ -55,6 +56,9 @@ public sealed class StatusReadModel : IStatusReadModel
     private readonly TimeProvider timeProvider;
     private readonly ILogger<StatusReadModel> logger;
 
+    // bs-qcs: this runs every second, so a condition that persists must not log every second.
+    private readonly RepeatingFaultLogger repeatingFaults;
+
     private ITimer? timer;
     private volatile StatusSnapshot current;
 
@@ -70,6 +74,7 @@ public sealed class StatusReadModel : IStatusReadModel
         this.sessionMonitor = sessionMonitor;
         this.timeProvider = timeProvider;
         this.logger = logger;
+        repeatingFaults = new RepeatingFaultLogger(timeProvider);
 
         // Seeded synchronously so Current is a real snapshot even if a caller reads it before ever
         // calling Start() -- see IStatusReadModel.Current's remarks.
@@ -112,11 +117,16 @@ public sealed class StatusReadModel : IStatusReadModel
                 // never actually happen in practice; skip defensively rather than throwing out of a
                 // background poll timer, but log it because it means the supervisor's host set and
                 // the config store's host set have drifted, which is itself worth knowing about.
-                logger.LogWarning(
-                    "Status poll: {HostKey} is in the supervisor's snapshot but not in the current config; skipping its row",
-                    snapshot.HostKey);
+                var message =
+                    $"Status poll: {snapshot.HostKey} is in the supervisor's snapshot but not in the current config; " +
+                    "skipping its row";
+                logger.LogRepeatingFault(
+                    repeatingFaults, "status-drift:" + snapshot.HostKey, "not in config", LogLevel.Warning, null,
+                    message, $"Status poll: {snapshot.HostKey}", "in the supervisor's snapshot but not in the config");
                 continue;
             }
+
+            logger.LogFaultRecovered(repeatingFaults, "status-drift:" + snapshot.HostKey, $"Status poll: {snapshot.HostKey}");
 
             var sessionCount = sessionCounts.GetValueOrDefault(snapshot.HostKey);
             rows.Add(StatusDerivation.DeriveRow(snapshot, hostConfig, sessionCount));

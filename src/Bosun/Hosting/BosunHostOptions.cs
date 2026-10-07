@@ -30,6 +30,14 @@ public sealed record BosunHostOptions
     public required string ConfigPath { get; init; }
 
     /// <summary>
+    /// The requested minimum log level, as text (<c>Debug</c>, <c>Information</c>, ...). Null or
+    /// unusable means Information (bs-qcs). <see cref="CreateDefault"/> reads it from the
+    /// <c>BOSUN_LOG_LEVEL</c> environment variable; it is a property, not a read inside
+    /// <see cref="BosunHostFactory"/>, so a test never depends on the machine's environment.
+    /// </summary>
+    public string? LogLevel { get; init; }
+
+    /// <summary>
     /// The options Bosun uses at real runtime: both logs and config under
     /// <c>%LOCALAPPDATA%\Bosun</c> (ADR-012 Decision 4; docs/OPERATIONS.md "Logs" and
     /// "Configuration").
@@ -42,6 +50,7 @@ public sealed record BosunHostOptions
         {
             LogDirectory = Path.Combine(bosunDirectory, "logs"),
             ConfigPath = Path.Combine(bosunDirectory, "hosts.toml"),
+            LogLevel = Environment.GetEnvironmentVariable(BosunLogging.LevelEnvironmentVariable),
         };
     }
 }

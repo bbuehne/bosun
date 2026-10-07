@@ -566,4 +566,21 @@ public sealed class DiagnosticsBundleBuilderTests : IDisposable
 
         Assert.Equal(["logs/bosun-20261001.log"], entries);
     }
+
+    [Fact]
+    public async Task Files_rolled_by_the_size_limit_are_included_with_the_day_they_belong_to()
+    {
+        // bs-qcs: the file sink now rolls at a size limit as well as daily. Serilog names the
+        // rolled files bosun-yyyyMMdd_001.log, _002.log, ... (BosunLoggingTests pins that naming).
+        WriteLog("bosun-20261001_001.log", "first rolled file of the day\n", Now.UtcDateTime.AddHours(-3));
+        WriteLog("bosun-20261001_002.log", "second rolled file of the day\n", Now.UtcDateTime.AddHours(-2));
+        WriteLog("bosun-20260925_001.log", "rolled, but six days old\n", Now.UtcDateTime.AddDays(-6));
+
+        var files = await BuildAndRead();
+        var entries = files.Keys.Where(k => k.StartsWith("logs/", StringComparison.Ordinal)).Order(StringComparer.Ordinal).ToArray();
+
+        Assert.Equal(
+            ["logs/bosun-20261001.log", "logs/bosun-20261001_001.log", "logs/bosun-20261001_002.log"], entries);
+        Assert.Contains("second rolled file of the day", files["logs/bosun-20261001_002.log"]);
+    }
 }
