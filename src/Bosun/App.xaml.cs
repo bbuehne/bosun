@@ -235,7 +235,13 @@ public partial class App : Application
                 }
             },
             () => services.GetService<IAppRestarter>(),
-            new MessageBoxRepairPrompt(),
+            // bs-3hx: shown later from the dispatcher and owned by the main window, never inline from the
+            // menu's Click. The window and its controller do not exist yet, hence the functions.
+            new DispatchedRepairPrompt(
+                new WpfUiDispatcher(Dispatcher),
+                new MainWindowRepairDialogOwner(() => _mainWindow, () => _mainWindowController),
+                new WpfRepairDialogPresenter(),
+                services.GetRequiredService<ILogger<DispatchedRepairPrompt>>()),
             services.GetRequiredService<TimeProvider>(),
             appHealth,
             services.GetRequiredService<ILogger<RepairCommands>>());

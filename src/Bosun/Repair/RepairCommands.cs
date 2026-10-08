@@ -1,4 +1,3 @@
-using System.Windows;
 using Bosun.Health;
 using Bosun.Rclone.Process;
 using Bosun.Supervisor;
@@ -6,30 +5,6 @@ using Bosun.Watchdog;
 using Microsoft.Extensions.Logging;
 
 namespace Bosun.Repair;
-
-/// <summary>Asks the user to confirm a disruptive repair, and tells them when one failed. Behind an
-/// interface so tests never show a dialog.</summary>
-public interface IRepairPrompt
-{
-    /// <summary>True if the user agreed to go ahead. Blocks until they answer.</summary>
-    bool Confirm(string title, string message);
-
-    /// <summary>Tells the user a repair could not be done.</summary>
-    void ShowError(string title, string message);
-}
-
-/// <summary>A plain message box, like <c>MessageBoxDiagnosticsErrorPresenter</c> (the repo's existing
-/// pattern for a one-off prompt). Must be called on the UI thread, which a click handler already is.
-/// Defaults to "No" so a stray Enter does not disconnect drives.</summary>
-public sealed class MessageBoxRepairPrompt : IRepairPrompt
-{
-    public bool Confirm(string title, string message) =>
-        MessageBox.Show(message, $"Bosun - {title}", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
-        == MessageBoxResult.Yes;
-
-    public void ShowError(string title, string message) =>
-        MessageBox.Show(message, $"Bosun - {title}", MessageBoxButton.OK, MessageBoxImage.Error);
-}
 
 /// <summary>
 /// The three one-click repairs (bs-aoz, ADR-020 Decision 5): <b>Restart rclone</b>, <b>Unmount all and
@@ -58,8 +33,10 @@ public sealed class MessageBoxRepairPrompt : IRepairPrompt
 /// </para>
 /// <para>
 /// <b>Threading.</b> Call these on the UI thread, as <c>CopyDiagnosticsCommand</c> is called: the
-/// confirmation is a modal box and the continuations after an <c>await</c> resume there. They never
-/// throw, so a click handler can fire and forget.
+/// continuations after an <c>await</c> resume there. The confirmation is
+/// asked through <see cref="IRepairPrompt.ConfirmAsync"/>, which shows it later, from the dispatcher and
+/// with the main window as owner (bs-3hx), so a click handler never blocks on it. They never throw, so a
+/// click handler can fire and forget.
 /// </para>
 /// </remarks>
 public sealed class RepairCommands
@@ -146,13 +123,17 @@ public sealed class RepairCommands
             }
 
             var mounted = MountedDrives();
-            if (mounted.Count > 0 && !prompt.Confirm(
-                "Restart rclone",
-                $"Restarting rclone disconnects the mounted drive(s) {string.Join(", ", mounted)}. Anything being copied to or from them is interrupted.\n\n" +
-                "Bosun reconnects persistent hosts once they pass a fresh check; on-demand hosts stay disconnected until you mount them.\n\nRestart rclone?"))
+            if (mounted.Count > 0)
             {
-                logger?.LogInformation("Repair: Restart rclone was cancelled by the user at the confirmation ({Mounted} mounted drive(s))", mounted.Count);
-                return;
+                var answer = await prompt.ConfirmAsync(
+                    "Restart rclone",
+                    $"Restarting rclone disconnects the mounted drive(s) {string.Join(", ", mounted)}. Anything being copied to or from them is interrupted.\n\n" +
+                    "Bosun reconnects persistent hosts once they pass a fresh check; on-demand hosts stay disconnected until you mount them.\n\nRestart rclone?").ConfigureAwait(true);
+                if (answer != RepairConfirmation.Confirmed)
+                {
+                    LogNotConfirmed("Restart rclone", answer, mounted.Count);
+                    return;
+                }
             }
 
             logger?.LogInformation(
@@ -192,14 +173,18 @@ public sealed class RepairCommands
         try
         {
             var mounted = MountedDrives();
-            if (mounted.Count > 0 && !prompt.Confirm(
-                "Unmount all & re-probe",
-                $"This disconnects every mounted drive ({string.Join(", ", mounted)}). Anything being copied to or from them is interrupted.\n\n" +
-                "Bosun then checks every host again. Persistent hosts reconnect once they pass the check; on-demand hosts stay disconnected until you mount them. " +
-                "A host you unmounted yourself stays unmounted.\n\nUnmount all?"))
+            if (mounted.Count > 0)
             {
-                logger?.LogInformation("Repair: Unmount all & re-probe was cancelled by the user at the confirmation ({Mounted} mounted drive(s))", mounted.Count);
-                return;
+                var answer = await prompt.ConfirmAsync(
+                    "Unmount all & re-probe",
+                    $"This disconnects every mounted drive ({string.Join(", ", mounted)}). Anything being copied to or from them is interrupted.\n\n" +
+                    "Bosun then checks every host again. Persistent hosts reconnect once they pass the check; on-demand hosts stay disconnected until you mount them. " +
+                    "A host you unmounted yourself stays unmounted.\n\nUnmount all?").ConfigureAwait(true);
+                if (answer != RepairConfirmation.Confirmed)
+                {
+                    LogNotConfirmed("Unmount all & re-probe", answer, mounted.Count);
+                    return;
+                }
             }
 
             logger?.LogInformation(
@@ -264,11 +249,12 @@ public sealed class RepairCommands
             var drives = mounted.Count > 0
                 ? $"Mounted drives ({string.Join(", ", mounted)}) disconnect when Bosun closes, and persistent hosts reconnect once the new Bosun has checked them. "
                 : string.Empty;
-            if (!prompt.Confirm(
+            var answer = await prompt.ConfirmAsync(
                 "Restart Bosun",
-                $"Bosun will close and start again. {drives}Its window opens when it is back.\n\nRestart Bosun?"))
+                $"Bosun will close and start again. {drives}Its window opens when it is back.\n\nRestart Bosun?").ConfigureAwait(true);
+            if (answer != RepairConfirmation.Confirmed)
             {
-                logger?.LogInformation("Repair: Restart Bosun was cancelled by the user at the confirmation");
+                LogNotConfirmed("Restart Bosun", answer, mounted.Count);
                 return;
             }
 
@@ -294,6 +280,29 @@ public sealed class RepairCommands
         finally
         {
             Volatile.Write(ref restartingBosun, 0);
+        }
+    }
+
+    /// <summary>
+    /// Logs why a repair did not run after its confirmation. "By the user" is claimed only for an explicit
+    /// No: a dialog that closed with no answer (bs-3hx) is not the user's decision, and logging it as one
+    /// sent the first diagnosis the wrong way.
+    /// </summary>
+    private void LogNotConfirmed(string action, RepairConfirmation answer, int mounted)
+    {
+        if (answer == RepairConfirmation.Declined)
+        {
+            logger?.LogInformation(
+                "Repair: {Action} was declined (the user answered No at the confirmation); the repair did not run ({Mounted} mounted drive(s))",
+                action,
+                mounted);
+        }
+        else
+        {
+            logger?.LogWarning(
+                "Repair: {Action} was not confirmed (the confirmation closed without an answer); the repair did not run ({Mounted} mounted drive(s))",
+                action,
+                mounted);
         }
     }
 
