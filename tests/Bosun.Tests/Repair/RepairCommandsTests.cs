@@ -93,7 +93,80 @@ public sealed class RepairCommandsTests
         await h.Commands.RestartRcloneAsync();
 
         Assert.Equal(0, h.Rclone.Calls);
-        Assert.True(h.LoggedInformation("cancelled by the user"));
+        Assert.True(h.LoggedInformation("declined"));
+        Assert.True(h.LoggedInformation("the repair did not run"));
+    }
+
+    // -- What the log says when a confirmation did not lead to a repair (bs-3hx) ---------------
+
+    public static TheoryData<string> AllRepairs() => ["rclone", "unmount", "bosun"];
+
+    private static Task RunRepair(Harness h, string which) => which switch
+    {
+        "rclone" => h.Commands.RestartRcloneAsync(),
+        "unmount" => h.Commands.UnmountAllAsync(),
+        _ => h.Commands.RestartBosunAsync(),
+    };
+
+    private static int RepairCalls(Harness h, string which) => which switch
+    {
+        "rclone" => h.Rclone.Calls,
+        "unmount" => h.Supervisor.RepairAllCalls,
+        _ => h.AppRestarter.Reasons.Count,
+    };
+
+    [Theory]
+    [MemberData(nameof(AllRepairs))]
+    public async Task An_explicit_No_is_logged_as_declined_and_the_repair_does_not_run(string which)
+    {
+        var h = new Harness();
+        h.Supervisor.Snapshot = [Mounted()];
+        h.Prompt.Result = RepairConfirmation.Declined;
+
+        await RunRepair(h, which);
+
+        Assert.Equal(0, RepairCalls(h, which));
+        var entry = Assert.Single(h.Log.Entries, e => e.Message.Contains("declined", StringComparison.Ordinal));
+        Assert.Equal(LogLevel.Information, entry.Level);
+        Assert.Contains("answered No", entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(h.Log.Entries, e => e.Message.Contains("cancelled by the user", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [MemberData(nameof(AllRepairs))]
+    public async Task A_dialog_that_closed_without_an_answer_is_never_logged_as_the_users_decision(string which)
+    {
+        var h = new Harness();
+        h.Supervisor.Snapshot = [Mounted()];
+        h.Prompt.Result = RepairConfirmation.NoAnswer;
+
+        await RunRepair(h, which);
+
+        Assert.Equal(0, RepairCalls(h, which));
+        var entry = Assert.Single(h.Log.Entries, e => e.Message.Contains("not confirmed", StringComparison.Ordinal));
+        Assert.Equal(LogLevel.Warning, entry.Level); // worth seeing: the user may think they asked for it
+        Assert.Contains("closed without an answer", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("the repair did not run", entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(h.Log.Entries, e =>
+            e.Message.Contains("by the user", StringComparison.OrdinalIgnoreCase)
+            || e.Message.Contains("cancelled", StringComparison.OrdinalIgnoreCase)
+            || e.Message.Contains("declined", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [MemberData(nameof(AllRepairs))]
+    public async Task Yes_leads_to_the_repair_running_and_no_not_confirmed_line(string which)
+    {
+        var h = new Harness();
+        h.Supervisor.Snapshot = [Mounted()];
+        h.Prompt.Result = RepairConfirmation.Confirmed;
+
+        await RunRepair(h, which);
+
+        Assert.Equal(1, RepairCalls(h, which));
+        Assert.DoesNotContain(h.Log.Entries, e =>
+            e.Message.Contains("not confirmed", StringComparison.Ordinal) || e.Message.Contains("declined", StringComparison.Ordinal));
+        Assert.Contains(h.Log.Entries, e => e.Message.StartsWith("Repair:", StringComparison.Ordinal) && e.Message.Contains("at the user's request", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -399,16 +472,22 @@ public sealed class RepairCommandsTests
 
     private sealed class FakePrompt : IRepairPrompt
     {
-        public bool Answer { get; set; } = true;
+        public RepairConfirmation Result { get; set; } = RepairConfirmation.Confirmed;
+
+        /// <summary>Shorthand kept from before the dialog had three outcomes: false is an explicit No.</summary>
+        public bool Answer
+        {
+            set => Result = value ? RepairConfirmation.Confirmed : RepairConfirmation.Declined;
+        }
 
         public List<(string Title, string Message)> Confirmations { get; } = [];
 
         public List<(string Title, string Message)> Errors { get; } = [];
 
-        public bool Confirm(string title, string message)
+        public Task<RepairConfirmation> ConfirmAsync(string title, string message)
         {
             Confirmations.Add((title, message));
-            return Answer;
+            return Task.FromResult(Result);
         }
 
         public void ShowError(string title, string message) => Errors.Add((title, message));

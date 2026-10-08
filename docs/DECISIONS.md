@@ -1476,7 +1476,14 @@ left open, recorded so they are not relitigated:
   the same actions, both through `HostActionDispatcher.Repair`. All three repairs are always
   offered while the banner is up. `rclone.*` issues lead with Restart rclone; every other issue
   leads with Restart Bosun; the restart notice leads with Dismiss.
-- *Confirmation.* A `MessageBox` behind `IRepairPrompt` (the repo's existing pattern). Unmount all
-  and Restart rclone ask only when a drive is mounted. Restart Bosun always asks.
+- *Confirmation.* A modal dialog behind `IRepairPrompt`. Unmount all and Restart rclone ask only
+  when a drive is mounted. Restart Bosun always asks. *Amended (bs-3hx):* it was first a plain
+  `MessageBox` shown inline from the tray menu's `Click`, with no owner. On the real machine it
+  flashed and closed without a click and the repair was skipped: `Click` is raised after the menu
+  has started to close, an owner-less `MessageBox` takes the thread's active window (the menu's own
+  popup), and WPF reports a message box destroyed without an answer as "No". It is now queued on
+  the dispatcher at Background priority, owned by the main window (shown and activated first), and
+  is a small code-built window so that No and "closed with no answer" are different results. The
+  log says "declined" only for No, and "not confirmed" otherwise.
 - *A stuck Unmount all does not lock out Restart Bosun.* Each repair has its own in-flight guard,
   and Unmount all gives up after 90 s and says so.

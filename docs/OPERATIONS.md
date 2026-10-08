@@ -119,6 +119,55 @@ These cannot be automated and must be run by hand before any release.
 | The health banner is showing, or a drive is stuck | Use the repair buttons in the banner, or **Repair** in the tray menu (ADR-020). *Restart rclone* replaces `rclone rcd` and reconciles every host. *Unmount all & re-probe* drops every mounted drive and brings persistent hosts back after a fresh check (it does not park hosts or un-park ones you unmounted). *Restart Bosun* starts a fresh Bosun and shows its window; it does not count against the watchdog's restart limit. Each asks first if a drive would disconnect. Use **Copy diagnostics** before restarting if you want to keep the evidence. |
 | "Bosun restarted itself" notice | The watchdog found the mount supervisor stalled and restarted Bosun (the window stays hidden for that). The notice gives the time and reason; **Dismiss** removes it, or it goes after 24 hours. The log has the details. |
 
+### Repair actions: expected result
+
+Do this from the tray (**Repair** submenu), then once more from the banner button if the banner is showing.
+Do it with at least one persistent host mounted, and note its drive letter first. Every confirmation below
+is the same dialog. If it is shown correctly, none of these should happen: it flashes and closes by itself,
+or it sits behind another window. (A fault of that kind, bs-3hx, was the reason the dialog was rebuilt.)
+
+**The dialog (all three).** Within about a second of the click the Bosun main window opens if it was hidden
+(or comes to the front if it was open), and a "Bosun - <repair name>" dialog appears centred over it. It
+stays up until you answer. It lists the mounted drive letters. **No** is the default button, so Enter means
+No. Esc also means No. Closing it any other way (Alt+F4) is "no answer".
+
+**Restart rclone**
+- Press **Yes**.
+- Log (`%LOCALAPPDATA%\Bosun\logs\`, newest file) shows, in order:
+  `Repair: restarting rclone at the user's request; N mounted drive(s) will be dropped and reconciled from scratch`,
+  then `Repair: rclone restarted and is healthy; every host is being reconciled from scratch`.
+- Drives: every mounted drive letter disappears at once. Persistent hosts mount again, on their old letters,
+  within one probe cycle after a fresh probe passes (up to a minute or so). On-demand hosts stay unmounted
+  until you mount them from the tray.
+- The banner, if it was showing for an rclone fault, clears.
+- Press **No** instead: nothing changes, drives stay up, and the log has
+  `Repair: Restart rclone was declined (the user answered No at the confirmation); the repair did not run`.
+
+**Unmount all & re-probe**
+- Press **Yes**.
+- Log: `Repair: unmount all and re-probe at the user's request; draining N mounted drive(s)`, then
+  `Repair: unmount all and re-probe was accepted by the supervisor`. The supervisor's own transition lines
+  follow, for each host.
+- Drives: every mounted drive letter disappears. Each persistent host is probed again and mounts again on its
+  old letter once that probe passes. A host you had unmounted yourself, and on-demand hosts, stay unmounted.
+- Press **No** instead: drives stay up, and the log says `... was declined (the user answered No ...)`.
+
+**Restart Bosun**
+- This dialog always appears, even with no drive mounted. Press **Yes**.
+- Log (the old instance): `Repair: restarting Bosun at the user's request (N mounted drive(s)); this is a manual
+  restart and is not counted against the watchdog's limit`. The window and tray icon disappear, then come
+  back a few seconds later. The new instance's window opens by itself (it is a manual restart, not an
+  autostart). The new process has a different PID in Task Manager.
+- Drives: drives disconnect when the old Bosun closes. Persistent hosts mount again once the new Bosun has
+  probed them. On-demand hosts stay unmounted.
+- No "Bosun restarted itself" notice appears (that is for the watchdog), and the watchdog's restart count does
+  not go up.
+- Press **No** instead: nothing restarts, and the log says `... was declined (the user answered No ...)`.
+
+**If the log says "was not confirmed (the confirmation closed without an answer)"** the dialog went away
+without any button being used. That is the old fault, or something closed the dialog. Nothing ran. Report it
+with the log lines around it.
+
 ## Logs
 
 `%LOCALAPPDATA%\Bosun\logs\` — rolling daily. Every state transition is logged

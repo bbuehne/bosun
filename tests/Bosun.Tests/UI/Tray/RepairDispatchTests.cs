@@ -17,7 +17,8 @@ public sealed class RepairDispatchTests
 {
     private sealed class Prompt : IRepairPrompt
     {
-        public bool Confirm(string title, string message) => true;
+        public Task<RepairConfirmation> ConfirmAsync(string title, string message) =>
+            Task.FromResult(RepairConfirmation.Confirmed);
 
         public void ShowError(string title, string message)
         {
