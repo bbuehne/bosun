@@ -54,12 +54,18 @@ fragment file — all of which look like OS faults, not test failures. Rules:
   answer. Note Graphify gaps in your report.
 - **dotnet CLI for everything:** `dotnet build`, `dotnet test`,
   `dotnet add package <pkg>` (never hand-edit `.csproj` package refs).
-- **Never add `PublishTrimmed`.** Trimming is unsupported for WPF and fails at
-  runtime in non-obvious ways.
+- **Never add `PublishTrimmed` to a WPF project.** Trimming is unsupported for
+  WPF and fails at runtime in non-obvious ways. The one exception is
+  `src/Bosun.ClaudeHook/`, a console app published with `PublishAot`, which must
+  never reference WPF or the `Bosun` project (ADR-021).
 - **Tests ship with code.** Test behaviour, not implementation; deterministic
   always — no sleeps, no real network, no real clock. Time is injected.
 - Win32 interop stays behind `ISessionMonitor`. If P/Invoke is leaking into a
-  second file, stop and report.
+  second file, stop and report. The one exception is `src/Bosun.ClaudeHook/`,
+  a separate executable that keeps its own P/Invoke in a single file (ADR-021).
+- No default-suite test may launch `wt.exe`, read or write
+  `%LOCALAPPDATA%\Bosun\claude-sessions\`, or write
+  `%LOCALAPPDATA%\Bosun\claude-plugin\` (ADR-021).
 - Small, coherent commits; imperative subject; reference the bd ID:
   `Add probe backoff reset on resume (bs-31)`.
 - Never commit secrets, a real `hosts.toml`, or publish output.
