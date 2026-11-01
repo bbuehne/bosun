@@ -1,0 +1,41 @@
+{
+  "description": "E13a spike (bs-vqh.1): logs hook payloads and process facts to %LOCALAPPDATA%\\BosunSpike\\hooks.jsonl. Throwaway; see spikes/e13a/README.md.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/helper/HookLogger.exe",
+            "args": ["SessionStart", "--plugin-tag", "v1"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/helper/HookLogger.exe",
+            "args": ["UserPromptSubmit", "--plugin-tag", "v1"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/helper/HookLogger.exe",
+            "args": ["SessionEnd", "--plugin-tag", "v1"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

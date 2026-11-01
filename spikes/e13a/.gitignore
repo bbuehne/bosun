@@ -1,0 +1,3 @@
+# Built copies of the logger inside the plugin directories (build.ps1 creates them).
+plugin/helper/
+plugin-slowend/helper/

@@ -1,0 +1,14 @@
+{
+  "name": "bosun-e13a",
+  "description": "Throwaway local marketplace for the Bosun E13a spike (bs-vqh.1). Remove after the spike.",
+  "owner": {
+    "name": "Bosun spike"
+  },
+  "plugins": [
+    {
+      "name": "bosun-e13a-spike",
+      "source": "./plugin",
+      "description": "Logs hook payloads and process facts for ADR-021 assumptions."
+    }
+  ]
+}
