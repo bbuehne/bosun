@@ -287,6 +287,7 @@ public sealed class HostConfigTomlWriterTests
     internal static void AssertConfigsEquivalent(BosunConfig expected, BosunConfig actual)
     {
         AssertGlobalEquivalent(expected.Global, actual.Global);
+        Assert.Equal(expected.ClaudeSessions, actual.ClaudeSessions);
 
         Assert.Equal(
             expected.Hosts.Keys.OrderBy(k => k, StringComparer.Ordinal),
