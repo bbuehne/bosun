@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    E13a spike (bs-vqh.1). NOT part of Bosun.sln. Framework-dependent on purpose: this measures what
+    hooks and Windows Terminal do, not the NativeAOT helper's cold start (that is bs-vqh's own issue).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>HookLogger</AssemblyName>
+    <RootNamespace>HookLogger</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>false</TieredPGO>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+</Project>
