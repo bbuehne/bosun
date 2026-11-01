@@ -15,6 +15,11 @@ public sealed record BosunConfig
 {
     public required GlobalConfig Global { get; init; }
 
+    /// <summary>The top-level <c>[claude_sessions]</c> table (ADR-021 Decision 11). Not per host.
+    /// Absent table and absent field both mean disabled; deliberately not <c>required</c> so
+    /// every existing construction site keeps meaning "feature off".</summary>
+    public ClaudeSessionsConfig ClaudeSessions { get; init; } = new();
+
     /// <summary>
     /// Keyed by the host's stable TOML identity (the <c>[hosts.&lt;key&gt;]</c> key itself,
     /// e.g. <c>example-nas</c>) — not by <see cref="HostConfig.DisplayName"/>, which is
@@ -67,6 +72,18 @@ public sealed record GlobalConfig
 
     public int SuspendUnmountTimeoutSeconds { get; init; } = DefaultSuspendUnmountTimeoutSeconds;
     public bool StartWithWindows { get; init; } = DefaultStartWithWindows;
+}
+
+/// <summary>The <c>[claude_sessions]</c> block (ADR-021 Decision 11, docs/CONFIG-SCHEMA.md "Claude
+/// Code sessions").</summary>
+public sealed record ClaudeSessionsConfig
+{
+    public const bool DefaultEnabled = false;
+
+    /// <summary><see langword="true"/> makes Bosun generate its Claude Code plugin, watch session
+    /// records, and restore sessions lost to a reboot or Terminal exit. Never on by default: it
+    /// leads to a plugin the user installs into their own Claude Code configuration.</summary>
+    public bool Enabled { get; init; } = DefaultEnabled;
 }
 
 /// <summary>One <c>[hosts.&lt;key&gt;]</c> entry.</summary>

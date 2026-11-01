@@ -75,6 +75,11 @@ internal static class FirstRunConfigTemplate
             suspend_unmount_timeout_seconds = {{GlobalConfig.DefaultSuspendUnmountTimeoutSeconds}}
             start_with_windows              = {{startWithWindows}}
 
+            # Restore Claude Code sessions after a reboot or a Terminal exit (ADR-021). Off unless
+            # you set it: turning it on leads to a plugin you install into your own Claude Code.
+            # [claude_sessions]
+            # enabled = false
+
 
             # An always-on box on the LAN. Persistent mount, quiet session.
             # [hosts.example-nas]
