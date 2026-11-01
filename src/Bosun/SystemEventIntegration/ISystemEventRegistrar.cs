@@ -29,6 +29,14 @@ internal interface ISystemEventRegistrar
     void RemovePowerModeChanged(PowerModeChangedEventHandler handler);
     void AddSessionSwitch(SessionSwitchEventHandler handler);
     void RemoveSessionSwitch(SessionSwitchEventHandler handler);
+
+    /// <summary>
+    /// <c>SystemEvents.SessionEnding</c> (logoff / shutdown in progress). Added for ADR-021
+    /// Decision 5, whose Claude Code session classifier freezes while Windows ends the session.
+    /// Nothing subscribes yet (bs-vqh.7 adds only the seam).
+    /// </summary>
+    void AddSessionEnding(SessionEndingEventHandler handler);
+    void RemoveSessionEnding(SessionEndingEventHandler handler);
     void AddNetworkAddressChanged(NetworkAddressChangedEventHandler handler);
     void RemoveNetworkAddressChanged(NetworkAddressChangedEventHandler handler);
 }
@@ -46,6 +54,10 @@ internal sealed class RealSystemEventRegistrar : ISystemEventRegistrar
     public void AddSessionSwitch(SessionSwitchEventHandler handler) => SystemEvents.SessionSwitch += handler;
 
     public void RemoveSessionSwitch(SessionSwitchEventHandler handler) => SystemEvents.SessionSwitch -= handler;
+
+    public void AddSessionEnding(SessionEndingEventHandler handler) => SystemEvents.SessionEnding += handler;
+
+    public void RemoveSessionEnding(SessionEndingEventHandler handler) => SystemEvents.SessionEnding -= handler;
 
     public void AddNetworkAddressChanged(NetworkAddressChangedEventHandler handler) => NetworkChange.NetworkAddressChanged += handler;
 
