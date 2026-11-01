@@ -53,6 +53,10 @@ public static class ConfigParser
         return new BosunConfig
         {
             Global = global,
+            ClaudeSessions = new ClaudeSessionsConfig
+            {
+                Enabled = raw.ClaudeSessions?.Enabled ?? ClaudeSessionsConfig.DefaultEnabled,
+            },
             Hosts = hosts,
         };
     }

@@ -16,8 +16,17 @@ internal sealed class BosunConfigRaw
     [TomlPropertyName("global")]
     public GlobalConfigRaw? Global { get; set; }
 
+    [TomlPropertyName("claude_sessions")]
+    public ClaudeSessionsConfigRaw? ClaudeSessions { get; set; }
+
     [TomlPropertyName("hosts")]
     public Dictionary<string, HostConfigRaw>? Hosts { get; set; }
+}
+
+internal sealed class ClaudeSessionsConfigRaw
+{
+    [TomlPropertyName("enabled")]
+    public bool? Enabled { get; set; }
 }
 
 internal sealed class GlobalConfigRaw
