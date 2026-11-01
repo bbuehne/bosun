@@ -33,10 +33,10 @@ send back.
 
 ## Part 0. Setup
 
-Open a Terminal tab. Set these variables in **every new tab** you use (edit the first line):
+Open a Terminal tab. Set these two variables in **every new tab** you use:
 
 ```powershell
-$S = "C:\path\to\bosun\spikes\e13a"
+$S = "C:\Users\Barry\Development\bosun\spikes\e13a"
 $L = "$S\plugin\helper\HookLogger.exe"
 ```
 
@@ -349,6 +349,21 @@ Repeat 4.1 two more times with the machine idle, then once with something busy r
 large build), and tell me which run was which. Close the `E13A-PROBE` tabs and the console window
 afterwards.
 
+### 4.2 Does Terminal keep Bosun's restore arguments intact
+
+This checks the argument list Bosun's restore builder produces, which unit tests cannot launch. It
+opens one extra tab and runs `Get-Location` instead of Claude. Run it from any Terminal tab:
+
+```powershell
+pwsh -File "$S\wt-args.ps1"
+```
+
+**Expected:** a new tab opens, titled exactly `e13a my;dir` (with the semicolon, no backslash). It
+shows a PowerShell 7 prompt, and the `Get-Location` output ends in `\e13a my;dir`. No second, stray tab
+opens, and there is no error such as "The system cannot find the file specified". Report back: the
+tab's title and the path it printed, exactly as shown, and whether any extra tab or error appeared.
+Then close that tab.
+
 ## Part 5. Logoff, restart, shutdown (assumptions 1 and 8)
 
 Each step ends your Windows session. Save your work first. The probe records `SessionEnding` against the
@@ -388,6 +403,16 @@ Report back: the two report outputs, and anything Windows showed while signing o
 Start menu, power button, **Restart**. Sign in. Then the same follow-up commands.
 
 **Expected:** as 5.1. Report back: the two report outputs.
+
+**Extra, only if you use Remote Control.** This tests the docs finding below that a resume after a
+reboot may not reconnect. Before restarting, make sure "Enable Remote Control for all sessions" is
+`true` and that one of the two Claude tabs shows as connected on your phone or claude.ai/code. Note that
+session's id from `& $L --report`. After signing back in, in a new tab:
+`claude --plugin-dir "$S\plugin" --resume <that id>`.
+
+**Expected:** the earlier conversation is shown. Then one of two things: the session shows Remote
+Control connected and your phone can message it, or it shows "Previous session is unavailable — run
+/remote-control to start a new one". Report back which of the two you saw, with the exact text.
 
 ### 5.3 Shut down with Fast Startup on
 
