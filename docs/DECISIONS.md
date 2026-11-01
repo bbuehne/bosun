@@ -1492,8 +1492,7 @@ left open, recorded so they are not relitigated:
 
 ## ADR-021 · Restore Claude Code sessions that Windows Terminal lost
 
-**Status:** Proposed (2026-11-01). Becomes Accepted when the maintainer approves it; flip
-this line, with the date, in the same change. Extends Bosun's scope (`CLAUDE.md` §1),
+**Status:** Accepted (2026-11-01; proposed the same day). Extends Bosun's scope (`CLAUDE.md` §1),
 narrows `CLAUDE.md` §4's trimming rule and the interop rule for one new, non-WPF project,
 and amends ADR-020 §6 (what the diagnostics bundle may contain).
 
