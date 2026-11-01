@@ -14,6 +14,11 @@ mounted_deep_probe_interval_seconds = 300
 suspend_unmount_timeout_seconds = 8
 start_with_windows              = true
 
+# Restore Claude Code sessions after a reboot or a Terminal exit (ADR-021). Off unless you set it:
+# turning it on leads to a plugin you install into your own Claude Code. Not per host.
+# [claude_sessions]
+# enabled = false
+
 
 # An always-on box on the LAN. Persistent mount, quiet session.
 [hosts.example-nas]
