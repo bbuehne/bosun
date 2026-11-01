@@ -26,6 +26,18 @@ The reliability of Bosun is bounded by WinFsp and rclone. Bosun's job is to
 never put those components in a state that harms the user — principally, to
 never leave a mounted drive letter pointing at an unreachable host.
 
+Since ADR-021 there is a fifth, independent concern: Claude Code sessions running
+in Windows Terminal tabs. Bosun learns about them from a hook helper
+(`bosun-claude-hook.exe`) that it ships inside a Claude Code plugin, and it
+reopens them through `wt.exe` after a reboot or a Terminal exit. Nothing in that
+path touches a mount, `rclone rcd`, or the supervisor.
+
+```
+   Claude Code process ──hooks──► bosun-claude-hook.exe ──writes──► %LOCALAPPDATA%\Bosun\claude-sessions\*.json
+                                                                                  │
+   wt.exe new-tab ... claude --resume <id>  ◄──── Bosun (ClaudeSessionService) ◄──┘ reads, classifies, deletes
+```
+
 ## 2. Process model
 
 **One process.** A WPF application with a main window, a tray icon, and a
@@ -62,8 +74,14 @@ Bosun.exe                      (single instance, named mutex — bs-2wa)
     ├── SupervisorService      : BackgroundService (the loop, §4)
     ├── SessionMonitorService  : BackgroundService (ssh.exe enumeration)
     ├── SystemEventService     : IHostedService    (power/network/session hooks)
-    └── FragmentWriterService  : IHostedService    (writes WT fragment on change)
+    ├── FragmentWriterService  : IHostedService    (writes WT fragment on change)
+    └── ClaudeSessionService   (Claude Code session records, ADR-021; started and
+                                stopped by StartupOrchestrator, not AddHostedService)
 ```
+
+`bosun-claude-hook.exe` is a separate, short-lived process started by Claude
+Code, never by Bosun. It does not need Bosun to be running: records written while
+Bosun is down are evaluated at its next start.
 
 ## 3. Component responsibilities
 
@@ -148,6 +166,18 @@ Enumerates `ssh.exe` processes, resolves their command lines via CIM, and
 correlates them to configured hosts. Cross-references `GetExtendedTcpTable` for
 socket state. This is the one component with meaningful P/Invoke; keep it behind
 the interface and fake it in tests.
+
+### Claude Code session restore (ADR-021)
+
+Five parts, each behind its own seam:
+
+| Part | Responsibility | Tested with |
+|---|---|---|
+| `bosun-claude-hook.exe` (`src/Bosun.ClaudeHook/`) | Hook payload on stdin, plus its own parent chain, environment and token, becomes one record file (ADR-021 Decision 4). Never writes stdout; exits 0 on every path within an internal deadline. Its P/Invoke lives in one file of its own. | A pure mapping function from (payload, environment, process facts) to record; no real files |
+| `IClaudePluginWriter` | Generates the `bosun` directory marketplace and the `bosun-claude-sessions` plugin (`plugin.json`, `hooks/hooks.json` in exec form with `${CLAUDE_PLUGIN_ROOT}` and a `timeout` per hook, the helper under a versioned file name) in `%LOCALAPPDATA%\Bosun\claude-plugin\`. Rewrites only when the content changed, atomically, like `IFragmentWriter`. | A temp directory |
+| `ClaudeSessionClassifier` | Pure function: records, a live-process snapshot (PID, creation time, image), the current logon session, whether the session is ending, and the clock in; one outcome per record out, per ADR-021 Decision 5. | Exhaustive table tests, written independently by `test-author` |
+| `wt.exe` argument builder | Pure function from dispatched records to one `wt.exe` argument list (ADR-021 Decision 6). | Quoting tests: paths with spaces, a `;` in a path (Terminal treats a bare `;` as a subcommand separator), each tab root's keep-open form, a tab root that is Claude Code itself, a missing profile ID |
+| `ClaudeSessionService` | Started and stopped by `StartupOrchestrator`. Timer; process snapshot through `ISessionMonitor`'s interop layer; the startup restore step; detection of a newly launched `WindowsTerminal.exe` for pending restores; dispatch, confirmation and timeout; record deletion; the restore toast; the window's session list and "not reporting" state (Decision 9). Every tick is wrapped so a fault reports into the health model (ADR-020 §4) instead of escaping. Restore goes through `IExternalLauncher`. | Fakes for the snapshot, the clock, the records store and the launcher |
 
 ### `ISystemEventSource`
 Wraps three .NET event sources:
@@ -415,6 +445,12 @@ state directly, it posts commands to the same channel.
 | Machine sleeps with mounts up | Unmount on suspend. If we missed it, force-unmount and reconcile on resume. |
 | Config file invalid | Keep running on the last valid config; surface the parse error. Never apply a partial config. |
 | Bosun crashes with mounts up | On next start, enumerate existing mounts via `mount/listmounts` and adopt or clear them before doing anything else. |
+| Claude session tracking is on but a live, Terminal-hosted Claude Code process has no record (plugin not installed or removed, hooks not firing) | Say so causally in the window (ADR-021 Decision 9). Never restore anything on a guess. |
+| The hook helper fails (bad payload, records directory unwritable) or hangs | Exit 0 anyway, inside its own deadline and the hook `timeout`; Claude Code is never disturbed. The session is simply not tracked, and the "not reporting" state covers it. |
+| A restore does not resume (`wt.exe` fails, the folder is gone, `claude` not found) | The dispatched record is never confirmed. Report it by title in the window and the toast, keep it in `dispatched\`, retry at the next trigger. After three unconfirmed attempts, stop retrying and list it as "Could not resume" with a Dismiss action. |
+| A record's transcript is gone | Delete the record; do not open a tab that can only print "No conversation found". |
+| Windows is logging off or shutting down | Stop classifying at `SessionEnding`, so records survive to be restored at the next logon. |
+| Bosun restarts (watchdog, crash, manual) while sessions are running | No duplicates: a live process's record and a live session ID are never restored, and a dispatched record waits out its confirmation timeout. |
 
 ## 7. Explicitly out of scope for v1
 
@@ -422,5 +458,10 @@ state directly, it posts commands to the same channel.
 - SSH connection multiplexing / ControlMaster
 - Explorer shell namespace extension (drive letters only)
 - Non-SFTP rclone backends
-- Any plugin or extension mechanism
+- Any plugin or extension mechanism (ADR-021's Claude Code plugin is something
+  Bosun generates for Claude Code, not an extension point in Bosun)
 - Cross-machine config sync
+- Restoring Claude Code sessions hosted outside Windows Terminal, sessions running
+  on a remote machine inside an SSH tab, non-interactive `claude -p` runs, or
+  sessions in an elevated Terminal window (ADR-021 Decision 1)
+- Reconstructing which Terminal window each restored tab was in (ADR-021)

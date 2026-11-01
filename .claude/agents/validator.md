@@ -30,12 +30,18 @@ Explorer hanging for thirty seconds with no explanation, days later.
    Any violation is an automatic FAIL regardless of green elsewhere.
 5. **Live-state check.** Confirm no test in the default suite can reach a real
    `rclone rcd`, a real drive letter, WinFsp, or the real Windows Terminal fragment
-   path. A test that mounts something on the dev machine is an automatic FAIL.
+   path. A test that mounts something on the dev machine is an automatic FAIL. The
+   same applies to launching `wt.exe`, reading or writing
+   `%LOCALAPPDATA%\Bosun\claude-sessions\`, or writing
+   `%LOCALAPPDATA%\Bosun\claude-plugin\` (ADR-021).
 6. **Seam check.** Regenerate Graphify; confirm Win32 interop has not spread beyond
    `ISessionMonitor`'s implementation, and that no new component talks to rclone
-   directly.
+   directly. `src/Bosun.ClaudeHook/` may hold its own P/Invoke, in one file
+   (ADR-021).
 7. **Config and flags.** `--vfs-cache-mode` never below `writes`; `--network-mode`
-   present; no `PublishTrimmed` anywhere.
+   present; no `PublishTrimmed` on any WPF project. The one sanctioned exception is
+   `src/Bosun.ClaudeHook/`, a console app published with `PublishAot`; it must not
+   reference WPF or the `Bosun` project (ADR-021).
 8. **Hygiene.** No secrets, no real `hosts.toml`, no publish output in the diff;
    commit messages reference bd IDs; `docs/` updated if behaviour or interfaces
    moved — especially `docs/ARCHITECTURE.md` §4 if the state machine changed.

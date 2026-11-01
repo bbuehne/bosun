@@ -45,6 +45,46 @@ rclone lsd bosun-example-nas:
 If that fails, Bosun's mounts for that host will fail too. Fix it at the rclone
 layer first.
 
+## Claude Code session restore
+
+Off by default (ADR-021). To turn it on:
+
+1. Set `enabled = true` under `[claude_sessions]` in `hosts.toml` and save. Bosun
+   writes its Claude Code plugin to `%LOCALAPPDATA%\Bosun\claude-plugin\`. If the
+   window does not show tracking as on, restart Bosun.
+2. Install the plugin once, from any shell:
+
+   ```powershell
+   claude plugin marketplace add "$env:LOCALAPPDATA\Bosun\claude-plugin"
+   claude plugin install bosun-claude-sessions@bosun
+   ```
+
+3. In Claude Code, run `/config` and set **Enable Remote Control for all
+   sessions** to `true` (`remoteControlAtStartup`), so restored sessions reconnect
+   to your phone and the Desktop app on their own.
+4. In Windows Terminal, set **Startup > When Terminal starts** to anything other
+   than "Open windows from a previous session". Otherwise Terminal reopens the
+   same tabs as plain shells beside the ones Bosun restores.
+
+New sessions are tracked from then on. Sessions already running when you
+installed the plugin are not, until they are restarted. The window lists tracked
+sessions, and says so if a Claude Code session in Terminal is not reporting, or if
+the plugin is out of date after a Bosun update.
+
+What is restored: a session killed by a reboot, shutdown, or logoff reopens when
+Bosun starts; a session killed because Terminal exited reopens the next time you
+launch Terminal. Closing your last tab, or Terminal's only window, counts as
+Terminal exiting, the same way Terminal's own session restore treats it.
+
+What is not: a session you ended (`/exit`, Ctrl+D), a tab you closed while
+Terminal kept running, a session you opened and never typed into, `claude -p`
+runs, and sessions in an elevated Terminal window.
+
+To turn it off, set `enabled = false`; Bosun stops restoring and leaves its
+records alone. To remove it entirely, also run
+`claude plugin uninstall bosun-claude-sessions@bosun` and delete
+`%LOCALAPPDATA%\Bosun\claude-sessions\` and `%LOCALAPPDATA%\Bosun\claude-plugin\`.
+
 ## Running the tests
 
 ```powershell
@@ -102,6 +142,64 @@ These cannot be automated and must be run by hand before any release.
 1. Mounts up. Kill `Bosun.exe` from Task Manager. Restart it.
 2. **Pass:** existing mounts are adopted or cleared. No orphaned drive letters,
    no duplicate mount attempts.
+
+### Claude Code session restore (ADR-021)
+
+Setup for all of these: `[claude_sessions] enabled = true`, the plugin installed,
+`remoteControlAtStartup` on, Terminal's own session restore off. "Three sessions"
+means three tabs, in different folders, each running `claude` with at least one
+prompt sent. "Wait" means at least one minute, so Bosun has classified at least
+once.
+
+#### C1: Restart with sessions open  *(the acceptance test for ADR-021)*
+1. Three sessions open. Restart Windows.
+2. **Pass:** after login, one Terminal window opens with three tabs, each in its
+   original folder, each showing its resumed conversation. Each appears in the
+   Claude app as connected through Remote Control. One toast says three sessions
+   were restored.
+
+#### C2: Restored sessions survive a second restart
+1. Straight after C1, without typing into any restored tab, restart again.
+2. **Pass:** the same three sessions are restored again.
+
+#### C3: Shut down and power on
+1. Three sessions open. Use **Shut down** (Fast Startup on, the Windows default).
+   Power on.
+2. **Pass:** as C1.
+
+#### C4: Log off and back on
+1. Three sessions open. Sign out. Sign back in.
+2. **Pass:** as C1.
+
+#### C5: Terminal exits underneath sessions
+1. Three sessions open. End `WindowsTerminal.exe` from Task Manager.
+2. **Pass:** nothing opens on its own. Launch Terminal: the three sessions are
+   restored into that window.
+
+#### C6: Deliberate ends are not restored
+1. Four sessions open. In one, type `/exit`. Close a second with its tab's X while
+   Terminal stays open. Open a fifth tab, run `claude`, and send nothing. Wait.
+2. Restart Windows.
+3. **Pass:** only the two untouched, prompted sessions are restored.
+
+#### C7: Closing the only window
+1. One Terminal window with two sessions. Close the window with its X.
+2. **Pass:** nothing opens on its own. Launch Terminal: both sessions are restored
+   (the accepted limitation in ADR-021 Decision 5).
+
+#### C8: Non-interactive runs are not restored
+1. In a tab, run a loop of `claude -p "say hi"` calls. Restart mid-loop.
+2. **Pass:** no tab opens for any of them.
+
+#### C9: Bosun restarts while sessions run
+1. Three sessions open. Use **Restart Bosun** from the tray.
+2. **Pass:** no new tabs open; the window still lists the three sessions.
+
+#### C10: Tracking not installed
+1. Uninstall the plugin and empty `%LOCALAPPDATA%\Bosun\claude-sessions\`. With
+   `enabled = true`, start a session in Terminal. Wait.
+2. **Pass:** the window says tracking is not reporting and names the plugin as
+   the likely cause.
 
 ## Failure triage
 

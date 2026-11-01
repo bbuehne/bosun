@@ -33,6 +33,10 @@ A single-process WPF tray application (.NET 10, C# 14) that:
   TCP state.
 - **Reacts to system events** — sleep, resume, network change, session lock — by
   unmounting proactively rather than letting mounts wedge.
+- **Restores Claude Code sessions** that a reboot, a shutdown, a logoff, or a
+  Terminal exit killed, by reopening each one in a Windows Terminal tab with
+  `claude --resume <id>`. It learns about sessions from a hook helper it ships as
+  a Claude Code plugin (ADR-021). Off unless `[claude_sessions] enabled = true`.
 
 It is a personal tool, shared publicly. It is **not** a product.
 
@@ -137,15 +141,22 @@ Then `/graphify .` in-session to build the graph.
 | Logging | Serilog, rolling file | |
 | Tests | xUnit | |
 | Publish | single-file, self-contained, win-x64 | |
+| Claude Code hook helper | `src/Bosun.ClaudeHook/`, console, `PublishAot` | ADR-021 Decision 10: embedded in `Bosun.exe`, written into the generated plugin. Needs the MSVC build tools |
 
-**Do not set `PublishTrimmed`.** Trimming is not supported for WPF and will
-produce an application that fails at runtime in non-obvious ways.
+**Do not set `PublishTrimmed` on any WPF project.** Trimming is not supported for
+WPF and will produce an application that fails at runtime in non-obvious ways.
+The one exception is `Bosun.ClaudeHook`, a console app with no WPF reference,
+published NativeAOT (which trims) so it starts fast enough for Claude Code's
+1.5 second `SessionEnd` budget. It must never reference WPF or the `Bosun`
+project. See ADR-021.
 
 The one genuinely awkward area is enumerating live `ssh.exe` sessions and their
 socket state. `Process.GetProcessesByName` gets you the processes; command lines
 need CIM/WMI; TCP state needs a `GetExtendedTcpTable` P/Invoke. Isolate all of
 this behind one interface (`ISessionMonitor`) so the ugliness is contained and
-testable.
+testable. The Claude Code process snapshot (ADR-021) goes behind the same
+interop layer. The one exception is `Bosun.ClaudeHook`, a separate executable,
+which keeps its own P/Invoke in a single file of its own.
 
 ---
 
@@ -244,6 +255,8 @@ when invariants change; both are reviewed artifacts.
   (system events), and E2 (config validation), also send `test-author` —
   independent test authorship catches spec misreadings that self-testing cannot.
   Those three are where a bug becomes a hung Explorer rather than a red test.
+  Send `test-author` for E13's `ClaudeSessionClassifier` (ADR-021) too: a bug
+  there silently loses sessions, or reopens ones the user closed.
 
 ### Worktree safety
 
@@ -255,7 +268,10 @@ the maintainer's machine and wedge his Explorer while he is working.
 `dotnet build` and `dotnet test` are safe from a worktree. `dotnet run` is not.
 Every test in the default suite uses a fake `IRcloneClient`, a fake `IProbe`,
 injected time, and a temp fragment path. Anything needing real rclone or WinFsp is
-a marked integration test the human runs deliberately.
+a marked integration test the human runs deliberately. The same goes for ADR-021:
+no default-suite test launches `wt.exe`, reads or writes
+`%LOCALAPPDATA%\Bosun\claude-sessions\`, or writes
+`%LOCALAPPDATA%\Bosun\claude-plugin\`.
 
 ### Validation is the interfacing agent's responsibility
 
@@ -268,7 +284,8 @@ the `validator` subagent for large or critical changes:
 4. Confirm nothing new reaches `Mounting` except from `Ready`, and that only
    `IMountSupervisor` calls `mount/mount` / `mount/unmount`.
 5. Confirm no default-suite test can touch a real mount, drive letter, or the real
-   fragment path.
+   fragment path, launch `wt.exe`, or touch the real Claude session records or
+   plugin directory (ADR-021).
 
 Never mark a bd issue done on a subagent's claim alone.
 

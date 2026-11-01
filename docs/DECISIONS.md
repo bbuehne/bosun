@@ -1487,3 +1487,354 @@ left open, recorded so they are not relitigated:
   log says "declined" only for No, and "not confirmed" otherwise.
 - *A stuck Unmount all does not lock out Restart Bosun.* Each repair has its own in-flight guard,
   and Unmount all gives up after 90 s and says so.
+
+---
+
+## ADR-021 · Restore Claude Code sessions that Windows Terminal lost
+
+**Status:** Accepted (2026-11-01; proposed the same day). Extends Bosun's scope (`CLAUDE.md` §1),
+narrows `CLAUDE.md` §4's trimming rule and the interop rule for one new, non-WPF project,
+and amends ADR-020 §6 (what the diagnostics bundle may contain).
+
+**Context.** The maintainer runs several Claude Code sessions at once, each in its own
+Windows Terminal tab, and drives most of them through Remote Control from the Desktop app,
+a phone, and tablets. A reboot, a logoff, a shutdown, or Terminal exiting for any reason
+kills every one of those processes.
+
+Terminal's own "Open windows from a previous session" (`firstWindowPreference:
+persistedWindowLayout`) does not cover this. It brings back tabs and titles, the working
+directory when the shell reports it, and in recent versions the buffer text, but not
+processes: each tab comes back as a fresh shell, the conversation is not resumed, and Remote
+Control is off. Getting back to work means finding each session in `claude --resume` by
+hand, while the phone lists sessions that will never answer.
+
+Claude Code already has the resume half. `claude --resume <session-id>` reloads a
+conversation from its transcript, from any directory. What is missing is a record, kept
+outside the processes that die, of which sessions were open, where, and whether each one
+ended on purpose.
+
+Bosun already runs all day in the user's interactive session, already enumerates processes
+(E8), and already launches `wt.exe` (`IExternalLauncher`). That makes it the natural owner.
+
+**Decision.**
+
+1. **Scope.** Bosun restores interactive Claude Code sessions that were running in Windows
+   Terminal tabs on this machine and were killed by a reboot, a shutdown, a logoff, or
+   Terminal exiting. Out of scope: sessions hosted elsewhere (Desktop app, VS Code), sessions
+   running on a remote machine inside an SSH tab (those want tmux on the remote end),
+   non-interactive `claude -p` runs, and sessions in an elevated Terminal window (restoring
+   them would silently drop the elevation).
+
+2. **Tracking is done by Claude Code hooks, shipped as a Claude Code plugin.** The plugin
+   (`bosun-claude-sessions`, in a directory marketplace named `bosun`) registers
+   `SessionStart`, `UserPromptSubmit` and `SessionEnd` in its `hooks/hooks.json`, each with an
+   explicit `timeout`. Bosun generates it under `%LOCALAPPDATA%\Bosun\claude-plugin\` and owns
+   it the way it owns the Terminal fragment. The user installs it once, with
+   `claude plugin marketplace add` and `claude plugin install`. Bosun never edits
+   `~/.claude/settings.json`, for ADR-006's reason: Claude Code rewrites that file from
+   `/config`, and two writers clobber each other.
+
+3. **The hooks run a small helper executable, not `Bosun.exe`.** `bosun-claude-hook.exe`
+   (new project `src/Bosun.ClaudeHook/`) reads the hook payload from stdin, writes or updates
+   one record, and exits 0 on every path, including its own failures, within an internal
+   deadline well under the hook `timeout`. It never writes to stdout: Claude Code adds a
+   `SessionStart` or `UserPromptSubmit` hook's stdout to Claude's context. A tracking fault
+   must never disturb a Claude Code session. Hooks are registered in exec form (`command` plus
+   `args`, with `${CLAUDE_PLUGIN_ROOT}`), so no shell should sit between Claude Code and the
+   helper (Assumption 4 below). The helper reads process facts through its own P/Invoke file,
+   not `System.Management`, which does not suit NativeAOT. It is not `Bosun.exe` because the
+   single-instance guard (`bs-2wa`) would hand the call to the running instance and exit, and
+   because `Bosun.exe` is a compressed single-file bundle that decompresses on launch, a poor
+   fit for `SessionEnd`'s shared 1.5 second default budget.
+
+4. **One record per Claude Code process, not per session ID.** `/clear` and `/resume` replace
+   the session inside a running process, and `SessionStart` fires again with `source` set to
+   `clear` or `resume`; the helper overwrites that process's record. A record holds:
+
+   | Field | Source |
+   |---|---|
+   | Session ID, `cwd`, transcript path, session title (when set) | Hook payload (`session_id`, `cwd`, `transcript_path`, `session_title`) |
+   | Claude Code process: image path, PID, creation time | The helper's parent process |
+   | Tab root process: image path, PID, creation time | The ancestor whose parent is the `WindowsTerminal.exe` ancestor |
+   | Terminal process: PID, creation time | Nearest `WindowsTerminal.exe` ancestor |
+   | Tab identity and profile | `WT_SESSION`, `WT_PROFILE_ID` from the environment |
+   | Logon session: ID and logon time | The helper's own token |
+   | `prompted` | See below |
+   | Last `SessionEnd` reason, and whether its Terminal process was alive at that moment | `SessionEnd` payload (`reason`) and a liveness check |
+   | Helper version | Build constant |
+
+   `prompted` is set by the first `UserPromptSubmit`. On `SessionStart` it is `true` when
+   `source` is `resume` or `fork` (the transcript already has a conversation), `false` for
+   `startup` and `clear`, and unchanged for `compact`. `UserPromptSubmit` fires on every
+   prompt, so the helper returns at once when `prompted` is already set.
+
+   The helper writes no record, and removes any it wrote, when: the environment has no
+   `WT_SESSION` or there is no `WindowsTerminal.exe` ancestor (a process launched from a tab,
+   such as VS Code, inherits `WT_SESSION`); the Claude Code process's command line carries
+   `-p` or `--print`; or its token is elevated. Checking these at `SessionStart` rather than
+   in Bosun means a `-p` run killed by a reboot was never tracked, and an elevated process's
+   command line, which a medium-integrity Bosun cannot read, never needs to be read.
+
+   Records live in `%LOCALAPPDATA%\Bosun\claude-sessions\`, one JSON file per process,
+   written atomically (temp file, then rename). Bosun moves a record into `dispatched\` when it
+   restores it and deletes records; the helper never touches `dispatched\`.
+
+5. **Classification.** Bosun evaluates records on a short timer while running, and once at
+   startup. Process identity is PID plus creation time, never PID alone, with creation times
+   compared at 1 ms resolution: the helper and Bosun may read them through different APIs
+   with different precision, and an exact comparison would read a live session as dead and
+   open a duplicate.
+
+   | # | Situation | How Bosun knows | Outcome |
+   |---|---|---|---|
+   | 1 | The session is still running | PID and creation time match a live process | Keep watching |
+   | 2 | The user ended it: `/exit`, Ctrl+D, `/logout` | `SessionEnd` reason `prompt_input_exit` or `logout` | Delete the record |
+   | 3 | It was opened and never used | `prompted` is false | Delete the record |
+   | 4 | Its transcript is gone (Claude Code's `cleanupPeriodDays` sweep, or deleted by hand) | The transcript path no longer exists | Delete the record |
+   | 5 | Reboot, shutdown, or logoff | The record's logon session (ID and logon time) is not the current one | Restore at startup |
+   | 6 | The user closed that tab or window | Claude Code process gone, and its `WindowsTerminal.exe` outlived it by at least a grace period; or `SessionEnd` recorded its Terminal alive | Delete the record |
+   | 7 | Terminal exited: a crash, an update, or closing the whole app | Claude Code process gone and its `WindowsTerminal.exe` gone too, within the grace period | Pending: restore when Terminal is next launched |
+
+   Rows are evaluated in order and the first match wins. Row 5 must precede rows 6 and 7,
+   because after a logoff or reboot the Terminal process is gone too. The logon session, not
+   the boot time, decides row 5: a logoff does not change the boot time, and neither does
+   Windows' default "Shut down" with Fast Startup on. `SessionEnd` reason `other` is ambiguous
+   and never counts as deliberate on its own. `clear` and `resume` are not ends; the
+   `SessionStart` that follows updates the record. While Windows is ending the session
+   (`SystemEvents.SessionEnding`), Bosun stops classifying altogether, so a tab that dies
+   moments before its Terminal during logoff is not mistaken for row 6.
+
+   Two accepted limitations. Closing the last tab, or the only window, also ends Terminal, so
+   it matches row 7 and is restored at the next Terminal launch; Terminal's own session restore
+   behaves the same way when the last window is closed. And a tab closed while Bosun is not
+   running, followed by a logoff or reboot before Bosun runs again, is restored unless its
+   `SessionEnd` recorded the Terminal alive (Assumption 1 says whether it can).
+
+6. **After a reboot, shutdown, or logoff, restore at startup without asking.** The maintainer
+   chose automatic reopening over a tray prompt. Restore is a `StartupOrchestrator` step right
+   after the Terminal fragment write, ungated in the same way: it never waits for or depends on
+   the rclone chain, catches every exception, and reports failure into the health model
+   (ADR-012 Decision 1, ADR-020 §4). A record whose session ID is already held by a live
+   record (for example, the user resumed it by hand) is deleted, not restored. The rest are
+   moved to `dispatched\`, and one `wt.exe -w 0` invocation opens a tab per session, chained
+   with `;`:
+
+   ```
+   new-tab -p <WT_PROFILE_ID> -d <cwd> --title <title> <tab root> <keep-open> <claude> --resume <session-id>
+   ```
+
+   Claude Code runs inside the tab root it was started from, so `/exit` leaves a prompt in that
+   folder as before: `pwsh.exe` and `powershell.exe` get `-NoExit -Command`, `cmd.exe` gets
+   `/k`. When the tab root is the Claude Code process itself (a profile that runs `claude`
+   directly), there is no wrapper. Any other tab root gets no wrapper either, and the tab
+   closes when Claude Code exits. `<claude>` is `claude` resolved by the shell; with no
+   wrapper, it is the recorded Claude Code image path, because `wt.exe` cannot launch the npm
+   `claude.cmd` shim by name. The title is the session title when set, else the folder name,
+   and is only the tab's first label: Claude Code may set its own.
+
+   A launch is confirmed, not assumed: `wt.exe` is an app-execution alias, so a started process
+   proves nothing about the tab. A dispatched record is confirmed when a new record with the
+   same session ID appears, and is then deleted. One not confirmed within a timeout is reported
+   by title in the window and in the toast ("Could not resume 'auth refactor'"), and stays in
+   `dispatched\` to be retried at the next trigger (the next Bosun start or Terminal launch). After
+   three unconfirmed attempts Bosun stops retrying it: the record stays listed in the window as
+   "Could not resume", with a Dismiss action that deletes it, and no further toast is raised for
+   it. Without the cap, a session whose folder was deleted or moved would raise the same failure
+   at every login and Terminal launch indefinitely. The toast reports confirmed restores
+   ("Restored 4 Claude Code sessions after restart"), per ADR-012's rule that state changes are
+   communicated causally.
+
+7. **After Terminal exits, restore when Terminal is next launched.** Bosun watches for a new
+   `WindowsTerminal.exe` and dispatches pending records with `-w 0`, which targets the most
+   recently used window; that should be the one just opened (Assumption 7). At the process
+   level, closing the whole Terminal app on purpose and Terminal crashing look the same.
+   Reopening into the next launch is right for both; reopening immediately would fight a
+   deliberate close. Pending records are files, so they survive a Bosun restart.
+
+8. **Remote Control comes back through Claude Code, not Bosun.** With `remoteControlAtStartup`
+   set to `true` (in `/config`: "Enable Remote Control for all sessions"), every interactive
+   start connects, a resume included (Assumption 5). Bosun passes no Remote Control flags.
+
+9. **The window shows what Bosun is tracking.** The main window lists tracked, pending and
+   unconfirmed sessions. Tracking that reports nothing is a visible state, not silence: a live,
+   Terminal-hosted Claude Code process in Bosun's snapshot with no record for more than a
+   minute raises "Claude session tracking is not reporting. Is the Bosun plugin installed in
+   Claude Code? Sessions started before it was installed are not tracked." A record whose
+   helper version differs from Bosun's raises "The Bosun plugin in Claude Code is out of
+   date" with the update commands.
+
+10. **The helper ships inside `Bosun.exe`.** It is embedded as a resource, and
+    `IClaudePluginWriter` writes it into the plugin directory under a versioned file name, so a
+    helper that a hook is running at that moment is never overwritten in place. The release
+    stays one artifact; `release.yml` attaches nothing new.
+
+11. **One configuration switch.** `[claude_sessions] enabled`, `false` when absent. Turning it
+    on leads to a plugin the user installs into their own Claude Code configuration, which is
+    not something to do unasked. With it `false`, Bosun neither classifies nor restores, and
+    leaves existing records alone.
+
+**Reasoning.**
+
+*Why hooks and not process inspection alone.* Bosun can enumerate Claude Code processes and
+read their command lines, but a command line names the session only when the session was
+started with `--resume <id>`. Mapping a fresh `claude` process to its transcript means
+guessing from `cwd` and file times, and `/clear` changes the right answer mid-process. The
+hook payload carries `session_id` and `cwd` directly, at the moment they change.
+
+*Why per process.* What a reboot destroys is a tab running a process. The session ID inside
+it is an attribute that changes.
+
+*Why the logon session decides row 5.* It is the boundary that actually kills the processes.
+Boot time misses logoff and Fast Startup shutdowns, which are the commonest ways this user's
+sessions die besides Restart.
+
+*Why "is its Terminal still alive" decides deliberate closes, with a grace period.* What
+`SessionEnd` reports when a tab is closed with its X is undocumented, and may be nothing. The
+process-level test does not depend on it: a tab that went away while Terminal kept running was
+closed by choice. The grace period exists because Terminal ending is not instantaneous: its
+tabs' processes can die a moment before it does, and a single timer tick in that gap would
+otherwise delete records that row 7 should keep. If testing shows a reliable `SessionEnd`
+signal for a tab close, it strengthens row 6; it does not replace the process-level test.
+
+*Why `prompted`, and why a resume counts as prompted.* The real cost of automatic reopening is
+bringing back sessions nobody wanted, and a session opened and never used is the commonest of
+those. A resumed session already holds a conversation; treating it as unused would drop every
+restored tab at the next reboot unless the user had typed into it in between.
+
+*Why confirmation by record.* The only reliable evidence that a tab resumed is the resumed
+process announcing itself through the same hook. Anything earlier, such as `wt.exe` starting,
+can succeed while the tab fails (the folder is gone, `claude` is not on the profile's PATH).
+
+*Why the helper filters `-p` and elevation, not Bosun.* At `SessionStart` the helper's parent
+is alive and readable, and the helper's own token answers the elevation question directly.
+Bosun sees a process only when its timer happens to run, and cannot read an elevated
+process's command line at all.
+
+*Why one window.* A record knows its tab (`WT_SESSION`) but not which Terminal window the tab
+was in. Restoring into one window is predictable; reconstructing window layout is Terminal's
+own job, and the user turns that off (Consequences).
+
+*Why automatic restore does not contradict ADR-012 and ADR-018 on login-time focus.* Those
+rules keep Bosun's own windows and dialogs from appearing at login, because a notification
+that appears every login trains the user to dismiss it. For this user a restore will follow
+most reboots. It is still not a notification: it opens the Terminal tabs the user would
+otherwise reopen by hand, and only when there are sessions to reopen.
+
+**Consequences.**
+
+- `CLAUDE.md` §1 gains a fifth responsibility, and §4 gains the helper. §4's "never set
+  `PublishTrimmed`" rule exists because trimming breaks WPF. The helper is a console app,
+  published with `PublishAot` (which trims) so it starts in milliseconds and stays small. The
+  rule now covers every WPF project, `Bosun.ClaudeHook` is the one exception, and it must never
+  reference WPF or the `Bosun` project. The same wording goes into `Directory.Build.props`,
+  `release.yml`, and the `.claude/agents/` definitions that repeat the rule, because subagents
+  do not inherit `CLAUDE.md`.
+- NativeAOT is a new build dependency: it needs the MSVC build tools ("Desktop development with
+  C++") on every machine that builds the helper. Because Decision 10 embeds the helper in
+  `Bosun.exe`, that is every machine that builds `Bosun` at all, including every `dotnet build`
+  and `dotnet test` (agent worktrees and CI's test job), not only release publishing. The helper
+  build must be incremental (declared inputs and outputs) so an unchanged helper adds no time to
+  a build. The maintainer accepted this requirement (2026-11-01) over embedding the helper only
+  at publish, which would leave development builds unable to run the feature. `scripts/dev-setup.ps1` installs or checks for
+  them, and CI's Windows runner already has them. If they prove a problem, a self-contained,
+  untrimmed console helper is the fallback, provided its measured cold start is well under the
+  `SessionEnd` budget; record the switch as an amendment.
+- The interop rule ("Win32 interop stays behind `ISessionMonitor`") gains one exception, the
+  helper's own interop file. On Bosun's side, the Claude Code process snapshot (PID, creation
+  time, image, logon session) sits behind `ISessionMonitor`'s existing interop layer. The rule
+  already has one unrecorded exception inside `Bosun`: ADR-020's Job Object
+  (`Rclone/Process/Interop/Win32ProcessJob.cs`) is P/Invoke outside `ISessionMonitor`. This ADR
+  records that exception rather than adding to it: nothing else in `Bosun` gains P/Invoke.
+  Reading another process's logon session needs new token calls (`OpenProcessToken`,
+  `GetTokenInformation`), and they go in `SessionMonitor/Interop/`.
+- Nothing subscribes to `SessionEnding` today: `ISystemEventRegistrar` exposes only
+  `PowerModeChanged` and `SessionSwitch`. Decision 5's freeze needs a new registrar method.
+- `CLAUDE.md` §6's worktree-safety rules extend to this feature: no default-suite test may
+  launch `wt.exe`, read or write `%LOCALAPPDATA%\Bosun\claude-sessions\`, or write
+  `%LOCALAPPDATA%\Bosun\claude-plugin\`. The classifier is sent to `test-author`, like E5.
+- `HostConfigTomlWriter` must round-trip `[claude_sessions]`. Under ADR-019 Bosun is the sole
+  writer of `hosts.toml`, so a host edit in the window that dropped the section would silently
+  turn the feature off.
+- The user turns off Terminal's "Open windows from a previous session". Otherwise Terminal
+  reopens the same tabs as plain shells beside Bosun's restored ones. `docs/OPERATIONS.md`
+  says so.
+- A watchdog restart (ADR-020 §3) cannot duplicate tabs: a live process's record is never
+  restored, a session ID already live is never restored, and a dispatched record is not
+  dispatched again until its confirmation times out.
+- **ADR-020 §6 amendment.** Diagnostics bundles may be attached to public issues, and records
+  hold folder paths, transcript paths and session titles. The bundle includes each record's
+  classification state, timestamps, end reason, process facts and helper version, and omits
+  `cwd`, the transcript path and the title.
+- The default test suite never touches real records, the real plugin directory, or `wt.exe`.
+  Classification is a pure function over records, a process snapshot, the current logon
+  session, and a clock, and the `wt.exe` argument list is built by a pure function too.
+
+**Assumptions the E13 spike must confirm.** These are the parts of the design that rest on
+undocumented behaviour or on inference. The spike records what it finds as an amendment here,
+and any assumption that fails reopens the decision that rests on it.
+
+1. What `SessionEnd` reports, if anything, for each of: closing a tab with its X, closing a
+   window with its X, killing `WindowsTerminal.exe`, logoff, Restart, and Shut down with Fast
+   Startup on, and whether the helper can still check its Terminal's liveness at that moment.
+2. `WT_SESSION` and `WT_PROFILE_ID` reach the hook process's environment.
+3. The parent chain from the Claude Code process up to `WindowsTerminal.exe`: that a tab's root
+   process is a direct child of `WindowsTerminal.exe`, including in an elevated window and with
+   the npm `claude.cmd` shim in between. Windows parent PIDs can be stale once a parent exits,
+   so an ancestor counts only if it was created before its child.
+4. Under exec form, the helper's parent is the Claude Code process itself, for both the native
+   install (`claude.exe`) and an npm install (`node.exe`).
+5. `remoteControlAtStartup: true` reconnects a session started with `claude --resume <id>`.
+6. Whether a directory-marketplace plugin loads in place or from a copy in Claude Code's plugin
+   cache, and exactly what the user runs after Bosun writes a new helper version.
+7. `wt.exe -w 0 new-tab ...`, issued just after a new `WindowsTerminal.exe` appears, lands in
+   that new window rather than racing its startup.
+8. At logoff and shutdown, Bosun sees `SessionEnding` before Terminal starts tearing tabs down.
+9. The helper's measured cold start, which must sit well inside the `SessionEnd` budget even at
+   logoff, when the machine is busy.
+10. `claude --resume <id>` keeps the same `session_id` in its `SessionStart` payload. Decision 6
+    confirms a restore by matching that ID; if a resume gets a new ID, confirmation never
+    succeeds and every restored session is reported as failed.
+11. `SessionEnd` hooks share a 1.5 second default budget. Decision 3's case for a separate
+    NativeAOT helper rests on this figure.
+
+Not every item is settled by the same instrument. The hook-logging spike settles 1 to 6, 10
+and 11; item 6 needs a real `claude plugin marketplace add` and `install`, uninstalled
+afterwards. Items 7 and 8 are about Terminal and Bosun, not hooks, and need their own small
+probes: a script that runs `wt.exe` just after Terminal starts, and a test program that logs
+`SessionEnding` against tab teardown. Item 9 can only be measured once the helper exists, so it
+belongs to the helper's own issue.
+
+**Open decisions (filed as `needs-decision`; not part of this ADR):**
+
+- **Pinning.** Sessions reopened every time Bosun starts, even after a deliberate close,
+  keyed on session name rather than ID: a name set with `--name` or `/rename` survives
+  `/clear`, and `claude --resume <name>` resumes an exact match directly (Claude Code's
+  sessions documentation). Same shape as the persistent mount tier. Whether the maintainer
+  wants it is undecided.
+- **Recently closed.** Whether deliberately closed sessions stay reachable from the tray or
+  window for a while, rather than being forgotten at once.
+
+**Rejected alternatives.**
+
+*Rely on Terminal's own session restore.* It restores layout, not processes.
+
+*Write hooks into `~/.claude/settings.json`.* ADR-006's two-writers problem, in a file Claude
+Code rewrites whenever the user changes a setting.
+
+*Ask before restoring.* Simpler to get right, and rejected by the maintainer in favour of
+automatic reopening.
+
+*Restore only sessions the user registered.* Fails in exactly the case that motivated this
+ADR: the session nobody thought to register before the reboot. Registration survives as the
+pinning question above, which is a different job ("always open"), not crash recovery.
+
+*Detect reboots by boot time.* Misses logoff, and misses Windows' default shutdown with Fast
+Startup on, both of which kill every session.
+
+*Run `Bosun.exe` as the hook command.* The single-instance guard and the startup cost, as in
+Decision 3.
+
+*Reopen immediately when Terminal exits.* Fights a deliberate close of the whole app.
+
+*Delete a record once `wt.exe` starts.* `wt.exe` starting does not mean the tab resumed; a
+failed resume would lose the session without a word.

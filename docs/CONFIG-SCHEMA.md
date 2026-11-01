@@ -49,6 +49,15 @@ identity_file = "~/.ssh/id_ed25519"
   deep_probe       = true               # verify SFTP before mounting
 ```
 
+## Claude Code sessions
+
+```toml
+[claude_sessions]
+enabled = false   # restore Claude Code sessions after a reboot or a Terminal exit; ADR-021
+```
+
+Not per host: a Claude Code session is not tied to a configured SSH host.
+
 ## Field semantics
 
 | Field | Notes |
@@ -63,6 +72,7 @@ identity_file = "~/.ssh/id_ed25519"
 | `global.mounted_deep_probe_interval_seconds` | Independent, slower cadence at which a `Mounted` host is also DEEP-probed (`operations/list`, over loopback HTTP to `rclone rcd` — never by touching the drive letter itself). A shallow (TCP) probe only proves the host's port answers; it cannot detect a mount whose SSH channel died while the host stayed reachable (sleep/resume, a network blip shorter than `failures_before_unmount × mounted_probe_interval_seconds`). Deep-probe failures accumulate on their own counter (`ConsecutiveDeepProbeFailures`, kept structurally separate from the shallow probe's `ConsecutiveMountedFailures` — see ADR-016) and drain after a fixed 2 consecutive failures, deliberately fewer than `failures_before_unmount`: a dead mount confirmed by `operations/list` is stronger evidence than a TCP timeout. A deep-probe success resets its own counter. |
 | `session.reconnect` | Wraps the ssh invocation in a loop that retries on exit code 255 (dropped) but exits cleanly on 0 (user typed `exit`). Capped at 5 attempts (`FragmentProfileGenerator.MaxReconnectAttempts`, bs-ew1) — an uncapped loop cannot distinguish "connection keeps dropping" from "`ssh.exe` cannot be launched at all" (`cmd.exe`'s own not-recognised exit code, 9009, is ≥ 255 and so satisfies the same retry condition), and would otherwise spin forever with nothing surfaced. After the cap, the tab prints a message with the last exit code and exits. This cap is a maintainer recommendation on an open decision, not settled — easily reverted to unbounded if preferred. |
 | `session.tmux` | Strongly recommended. Reconnect gives a *new shell* otherwise — scrollback and working directory are lost. tmux makes reconnection resume the actual session. |
+| `claude_sessions.enabled` | `true` makes Bosun generate its Claude Code plugin, watch session records, and restore sessions lost to a reboot, shutdown, logoff, or Terminal exit (ADR-021). Absent, whether the field or the whole `[claude_sessions]` table, means `false`: turning it on leads to a plugin the user installs into their own Claude Code configuration, so it is never on by default. `HostConfigTomlWriter` must round-trip this table (ADR-019). |
 
 ## Validation rules
 
