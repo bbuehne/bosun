@@ -129,6 +129,11 @@ public static class BosunHostFactory
         builder.Services.AddSingleton<ITcpConnectionReader, Win32TcpConnectionReader>();
         builder.Services.AddSingleton<ISessionMonitor, SshSessionMonitor>();
 
+        // E13 (bs-vqh.7): Claude Code process snapshot. Inert at construction -- the Lazy logon
+        // session and Process enumeration run only when a caller asks (E13g), same worktree-safety
+        // reasoning as the registrations above.
+        builder.Services.AddSingleton<IProcessSnapshotSource, WindowsProcessSnapshotSource>();
+
         // E4 (bs-pk4/bs-k8p/bs-fhp): the shallow-probe transport has no unresolved dependencies,
         // so it is safe to register now -- constructing it does nothing (no socket touched until
         // ConnectAsync is called), matching the worktree-safety rule above.

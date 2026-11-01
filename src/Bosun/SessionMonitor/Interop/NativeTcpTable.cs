@@ -7,8 +7,9 @@ namespace Bosun.SessionMonitor.Interop;
 
 /// <summary>
 /// <c>GetExtendedTcpTable</c> P/Invoke (bs-8je). docs/ARCHITECTURE.md §3 requires raw interop to
-/// stay behind <c>ISessionMonitor</c> and confined to one file; a new <c>DllImport</c> anywhere
-/// else is an architecture violation, not a style nit. The one sanctioned exception is
+/// stay behind <c>ISessionMonitor</c> and confined to this <c>SessionMonitor/Interop/</c> folder
+/// (this file and <c>NativeProcessInfo.cs</c>, which ADR-021 places here); a new <c>DllImport</c>
+/// anywhere else is an architecture violation, not a style nit. The one sanctioned exception is
 /// <c>Bosun.Rclone.Process.Interop.Win32ProcessJob</c> (Job Object, ADR-020 §1, bs-772), for
 /// which .NET has no managed API. This reader is also reused (not re-declared) by
 /// <c>TcpPortOwnerResolver</c> to find the owner of the rc port.
