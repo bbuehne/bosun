@@ -1727,14 +1727,24 @@ otherwise reopen by hand, and only when there are sessions to reopen.
   `release.yml`, and the `.claude/agents/` definitions that repeat the rule, because subagents
   do not inherit `CLAUDE.md`.
 - NativeAOT is a new build dependency: it needs the MSVC build tools ("Desktop development with
-  C++") on every machine that builds the helper. `scripts/dev-setup.ps1` installs or checks for
+  C++") on every machine that builds the helper. Because Decision 10 embeds the helper in
+  `Bosun.exe`, that is every machine that builds `Bosun` at all, including every `dotnet build`
+  and `dotnet test` (agent worktrees and CI's test job), not only release publishing. The helper
+  build must be incremental (declared inputs and outputs) so an unchanged helper adds no time to
+  a build. `scripts/dev-setup.ps1` installs or checks for
   them, and CI's Windows runner already has them. If they prove a problem, a self-contained,
   untrimmed console helper is the fallback, provided its measured cold start is well under the
   `SessionEnd` budget; record the switch as an amendment.
 - The interop rule ("Win32 interop stays behind `ISessionMonitor`") gains one exception, the
   helper's own interop file. On Bosun's side, the Claude Code process snapshot (PID, creation
-  time, image, logon session) sits behind `ISessionMonitor`'s existing interop layer, so the
-  rule still holds inside `Bosun`.
+  time, image, logon session) sits behind `ISessionMonitor`'s existing interop layer. The rule
+  already has one unrecorded exception inside `Bosun`: ADR-020's Job Object
+  (`Rclone/Process/Interop/Win32ProcessJob.cs`) is P/Invoke outside `ISessionMonitor`. This ADR
+  records that exception rather than adding to it: nothing else in `Bosun` gains P/Invoke.
+  Reading another process's logon session needs new token calls (`OpenProcessToken`,
+  `GetTokenInformation`), and they go in `SessionMonitor/Interop/`.
+- Nothing subscribes to `SessionEnding` today: `ISystemEventRegistrar` exposes only
+  `PowerModeChanged` and `SessionSwitch`. Decision 5's freeze needs a new registrar method.
 - `CLAUDE.md` §6's worktree-safety rules extend to this feature: no default-suite test may
   launch `wt.exe`, read or write `%LOCALAPPDATA%\Bosun\claude-sessions\`, or write
   `%LOCALAPPDATA%\Bosun\claude-plugin\`. The classifier is sent to `test-author`, like E5.
@@ -1777,6 +1787,18 @@ and any assumption that fails reopens the decision that rests on it.
 8. At logoff and shutdown, Bosun sees `SessionEnding` before Terminal starts tearing tabs down.
 9. The helper's measured cold start, which must sit well inside the `SessionEnd` budget even at
    logoff, when the machine is busy.
+10. `claude --resume <id>` keeps the same `session_id` in its `SessionStart` payload. Decision 6
+    confirms a restore by matching that ID; if a resume gets a new ID, confirmation never
+    succeeds and every restored session is reported as failed.
+11. `SessionEnd` hooks share a 1.5 second default budget. Decision 3's case for a separate
+    NativeAOT helper rests on this figure.
+
+Not every item is settled by the same instrument. The hook-logging spike settles 1 to 6, 10
+and 11; item 6 needs a real `claude plugin marketplace add` and `install`, uninstalled
+afterwards. Items 7 and 8 are about Terminal and Bosun, not hooks, and need their own small
+probes: a script that runs `wt.exe` just after Terminal starts, and a test program that logs
+`SessionEnding` against tab teardown. Item 9 can only be measured once the helper exists, so it
+belongs to the helper's own issue.
 
 **Open decisions (filed as `needs-decision`; not part of this ADR):**
 
