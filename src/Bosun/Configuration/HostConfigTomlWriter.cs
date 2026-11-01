@@ -42,6 +42,7 @@ internal static class HostConfigTomlWriter
 
         var sb = new StringBuilder();
         WriteGlobal(sb, config.Global);
+        WriteClaudeSessions(sb, config.ClaudeSessions);
 
         foreach (var (key, host) in config.Hosts.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
@@ -64,6 +65,21 @@ internal static class HostConfigTomlWriter
         AppendInt(sb, "mounted_deep_probe_interval_seconds", global.MountedDeepProbeIntervalSeconds);
         AppendInt(sb, "suspend_unmount_timeout_seconds", global.SuspendUnmountTimeoutSeconds);
         AppendBool(sb, "start_with_windows", global.StartWithWindows);
+    }
+
+    // Always emitted, with an explicit value, exactly as [global] is (every global key is written
+    // even at its default). The parsed model holds a plain bool, so "table absent", "field absent"
+    // and "enabled = false" are indistinguishable by the time they reach the writer; omitting the
+    // table when false would silently drop an explicit `enabled = false` the user wrote, and the
+    // only safe place to draw the line is to always write what we know. The cost is that a file
+    // which never mentioned [claude_sessions] gains an explicit `enabled = false` after the first
+    // host edit -- harmless, because absent means false anyway (ADR-021 Decision 11), and it makes
+    // the switch discoverable. What must never happen (ADR-021 Consequences; ADR-019 makes Bosun
+    // the sole writer) is a host edit dropping `enabled = true` and quietly turning the feature off.
+    private static void WriteClaudeSessions(StringBuilder sb, ClaudeSessionsConfig claudeSessions)
+    {
+        sb.Append("\n[claude_sessions]\n");
+        AppendBool(sb, "enabled", claudeSessions.Enabled);
     }
 
     private static void WriteHost(StringBuilder sb, string key, HostConfig host)
