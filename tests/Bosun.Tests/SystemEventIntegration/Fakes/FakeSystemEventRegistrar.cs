@@ -16,12 +16,15 @@ internal sealed class FakeSystemEventRegistrar : ISystemEventRegistrar
 {
     private PowerModeChangedEventHandler? powerModeHandler;
     private SessionSwitchEventHandler? sessionSwitchHandler;
+    private SessionEndingEventHandler? sessionEndingHandler;
     private NetworkAddressChangedEventHandler? networkAddressHandler;
 
     public int AddPowerModeChangedCalls { get; private set; }
     public int RemovePowerModeChangedCalls { get; private set; }
     public int AddSessionSwitchCalls { get; private set; }
     public int RemoveSessionSwitchCalls { get; private set; }
+    public int AddSessionEndingCalls { get; private set; }
+    public int RemoveSessionEndingCalls { get; private set; }
     public int AddNetworkAddressChangedCalls { get; private set; }
     public int RemoveNetworkAddressChangedCalls { get; private set; }
 
@@ -55,6 +58,21 @@ internal sealed class FakeSystemEventRegistrar : ISystemEventRegistrar
         }
     }
 
+    public void AddSessionEnding(SessionEndingEventHandler handler)
+    {
+        AddSessionEndingCalls++;
+        sessionEndingHandler = handler;
+    }
+
+    public void RemoveSessionEnding(SessionEndingEventHandler handler)
+    {
+        RemoveSessionEndingCalls++;
+        if (ReferenceEquals(sessionEndingHandler, handler))
+        {
+            sessionEndingHandler = null;
+        }
+    }
+
     public void AddNetworkAddressChanged(NetworkAddressChangedEventHandler handler)
     {
         AddNetworkAddressChangedCalls++;
@@ -75,6 +93,7 @@ internal sealed class FakeSystemEventRegistrar : ISystemEventRegistrar
     /// private handler bookkeeping (see the class remarks on <see cref="FakeSystemEventRegistrar"/>).</summary>
     public bool IsPowerModeSubscribed => powerModeHandler is not null;
     public bool IsSessionSwitchSubscribed => sessionSwitchHandler is not null;
+    public bool IsSessionEndingSubscribed => sessionEndingHandler is not null;
     public bool IsNetworkAddressSubscribed => networkAddressHandler is not null;
 
     public void RaisePowerModeChanged(PowerModes mode) =>
@@ -82,6 +101,9 @@ internal sealed class FakeSystemEventRegistrar : ISystemEventRegistrar
 
     public void RaiseSessionSwitch(SessionSwitchReason reason) =>
         sessionSwitchHandler?.Invoke(this, new SessionSwitchEventArgs(reason));
+
+    public void RaiseSessionEnding(SessionEndReasons reason) =>
+        sessionEndingHandler?.Invoke(this, new SessionEndingEventArgs(reason));
 
     public void RaiseNetworkAddressChanged() =>
         networkAddressHandler?.Invoke(this, EventArgs.Empty);
