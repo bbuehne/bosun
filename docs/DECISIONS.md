@@ -1637,7 +1637,11 @@ Bosun already runs all day in the user's interactive session, already enumerates
    proves nothing about the tab. A dispatched record is confirmed when a new record with the
    same session ID appears, and is then deleted. One not confirmed within a timeout is reported
    by title in the window and in the toast ("Could not resume 'auth refactor'"), and stays in
-   `dispatched\` to be retried at the next trigger. The toast reports confirmed restores
+   `dispatched\` to be retried at the next trigger (the next Bosun start or Terminal launch). After
+   three unconfirmed attempts Bosun stops retrying it: the record stays listed in the window as
+   "Could not resume", with a Dismiss action that deletes it, and no further toast is raised for
+   it. Without the cap, a session whose folder was deleted or moved would raise the same failure
+   at every login and Terminal launch indefinitely. The toast reports confirmed restores
    ("Restored 4 Claude Code sessions after restart"), per ADR-012's rule that state changes are
    communicated causally.
 
@@ -1731,7 +1735,8 @@ otherwise reopen by hand, and only when there are sessions to reopen.
   `Bosun.exe`, that is every machine that builds `Bosun` at all, including every `dotnet build`
   and `dotnet test` (agent worktrees and CI's test job), not only release publishing. The helper
   build must be incremental (declared inputs and outputs) so an unchanged helper adds no time to
-  a build. `scripts/dev-setup.ps1` installs or checks for
+  a build. The maintainer accepted this requirement (2026-11-01) over embedding the helper only
+  at publish, which would leave development builds unable to run the feature. `scripts/dev-setup.ps1` installs or checks for
   them, and CI's Windows runner already has them. If they prove a problem, a self-contained,
   untrimmed console helper is the fallback, provided its measured cold start is well under the
   `SessionEnd` budget; record the switch as an amendment.

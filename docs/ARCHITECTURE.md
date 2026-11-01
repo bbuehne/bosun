@@ -447,7 +447,7 @@ state directly, it posts commands to the same channel.
 | Bosun crashes with mounts up | On next start, enumerate existing mounts via `mount/listmounts` and adopt or clear them before doing anything else. |
 | Claude session tracking is on but a live, Terminal-hosted Claude Code process has no record (plugin not installed or removed, hooks not firing) | Say so causally in the window (ADR-021 Decision 9). Never restore anything on a guess. |
 | The hook helper fails (bad payload, records directory unwritable) or hangs | Exit 0 anyway, inside its own deadline and the hook `timeout`; Claude Code is never disturbed. The session is simply not tracked, and the "not reporting" state covers it. |
-| A restore does not resume (`wt.exe` fails, the folder is gone, `claude` not found) | The dispatched record is never confirmed. Report it by title in the window and the toast, keep it in `dispatched\`, retry at the next trigger. |
+| A restore does not resume (`wt.exe` fails, the folder is gone, `claude` not found) | The dispatched record is never confirmed. Report it by title in the window and the toast, keep it in `dispatched\`, retry at the next trigger. After three unconfirmed attempts, stop retrying and list it as "Could not resume" with a Dismiss action. |
 | A record's transcript is gone | Delete the record; do not open a tab that can only print "No conversation found". |
 | Windows is logging off or shutting down | Stop classifying at `SessionEnding`, so records survive to be restored at the next logon. |
 | Bosun restarts (watchdog, crash, manual) while sessions are running | No duplicates: a live process's record and a live session ID are never restored, and a dispatched record waits out its confirmation timeout. |
