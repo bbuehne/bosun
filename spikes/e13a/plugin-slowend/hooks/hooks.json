@@ -1,0 +1,17 @@
+{
+  "description": "E13a spike (bs-vqh.1), assumption 11: a SessionEnd hook that deliberately runs 4 seconds, with a 10 second timeout, to show when Claude Code cancels it.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/helper/HookLogger.exe",
+            "args": ["SessionEnd", "--plugin-tag", "slowend", "--sleep-ms", "4000"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

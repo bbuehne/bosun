@@ -1,0 +1,8 @@
+{
+  "name": "bosun-e13a-slowend",
+  "description": "E13a spike (bs-vqh.1), assumption 11: deliberately slow SessionEnd hook. Load with --plugin-dir only.",
+  "version": "0.0.1",
+  "author": {
+    "name": "Bosun spike"
+  }
+}

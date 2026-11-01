@@ -1,0 +1,8 @@
+{
+  "name": "bosun-e13a-spike",
+  "description": "E13a spike (bs-vqh.1): records what hooks and Windows Terminal do. Throwaway; remove after the spike.",
+  "version": "0.0.1",
+  "author": {
+    "name": "Bosun spike"
+  }
+}
