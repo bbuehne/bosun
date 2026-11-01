@@ -28,6 +28,17 @@ public sealed class Win32ExternalLauncher : IExternalLauncher
         Start("wt.exe", ["-w", "0", "new-tab", "-p", hostKey], useShellExecute: true);
     }
 
+    public void RestoreClaudeSessions(IReadOnlyList<string> wtArguments)
+    {
+        ArgumentNullException.ThrowIfNull(wtArguments);
+        if (wtArguments.Count == 0)
+        {
+            throw new ArgumentException("wt.exe arguments are required.", nameof(wtArguments));
+        }
+
+        Start("wt.exe", wtArguments, useShellExecute: true);
+    }
+
     public void OpenInExplorer(string drive)
     {
         ArgumentException.ThrowIfNullOrEmpty(drive);
