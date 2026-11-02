@@ -17,8 +17,16 @@ namespace Bosun.Tests.SystemEventIntegration;
 public sealed class Win32SystemEventSourceTests
 {
     private static Win32SystemEventSource CreateSource(
-        FakeSystemEventRegistrar registrar, FakeTimeProvider time, TimeSpan? debounce = null) =>
-        new(registrar, time, debounce ?? TimeSpan.FromMilliseconds(750), NullLogger<Win32SystemEventSource>.Instance);
+        FakeSystemEventRegistrar registrar,
+        FakeTimeProvider time,
+        TimeSpan? debounce = null,
+        TimeSpan? maxDeferral = null) =>
+        new(
+            registrar,
+            time,
+            debounce ?? TimeSpan.FromMilliseconds(750),
+            NullLogger<Win32SystemEventSource>.Instance,
+            maxDeferral ?? TimeSpan.FromSeconds(5));
 
     // --------------------------------------------------------------------------------------
     // Subscribe-once / unsubscribe-on-dispose discipline (SystemEvents holds handlers via a
@@ -277,6 +285,97 @@ public sealed class Win32SystemEventSourceTests
         // A second, later, independent transition after the first has fully settled.
         registrar.RaiseNetworkAddressChanged();
         time.Advance(TimeSpan.FromMilliseconds(750));
+        Assert.Equal(2, fireCount);
+    }
+
+    // --------------------------------------------------------------------------------------
+    // Bounded deferral (bs-u4a item 2): a link flapping faster than the 750 ms quiet period must
+    // not defer the public event forever. It fires at most 5 s after the FIRST raw event of a burst.
+    // --------------------------------------------------------------------------------------
+
+    [Fact]
+    public void NetworkAddressChanged_a_flapping_link_fires_five_seconds_after_the_first_raw_event()
+    {
+        var registrar = new FakeSystemEventRegistrar();
+        var time = new FakeTimeProvider();
+        var source = CreateSource(registrar, time, TimeSpan.FromMilliseconds(750), TimeSpan.FromSeconds(5));
+        source.Start();
+        var fireCount = 0;
+        source.NetworkAddressChanged += (_, _) => fireCount++;
+
+        // A raw event every 500 ms -- always inside the 750 ms quiet period, so a purely
+        // trailing-edge debounce would never fire. Events at t=0, 0.5, ... 4.5 s.
+        registrar.RaiseNetworkAddressChanged();
+        for (var i = 0; i < 9; i++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(500));
+            registrar.RaiseNetworkAddressChanged();
+        }
+
+        Assert.Equal(0, fireCount); // t=4.5 s
+
+        time.Advance(TimeSpan.FromMilliseconds(499)); // t=4.999 s
+        Assert.Equal(0, fireCount);
+
+        time.Advance(TimeSpan.FromMilliseconds(1)); // t=5 s: the cap, measured from the FIRST event
+        Assert.Equal(1, fireCount);
+    }
+
+    [Fact]
+    public void NetworkAddressChanged_the_cap_is_measured_from_the_first_event_not_the_latest()
+    {
+        var registrar = new FakeSystemEventRegistrar();
+        var time = new FakeTimeProvider();
+        var source = CreateSource(registrar, time, TimeSpan.FromMilliseconds(750), TimeSpan.FromSeconds(5));
+        source.Start();
+        var fireCount = 0;
+        source.NetworkAddressChanged += (_, _) => fireCount++;
+
+        // A raw event every 700 ms (inside the quiet period): t=0, 0.7, ... 4.9 s.
+        registrar.RaiseNetworkAddressChanged();
+        for (var i = 0; i < 7; i++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(700));
+            registrar.RaiseNetworkAddressChanged();
+        }
+
+        Assert.Equal(0, fireCount); // t=4.9 s: a full 750 ms from the last event would be 5.65 s
+
+        time.Advance(TimeSpan.FromMilliseconds(100)); // t=5 s
+
+        Assert.Equal(1, fireCount);
+    }
+
+    [Fact]
+    public void NetworkAddressChanged_a_new_burst_after_a_capped_fire_gets_a_fresh_cap()
+    {
+        var registrar = new FakeSystemEventRegistrar();
+        var time = new FakeTimeProvider();
+        var source = CreateSource(registrar, time, TimeSpan.FromMilliseconds(750), TimeSpan.FromSeconds(5));
+        source.Start();
+        var fireCount = 0;
+        source.NetworkAddressChanged += (_, _) => fireCount++;
+
+        // First burst: flaps until the cap fires it at t=5 s.
+        registrar.RaiseNetworkAddressChanged();
+        for (var i = 0; i < 10; i++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(500));
+            registrar.RaiseNetworkAddressChanged();
+        }
+
+        Assert.Equal(1, fireCount); // fired at t=5 s; the raw event at t=5 s began the next burst
+
+        // Second burst keeps flapping: it must fire 5 s after ITS first event, not stay deferred
+        // and not fire early off the old burst's start.
+        for (var i = 0; i < 9; i++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(500));
+            registrar.RaiseNetworkAddressChanged();
+        }
+
+        Assert.Equal(1, fireCount); // t=9.5 s
+        time.Advance(TimeSpan.FromMilliseconds(500)); // t=10 s
         Assert.Equal(2, fireCount);
     }
 }

@@ -15,7 +15,10 @@ namespace Bosun.SystemEventIntegration;
 /// <para>
 /// <b>Suspend is the one path that blocks (Invariant I8).</b> Windows gives roughly two seconds
 /// between raising <c>PowerModeChanged(Suspend)</c> and proceeding with suspend regardless of
-/// whether the handler has returned (docs/ARCHITECTURE.md §3; <c>bs-ajh</c>). Returning immediately
+/// whether the handler has returned: Microsoft's PBT_APMSUSPEND reference says "The system allows
+/// approximately two seconds for an application to handle this notification"
+/// (https://learn.microsoft.com/en-us/windows/win32/power/pbt-apmsuspend; docs/ARCHITECTURE.md §3;
+/// <c>bs-ajh</c>, which is why the default budget is 3 s). Returning immediately
 /// (fire-and-forget, like <see cref="OnResume"/>/<see cref="OnNetworkAddressChanged"/> below) would
 /// give the drain no window to run before the machine sleeps anyway, which defeats the entire point
 /// of subscribing to this event -- so <see cref="OnSuspend"/> deliberately blocks the calling thread,

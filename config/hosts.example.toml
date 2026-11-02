@@ -16,7 +16,7 @@ failures_before_unmount         = 3
 backoff_seconds                 = [5, 15, 30, 60, 300]
 mounted_probe_interval_seconds  = 60
 mounted_deep_probe_interval_seconds = 300
-suspend_unmount_timeout_seconds = 8
+suspend_unmount_timeout_seconds = 3
 start_with_windows              = true
 
 # Restore Claude Code sessions after a reboot or a Terminal exit (ADR-021). Off unless you set it:

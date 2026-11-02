@@ -200,14 +200,66 @@ means the path to the host may have altered, a resume means everything may have,
 including `rclone rcd` and WinFsp themselves — and it is what let `bs-brv` look
 correct in review.
 
+**The network-change event is debounced, and the debounce is bounded**
+(`Win32SystemEventSource`; `bs-u4a` item 2). Windows raises
+`NetworkAddressChanged` several times for one physical transition (adapter down,
+DHCP, adapter up), so the source coalesces a burst into one event. Two fixed
+numbers govern it; neither is configurable:
+
+| Number | Value | Meaning |
+|---|---|---|
+| Quiet period | 750 ms | The event fires once no further raw event has arrived for this long (trailing edge: each raw event restarts the window). |
+| Maximum deferral | 5 s | The event fires **at the latest** 5 s after the *first* raw event of a burst, however many more arrive. |
+
+So "re-probe all immediately" in the table above means 750 ms after the network
+settles, or 5 s after it started changing if it never settles. Without the cap a
+link flapping faster than the quiet period would defer the event indefinitely —
+and a network interruption is one of the two failure modes the project exists
+for. A burst begins with the first raw event after the previous public event;
+firing ends it, so the next raw event starts a new burst with a fresh 5 s.
+
 Re-derivation is gated on `rclone rcd` answering `core/version`. If it does not,
 nothing is reconciled or drained; the supervisor waits for the ordinary cadence
 rather than acting on state it cannot verify.
 
-The suspend handler must complete quickly. Windows does not wait indefinitely.
-Issue unmounts with a short timeout and accept that a forced unmount may be
-needed on resume — that is what re-derivation is for, and it is now implemented
-rather than aspirational.
+The suspend handler must complete quickly. Windows does not wait indefinitely:
+Microsoft's `PBT_APMSUSPEND` reference says "The system allows approximately two
+seconds for an application to handle this notification. If an application is
+still performing operations after its time allotment has expired, the system may
+interrupt the application"
+(<https://learn.microsoft.com/en-us/windows/win32/power/pbt-apmsuspend>).
+`global.suspend_unmount_timeout_seconds` therefore defaults to **3** (`bs-ajh`):
+the documented two seconds plus one second of headroom. A longer default would
+only hold `SystemEvents`' single notification thread past the point Windows
+stops waiting. Issue unmounts with that short timeout and accept that a forced
+unmount may be needed on resume — that is what re-derivation is for, and it is
+now implemented rather than aspirational.
+
+**When the supervisor faults during suspend** (`bs-3al`; `bs-u4a` item 5). The
+suspend handler runs on `Microsoft.Win32.SystemEvents`' single notification
+thread, which has no `catch` above it: an exception that escaped the handler
+would terminate the process, and a dead process never runs resume-side
+re-derivation. So the handler never throws. `SuspendAsync` can fault — the
+supervisor's channel re-surfaces any exception raised while it drains as a
+faulted task — and the adapter handles that without rethrowing:
+
+- Fault *inside* the budget: logged at error level with the exception, and the
+  handler returns to Windows at once. It does not retry and does not compensate.
+- Budget elapsed first: logged as a warning, and the handler returns. The
+  in-flight call is left running; if it faults later, that is logged at error
+  level too rather than left as an unobserved task exception.
+- The same holds for resume and network change, which are fire-and-forget: a
+  faulted call is logged and nothing more.
+
+Whatever the faulted suspend did not unmount is recovered on resume by
+re-derivation (ADR-017), which is why that path is not optional. A fault is
+visible in the log only; the suspend handler does not report it into the health
+model. If the container cannot construct the supervisor at all (`bs-4js`), no
+system-event subscription is made: `StartupOrchestrator` creates the adapter only
+once the supervisor object exists, and the inert stand-in used otherwise mounts
+nothing, so there is nothing to unmount. (A supervisor that was constructed but
+whose initial `StartAsync` failed *is* subscribed, and a suspend then sweeps whatever
+that supervisor holds.)
 
 ## 4. The mount state machine
 
@@ -334,11 +386,26 @@ right before building any UI.
 5. On suspend, every host in `Mounted` or `Mounting` goes to `Draining`, then
    `Disabled`.
 
+   A host that is **already `Draining`** for an ordinary reason when suspend
+   arrives (a probe-failure threshold, an idle timeout, a user unmount, a repair)
+   keeps its drain cause — a user unmount still parks it — but its forced-unmount
+   escalation deadline becomes the **suspend budget**
+   (`global.suspend_unmount_timeout_seconds`, counted from the moment suspend
+   arrives) instead of the ordinary 10 s `DrainConfirmTimeout`, which could fall
+   after the machine has gone to sleep. The supervisor re-issues the unmount at
+   once and aims the next check at the new deadline. The change only ever
+   **shortens** a deadline: a drain whose ordinary deadline is already sooner than
+   suspend arrival plus the budget keeps it, and a second suspend never moves a
+   deadline later. A host already escalated is left alone (it is already on the
+   forced path). `bs-u4a` item 4.
+
    On resume, the supervisor **does not assume suspend succeeded** — it is
    best-effort by design, bounded by a budget that can elapse. It reconciles
    against `mount/listmounts` first; any host still `Mounted` is force-probed
    shallow *and* deep, and drains on a single deep failure once `rclone rcd` has
-   answered `core/version`. Everything else previously enabled goes to `Probing`.
+   answered `core/version`. Everything else previously enabled is re-probed
+   immediately: a `Disabled` host through `Probing`, a `Ready` or `Unreachable`
+   host in place (rule 10).
    A network address change takes the identical path. See ADR-017.
 6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount.
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
@@ -369,9 +436,30 @@ right before building any UI.
    remounts after a fresh probe, an on-demand host rests in `Ready`, and a host the
    user parked earlier stays parked.
 
+10. **`Probing` is one-shot** (`bs-but`). A host enters `Probing` only from
+    `Disabled`, for the initial check that follows an "enable": at startup, on
+    resume for a host the suspend left `Disabled`, after a drain's automatic or
+    paced re-enable (including the repair and mount-retry paths above), and when a
+    host is added to the config or changed from `mode = "none"`. The probe's
+    outcome leaves `Probing` for `Ready` or `Unreachable`, and it is not entered
+    again from either.
+
+    **Recurring probes run in place and log no transition.** The idle probe on a
+    `Ready` or `Unreachable` host (the backoff ladder, an immediate re-probe on
+    resume or network change, "retry now") and the shallow and deep probes on a
+    `Mounted` host all happen without leaving the state they run in. Only a probe
+    whose *result* changes the state produces a transition — `Ready → Unreachable`
+    and `Unreachable → Ready` on the idle probe, `Mounted → Draining` on the
+    failure threshold — so a state change in the transition log means something
+    happened. If every recurring probe re-entered `Probing`, the log (the primary
+    triage artifact in `docs/OPERATIONS.md`) would record a transition per probe
+    per host and bury the ones that matter. Anywhere else in this document that
+    says a host is "probed" without naming a state change means this in-place probe.
+
 ### Backoff
 
-`Unreachable → Probing` uses the configured backoff ladder, default
+An `Unreachable` host's next probe, which runs in place (rule 10), is paced by the
+configured backoff ladder, default
 `[5, 15, 30, 60, 300]` seconds, holding at the last value. Backoff is **reset to
 zero** by a network address change, a power resume, or an explicit user "retry
 now". This is what makes the dock/undock experience feel immediate rather than
@@ -406,7 +494,7 @@ a host that is *known-stale* is a worse answer than one that is unknown.
 
 #### A failed mount attempt is paced too, on its own ladder
 
-Everything above paces `Unreachable → Probing` — a host that cannot be *reached*.
+Everything above paces the re-probe of an `Unreachable` host — one that cannot be *reached*.
 A host can be perfectly reachable and still be impossible to **mount**: an expired
 key, a disabled SFTP subsystem, a drive letter already claimed by something else.
 That is a different failure and it needs its own rule (`bs-k4k`).

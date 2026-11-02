@@ -296,6 +296,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         public ITimer? DeepProbeTimer;
         public ITimer? IdleUnmountTimer;
         public DateTimeOffset? DrainStartedUtc;
+
+        /// <summary>Set by <see cref="SuspendAsync"/> on a host that was ALREADY
+        /// <see cref="MountState.Draining"/> for an ordinary cause when suspend arrived (bs-u4a item
+        /// 4): the moment its forced-unmount escalation must happen by, namely the suspend arrival
+        /// plus <c>global.suspend_unmount_timeout_seconds</c>. It only ever SHORTENS the deadline the
+        /// drain's own cause gives it (<see cref="EffectiveDrainTimeout"/> takes the minimum); it is
+        /// cleared by <see cref="BeginDrainAsync"/> so it cannot leak into a later drain.</summary>
+        public DateTimeOffset? SuspendEscalationDeadlineUtc;
         public bool DrainEscalated;
         public DrainCause DrainCause;
         public string? DrainReason;
@@ -519,11 +527,57 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     {
         suspended = true;
 
+        // Taken BEFORE the sweep below: a host that this very call moves into Draining already
+        // carries the suspend budget (DrainCause.Suspend) and must not be treated as "already
+        // draining for an ordinary reason".
+        var alreadyDraining = hosts.Values
+            .Where(h => h.State == MountState.Draining && !h.DrainEscalated)
+            .ToList();
+
         foreach (var host in hosts.Values.Where(h => h.State is MountState.Mounting or MountState.Mounted).ToList())
         {
             await BeginDrainAsync(host, "system suspend", DrainCause.Suspend, ct).ConfigureAwait(false);
         }
+
+        // bs-u4a item 4: a host already Draining for an ordinary reason keeps its drain cause (so a
+        // user unmount still parks it, a removed host is still evicted) but must not keep the 10 s
+        // ordinary escalation deadline: that could fall after the machine has gone to sleep. It gets
+        // the suspend budget instead -- shortened only, never lengthened.
+        foreach (var host in alreadyDraining)
+        {
+            await ApplySuspendBudgetToDrainingHostAsync(host, ct).ConfigureAwait(false);
+        }
     }, cancellationToken);
+
+    private async Task ApplySuspendBudgetToDrainingHostAsync(HostRuntime host, CancellationToken ct)
+    {
+        var before = EffectiveDrainTimeout(host);
+        var suspendDeadline = timeProvider.GetUtcNow() + TimeSpan.FromSeconds(global.SuspendUnmountTimeoutSeconds);
+        if (host.SuspendEscalationDeadlineUtc is not { } existing || suspendDeadline < existing)
+        {
+            host.SuspendEscalationDeadlineUtc = suspendDeadline;
+        }
+
+        var after = EffectiveDrainTimeout(host);
+        if (after >= before)
+        {
+            // The drain's own deadline is already at or before the suspend deadline: nothing to
+            // shorten, and the retry timer already armed is aimed at it.
+            return;
+        }
+
+        logger.LogInformation(
+            "Host {HostKey} was already draining ({Reason}) when suspend arrived; its forced-unmount deadline is " +
+            "shortened from {Before} to {After} after the drain began (the suspend budget)",
+            host.Key, host.DrainReason, before, after);
+
+        // The retry timer already armed was aimed at the old, later deadline. Supersede it with an
+        // attempt now: it re-issues the unmount and re-verifies (exactly what a drain step does),
+        // then re-arms the next check AT the new deadline.
+        host.ProbeTimer?.Dispose();
+        host.ProbeTimer = null;
+        await AttemptDrainStepAsync(host, ct).ConfigureAwait(false);
+    }
 
     public Task ResumeAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
     {
@@ -1598,6 +1652,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.DrainReason = reason;
         host.DrainStartedUtc = timeProvider.GetUtcNow();
         host.DrainEscalated = false;
+        host.SuspendEscalationDeadlineUtc = null;
         host.DrainCause = cause;
 
         host.ProbeTimer?.Dispose();
@@ -1652,9 +1707,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
 
         var elapsed = timeProvider.GetUtcNow() - host.DrainStartedUtc!.Value;
-        var timeout = host.DrainCause == DrainCause.Suspend
-            ? TimeSpan.FromSeconds(global.SuspendUnmountTimeoutSeconds)
-            : DrainConfirmTimeout;
+        var timeout = EffectiveDrainTimeout(host);
 
         if (!host.DrainEscalated && elapsed >= timeout)
         {
@@ -1704,6 +1757,28 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
 
         host.ProbeTimer = CreateOneShotTimer(nextDelay, () => Enqueue(ct2 => AttemptDrainStepAsync(host, ct2)));
+    }
+
+    /// <summary>How long after <see cref="HostRuntime.DrainStartedUtc"/> this drain escalates to a
+    /// forced unmount: the suspend budget for a <see cref="DrainCause.Suspend"/> drain, the ordinary
+    /// <see cref="DrainConfirmTimeout"/> otherwise -- and, for a drain that was already running when
+    /// suspend arrived, never later than <see cref="HostRuntime.SuspendEscalationDeadlineUtc"/>.</summary>
+    private TimeSpan EffectiveDrainTimeout(HostRuntime host)
+    {
+        var timeout = host.DrainCause == DrainCause.Suspend
+            ? TimeSpan.FromSeconds(global.SuspendUnmountTimeoutSeconds)
+            : DrainConfirmTimeout;
+
+        if (host.SuspendEscalationDeadlineUtc is { } suspendDeadline)
+        {
+            var viaSuspend = suspendDeadline - host.DrainStartedUtc!.Value;
+            if (viaSuspend < timeout)
+            {
+                timeout = viaSuspend;
+            }
+        }
+
+        return timeout;
     }
 
     private async Task<bool> IsStillMountedAsync(string mountPoint, CancellationToken ct)

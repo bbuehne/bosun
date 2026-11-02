@@ -111,13 +111,14 @@ public sealed class NetworkCoalescingAdversarialTests
     /// window.
     /// </summary>
     /// <remarks>
-    /// This also pins a real design consequence: because the debounce is purely trailing-edge with no
-    /// maximum deferral, a link that flaps faster than the window defers the public event
-    /// indefinitely. Flagged in the delivery report as a spec gap rather than silently accepted --
-    /// docs/ARCHITECTURE.md and docs/CONFIG-SCHEMA.md say nothing about the debounce at all.
+    /// This used to pin a design gap: the debounce was purely trailing-edge with no maximum
+    /// deferral, so a link flapping faster than the window deferred the public event indefinitely.
+    /// bs-u4a item 2 closed it with a 5 s cap measured from the first raw event of a burst
+    /// (docs/ARCHITECTURE.md §3). A seven-second flap now yields one event at the cap, while the
+    /// link is still flapping, and one more once it settles -- two events, not nine and not zero.
     /// </remarks>
     [Fact]
-    public void A_flap_lasting_longer_than_the_window_still_produces_exactly_one_event()
+    public void A_flap_lasting_longer_than_the_window_is_coalesced_and_bounded_by_the_five_second_cap()
     {
         var registrar = new FakeSystemEventRegistrar();
         var time = new FakeTimeProvider();
@@ -132,10 +133,12 @@ public sealed class NetworkCoalescingAdversarialTests
             time.Advance(Ms(700)); // just inside the 750ms window, ten times over
         }
 
-        Assert.Equal(0, fireCount);
+        // t=7 s: the cap fired once at t=5 s although the link never went quiet; the raw events
+        // after it (t=5.6, 6.3 s) are a new burst, still inside its own window.
+        Assert.Equal(1, fireCount);
 
         time.Advance(Window); // the link finally settles
-        Assert.Equal(1, fireCount);
+        Assert.Equal(2, fireCount);
     }
 
     /// <summary>
