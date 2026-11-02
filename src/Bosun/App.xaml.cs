@@ -70,7 +70,22 @@ public partial class App : Application
 
     // bs-ww9.1.3: the options the host is built from, kept so the window can show the path to the
     // hosts.toml this process actually reads (the lambda below adds only the launch-dependent flag).
-    private readonly BosunHostOptions _hostOptions = BosunHostOptions.CreateDefault();
+    private readonly BosunHostOptions _hostOptions = CreateHostOptions();
+
+    private static BosunHostOptions CreateHostOptions()
+    {
+        var options = BosunHostOptions.CreateDefault();
+#if DEBUG
+        // bs-uzk: the one place BOSUN_FAULT is read, and it exists only in a Debug build.
+        options = options with { DebugFaults = Diagnostics.FaultInjection.DebugFaultSettings.FromEnvironment() };
+#endif
+        return options;
+    }
+
+#if DEBUG
+    // bs-uzk (T13): held so the timer is not collectable before it fires.
+    private Diagnostics.FaultInjection.UiExceptionFault? _uiExceptionFault;
+#endif
 
     private IHost? _host;
     private ILogger<App>? _logger;
@@ -384,6 +399,15 @@ public partial class App : Application
         // No orchestrator means no first-run signal: Invalid is "not first run" for the window.
         _mainWindowController.Initialize(
             _launchContext, startup?.Current.ConfigState ?? ConfigReadinessState.Invalid);
+
+#if DEBUG
+        // bs-uzk (T13): last, so the UI is fully up before the exception is armed.
+        if (_hostOptions.DebugFaults.Has(Diagnostics.FaultInjection.DebugFault.UiException))
+        {
+            _uiExceptionFault = new Diagnostics.FaultInjection.UiExceptionFault(Dispatcher, _logger!);
+            _uiExceptionFault.Arm();
+        }
+#endif
     }
 
     protected override void OnExit(ExitEventArgs e)

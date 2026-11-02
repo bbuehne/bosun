@@ -47,6 +47,16 @@ public sealed record BosunHostOptions
     /// </summary>
     public bool OpenAutostartTerminalTabs { get; init; }
 
+#if DEBUG
+    /// <summary>
+    /// Debug builds only (bs-uzk): the faults to inject. <see cref="Diagnostics.FaultInjection.DebugFaultSettings.None"/>
+    /// unless <c>App</c> sets it from the environment, so no test is affected by the shell it runs in.
+    /// This property does not exist in a Release build.
+    /// </summary>
+    public Diagnostics.FaultInjection.DebugFaultSettings DebugFaults { get; init; } =
+        Diagnostics.FaultInjection.DebugFaultSettings.None;
+#endif
+
     /// <summary>
     /// The options Bosun uses at real runtime: both logs and config under
     /// <c>%LOCALAPPDATA%\Bosun</c> (ADR-012 Decision 4; docs/OPERATIONS.md "Logs" and

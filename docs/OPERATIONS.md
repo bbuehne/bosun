@@ -164,7 +164,10 @@ Two rules for using this section:
 1. **Which Bosun.** Run the Bosun you use day to day, as yourself, started the way
    you normally start it. Do not run any of this from a worktree under
    `.claude\worktrees\`: a Bosun started there drives the same real rclone port, the
-   same drive letters and the same Terminal fragment file.
+   same drive letters and the same Terminal fragment file. The exception is T9 part E,
+   T12 and T13, which need a Debug build of Bosun built from your main checkout (never
+   from a worktree) with a fault switched on: see *Shared steps > Debug build with an
+   injected fault*.
 2. **Which host.** Any LAN host that Bosun can already mount over SFTP with a key.
    Check first that `rclone lsd bosun-<key>:` works (see *rclone remotes*). The
    tests below call it "the test host". Keep its address and key out of anything
@@ -313,6 +316,69 @@ notification titled `Bosun` names the problem in the same words as the window ba
 appears once per fault, not once per retry, and not during the first moments after Bosun
 starts while rclone is still coming up.
 
+**Fault build. Debug build with an injected fault** *(bs-uzk)*. T9 part E, T12 and T13 need
+something to go wrong that cannot be provoked safely on a real install, so a **Debug**
+build of Bosun can be told to inject one fault, through the `BOSUN_FAULT` environment
+variable. A Release build (the one you normally run, and the one that ships) does not
+contain the variable's name and does not look at it: setting `BOSUN_FAULT` for it does
+nothing. The values, which may be combined with commas (`supervisor-start,ui-exception`):
+
+| `BOSUN_FAULT` | What Bosun does | Test |
+|---|---|---|
+| `supervisor-start` | The mount supervisor cannot be built, so it never starts. Everything else starts normally. | T12 |
+| `ui-exception` | About 5 s after the UI is up, one exception is thrown on the UI thread. Once per process start. | T13 |
+| `rcd-unavailable-at-resume` | After each system resume, `core/version` and `mount/mount` fail as if rcd were not answering, for `BOSUN_FAULT_SECONDS` seconds (default **120**). rcd itself keeps running and `mount/unmount` and `mount/listmounts` still work. | T9 part E |
+
+An unrecognised value, or a `BOSUN_FAULT_SECONDS` that is not a number between 0 and 86400,
+is ignored and logged as a warning. The Debug build is otherwise the same program: **it uses
+your real `hosts.toml`, your real logs, the real rc port, your real drive letters and the
+real Terminal fragment.** Persistent hosts mount and the fragment is rewritten exactly as
+for the Release build, which is why the first step is to quit that one.
+
+*Steps F1 to F4. The tests name them and give the value of `$Fault` to use.*
+
+1. **Quit every running Bosun.** Tray > **Exit** on the one you normally run, then
+   `Get-Process Bosun, rclone -ErrorAction SilentlyContinue`.
+   **Expected:** no output. Bosun allows one instance per user; a second launch only brings the
+   running one to the front and exits, so with a Release Bosun still running the Debug build
+   never starts and no fault is in effect (the log then has no `FAULT INJECTION` line: `VOID`).
+   Never run this from a worktree under `.claude\worktrees\`; use your main checkout.
+2. **Build the Debug exe**, from the repo root of your main checkout:
+
+   ```powershell
+   $Repo     = '<path of your main checkout of the repo>'
+   $DebugExe = "$Repo\src\Bosun\bin\Debug\net10.0-windows\win-x64\Bosun.exe"
+   Set-Location $Repo
+   dotnet build -c Debug
+   Test-Path $DebugExe
+   ```
+
+   **Expected:** `Build succeeded.` with `0 Warning(s)` and `0 Error(s)`, then `True`. Rebuild
+   after every `git pull`. The build does not touch the Release exe you normally run.
+3. **Set the variable in this PowerShell session and start the exe from it.** Use the window where
+   you pasted the helper block (*Before you start*, step 5), so `Get-BosunLog` exists. A process reads
+   its environment when it starts, so the variable must be set in the session that launches it:
+
+   ```powershell
+   $Fault = 'supervisor-start'        # the value the test names
+   $env:BOSUN_FAULT = $Fault
+   # $env:BOSUN_FAULT_SECONDS = '900' # only T9 part E, and only if the test says so
+   Start-Process -FilePath $DebugExe
+   ```
+
+   **Expected:** the tray icon appears, and within a few seconds
+   `Get-BosunLog 'FAULT INJECTION'` prints a `[WRN]`-level line for each fault you named, starting
+   `FAULT INJECTION ACTIVE (BOSUN_FAULT=<value>)` and ending `not a real fault`. If it prints nothing,
+   this is not the Debug exe with the variable set; stop, the result is `VOID`.
+4. **Put things back.** Tray > **Exit** on the Debug Bosun, then
+   `Remove-Item Env:BOSUN_FAULT, Env:BOSUN_FAULT_SECONDS -ErrorAction SilentlyContinue` (or close
+   the window) and start your normal Bosun. **Expected:** it starts as usual, green or amber, and
+   no new `FAULT INJECTION` line appears in the log after your normal Bosun's start.
+
+Every injected failure is logged as a warning that says it is injected. When you read a log
+afterwards, a line containing `FAULT INJECTION` or `BOSUN_FAULT=` marks everything that follows as
+part of the test, not a defect to report.
+
 **Bundle. Copy diagnostics.** Tray menu > *Copy diagnostics*, or the button in the window.
 Explorer opens on `%LOCALAPPDATA%\Bosun\diagnostics\bosun-diagnostics-<yyyyMMdd-HHmmss>.zip`.
 Open `summary.txt` first. `hosts.json` holds the supervisor's in-memory transition
@@ -325,9 +391,10 @@ carry millisecond timestamps with your local offset; compare against your own no
 ### Suggested order
 
 Quick tests first, the overnight one last, so a mistake in the setup does not cost a
-night: T11, T14, T4, T5, T9, T8, T10, T3, T2, T7, T6, then T1. T12 and T13 cannot be
-run as things stand (see them). The whole set takes a few hours of attended time plus
-the overnight sleep.
+night: T11, T14, T4, T5, T9, T8, T10, T3, T2, T7, T6, then T1. T12, T13 and T9 part E
+need the Debug build with an injected fault (*Shared steps > Debug build with an injected
+fault*), so do them together in one sitting, after the tests above that use your normal
+Bosun. The whole set takes a few hours of attended time plus the overnight sleep.
 
 ### T1 — Overnight sleep, host still reachable  *(CLAUDE.md §7 item 4)*
 
@@ -717,7 +784,8 @@ remount followed. **FAIL** otherwise.
 ### T9 — An on-demand drive you mounted comes back after wake  *(ADR-022; bs-hrg, bs-ane)*
 
 Needs an on-demand host (as in T5; set `idle_unmount_seconds = 0` so the idle timer
-cannot interfere). Parts A to D are runnable; part E is not, as explained.
+cannot interfere). Parts A to D use your normal Bosun; part E uses the Debug build with an
+injected fault, and is best done last.
 
 **Part A: it comes back.**
 
@@ -749,24 +817,58 @@ Sleep, wake. **Expected:** it stays unmounted; no `-> Mounting` for the host.
    `Unreachable` is not polled, and the record is gone. A click on **Mount** mounts it
    normally.
 
-**Part E: forgotten if rclone is not back within 10 minutes. Not runnable by hand as
-things stand.** The record is kept only while something local is in the way (rcd not
-answering `core/version` at the resume, or mounting unavailable), and it expires
-`RemountRecordWaitLimit` (10 minutes) after the resume, with the log line
-`Dropping the remount record for <key> (...): it waited 00:10:00 after the resume without
-the obstacle clearing, so the host is not remounted automatically ...`. Nothing in the
-code lets you hold rclone unavailable across a resume on purpose. Options, none verified:
+**Part E: rclone is not answering after the wake. The record waits, then either mounts or
+expires at 10 minutes** *(bs-uzk; needs the Debug build, see *Shared steps > Debug build with an
+injected fault*)*. The record is kept while something local is in the way (rcd not answering
+`core/version` at the resume, or mounting unavailable). The supervisor's 30 s reconciliation
+tick resolves it once `core/version` answers again, or drops it `RemountRecordWaitLimit`
+(10 minutes) after the resume. With `BOSUN_FAULT=rcd-unavailable-at-resume`, `core/version` and
+`mount/mount` fail for `BOSUN_FAULT_SECONDS` seconds (default 120) after each resume, then work
+again. rcd itself is untouched, so nothing here risks a wedged drive; do not freeze `rclone.exe`.
 
-- Freeze `rclone.exe` just before sleeping with Sysinternals `pssuspend`, wake, wait
-  past 10 minutes, then resume it. Hazard: a frozen rcd holds a live WinFsp mount
-  that Explorer can hang on, and the suspend unmount cannot complete against a
-  frozen rcd (it would show up as the `B` budget warning). Not recommended on a
-  machine you are using.
-- Leave this part to the unit tests and record it `NOT RUN` with that reason.
-- Ask for a fault-injection or shortened-limit switch in a debug build; that is a
-  code change and a new issue.
+Two runs, E1 and E2, each from a fresh Debug start. Write down `W`, the time you wake the machine.
 
-**PASS (A to D)** when each part matches its Expected lines. **FAIL** otherwise.
+**E1: rclone returns after 2 minutes, and the drive mounts.**
+
+1. Do **F1 and F2**, then **F3** with `$Fault = 'rcd-unavailable-at-resume'` and
+   `BOSUN_FAULT_SECONDS` unset (so 120 s). Use the same on-demand host as parts A to D.
+2. Tray > the host > **Mount**; wait for `Mounted`. Sleep for at least 60 s. Wake; note `W`.
+3. **Expected** within a few seconds of `W`:
+   `Get-BosunLog 'FAULT INJECTION|Re-derivation after resume|Keeping the remount record'` shows, in
+   order, `FAULT INJECTION ACTIVE ... the system resumed, so core/version and mount/mount fail on
+   purpose until <time> UTC (120 s)` (that time is `W` + 120 s, in UTC); `Re-derivation after
+   resume skipped: rclone rcd did not answer core/version`; and
+   `Keeping the remount record for <key> (remount after resume: user-mounted before suspend (ADR-022)):
+   rclone rcd did not answer core/version; the host will be re-probed once that clears ...`.
+   The row reads `P: is not mounted`, and there is **no** `-> Mounting` line for the host yet. Do not
+   click **Mount** during the 120 s: it fails by design. If instead you see `Not remounting <key>
+   after resume: its first post-resume probe failed`, the network was not back at the wake and the
+   record was dropped for that reason (part D), not the one under test: the run is `VOID`; repeat it.
+4. **Expected** at `W` + 120 s, and up to 30 s later (the reconciliation tick):
+   `FAULT INJECTION ENDED`, then `Ready -> Mounting (trigger: deferred remount after reconciliation
+   tick: rclone rcd answers again (ADR-022))` and `Mounting -> Mounted (trigger: mount/mount succeeded)`.
+   The row reads `P: is mounted`; the drive check `ANSWERED`. No click from you.
+5. Do **F4**.
+
+**E2: rclone is still away after 10 minutes, and the record expires.**
+
+6. Do **F1 and F2**, then **F3** with `$Fault = 'rcd-unavailable-at-resume'` and
+   `$env:BOSUN_FAULT_SECONDS = '900'` set before `Start-Process`. Any value above 630 works; 900
+   keeps the fault on past the expiry.
+7. Mount the host, wait for `Mounted`, sleep at least 60 s, wake; note `W`. **Expected:** the same
+   three log entries as E1 step 3, with `until <time> UTC (900 s)`.
+8. Wait until `W` + 11 minutes. **Expected:** between `W` + 10:00 and `W` + 10:30 the log has
+   `Dropping the remount record for <key> (reconciliation tick): it waited 00:10:00 after the resume
+   without the obstacle clearing, so the host is not remounted automatically; a click still mounts it
+   (ADR-022 second amendment)`. There is no `-> Mounting` line for the host at any point, and the row
+   still reads `P: is not mounted`.
+9. Wait until `W` + 15 minutes, past the end of the fault. **Expected:** the host still does not
+   mount by itself (the record is gone). Now tray > the host > **Mount**: it mounts normally
+   (`Ready -> Mounting (trigger: user/persistent mount request)`, then `Mounted`). Do **F4**.
+
+**PASS (A to D)** when each of those parts matches its Expected lines; **PASS (E)** when E1 and E2
+each match. **FAIL** otherwise. A run in which the machine did not sleep (no
+`System event: power resume` line) or the fault line is absent is `VOID`.
 
 ### T10 — Network-change debounce is capped at 5 s  *(bs-u4a item 2)*
 
@@ -838,46 +940,76 @@ step 3 strings. **FAIL** otherwise. A `NoRootDirectory` line is the specific fin
 that `mount/mount` returns before the letter exists; report it with the log lines,
 because it would mean the guard needs a short wait.
 
-### T12 — The mount supervisor fails to start: red tray  *(bs-4js)*  — cannot be run as things stand
+### T12 — The mount supervisor fails to start: red tray  *(bs-4js; bs-uzk)*
 
-There is no switch in the product that makes the supervisor fail to start, and no
-safe real cause: the only way found in the code is an exception out of
-`MountSupervisor.StartAsync`. Options, none verified:
+Uses the Debug build with `BOSUN_FAULT=supervisor-start` (*Shared steps > Debug build with an
+injected fault*). The injected fault makes the mount supervisor impossible to build, at the
+point where the startup sequence and the window both resolve it. Nothing is probed or mounted,
+and the Debug build still starts a real `rclone rcd`, which is why your normal Bosun must be
+quit first and why this is never run from a worktree.
 
-- A deliberate `throw` added to a scratch build. Run it only after quitting your
-  real Bosun: it would otherwise share the real rc port, drive letters and Terminal
-  fragment. With the supervisor failing to start nothing is probed or mounted, but
-  the build still starts a real `rclone rcd`.
-- Ask for a debug-only fault-injection switch (a new issue).
-- Record `NOT RUN`.
+1. Do **F1 and F2**, then **F3** with `$Fault = 'supervisor-start'`.
+   **Expected:** the build and the `FAULT INJECTION ACTIVE (BOSUN_FAULT=supervisor-start)` warning, as in F2 and F3.
+2. Look at the tray within about 10 seconds of the start.
+   **Expected:** the icon is **red**, not green or amber.
+3. Tray > **Show window**.
+   **Expected:** the banner reads `The mount supervisor failed to start: BOSUN_FAULT=supervisor-start: the
+   mount supervisor was made to fail on purpose (injected, not a real fault)`, and the host list is empty.
+4. `Get-BosunLog 'Failed to start the mount supervisor'` and the lines after it.
+   **Expected:** `Failed to start the mount supervisor; no host will be probed or mounted this session`, at
+   error level, followed by an `InvalidOperationException` carrying the same message as the banner.
+5. Tray > **Copy diagnostics**, then extract the zip as in T14.
+   **Expected:** it still works. `hosts.json` reads `unavailable: InvalidOperationException: BOSUN_FAULT=supervisor-start: ...`;
+   `startup.json` and `summary.txt` carry the failure message, and `summary.txt` has `supervisor: FAILED TO START`.
+6. Wait 2 minutes, then `Get-BosunLog 'transitioned'` for lines after the start, and
+   `[IO.DriveInfo]::GetDrives() | ForEach-Object { '{0} {1}' -f $_.Name, $_.DriveType }`.
+   **Expected:** no `transitioned` line for any host since the start, no mounted drive letter for a Bosun host,
+   and the supervisor not retried (no second `Failed to start the mount supervisor`).
+7. Click **Restart Bosun** in the banner.
+   **Expected, by design, not observed:** a new Bosun starts and the old one exits, and the new one is
+   **red again with the same banner**, because a restarted process inherits this PowerShell session's
+   `BOSUN_FAULT`. That is the banner's button working; it does not mean the fix failed. To get a normal
+   Bosun back, do **F4**. If the new one is green, record the difference as a finding.
 
-What to check if the state is ever reached, by design:
+**PASS** when steps 2 to 6 match. **FAIL** otherwise. A start with no `FAULT INJECTION` line is `VOID`.
 
-1. The tray icon is **red**, not green or amber.
-2. The window banner reads `The mount supervisor failed to start: <the real
-   exception message>` and the host list is empty.
-3. The log has `Failed to start the mount supervisor; no host will be probed or mounted
-   this session` with the exception.
-4. *Copy diagnostics* still works: `hosts.json` reads `unavailable: <reason>`, and
-   `startup.json` and `summary.txt` carry the failure message (`supervisor: FAILED TO START`).
-5. Nothing is mounted, nothing is retried. **Restart Bosun** from the banner restores normal operation.
+### T13 — Bosun survives an exception on the UI thread  *(bs-twz; bs-uzk)*
 
-### T13 — Bosun survives an exception on the UI thread  *(bs-twz)*  — cannot be run as things stand
+Uses the Debug build with `BOSUN_FAULT=ui-exception`. About 5 seconds after the tray icon and
+window objects exist, one `InvalidOperationException` is thrown from a timer tick on the UI
+thread, which is the same route a throw from a button handler takes. It fires once per process.
+For step 4, have one persistent host configured (as in T1) and `Mounted` before you start the clock:
+mount it, then do the steps.
 
-Same position as T12: nothing in the product raises a dispatcher exception on demand.
-Options: a throwaway `throw` in a window event handler in a scratch build (quit your
-real Bosun first), a debug-only switch (a new issue), or `NOT RUN`. By design:
-
-1. The process keeps running; the tray icon turns **red**; the banner reads `A UI error
-   occurred; see the log`, naming the exception type and message and saying mount
+1. Do **F1 and F2**, then **F3** with `$Fault = 'ui-exception'`. Note the time `S` of the start.
+   **Expected:** the build and the `FAULT INJECTION ACTIVE (BOSUN_FAULT=ui-exception)` warning, as in F2 and F3; no
+   exception yet.
+2. Watch the tray icon from `S` for 20 seconds.
+   **Expected:** the process keeps running (`Get-Process Bosun` still shows it) and, about 5 seconds after the UI is up,
+   the icon turns **red**. It does not turn back.
+3. Tray > **Show window**.
+   **Expected:** the banner reads `A UI error occurred; see the log`, names `InvalidOperationException` and the message
+   `BOSUN_FAULT=ui-exception: injected unhandled exception on the UI dispatcher (not a real fault)`, and says mount
    supervision is still running.
-2. The log has a Critical entry: `Unhandled dispatcher exception (handled; 1 in the last
-   60 s, 1 since start). Supervision continues; the tray icon is marked faulted.`
-3. Supervision really continues: with a persistent host `Mounted`, T3's step 1 still takes
-   the drive down within its bound.
-4. The red state stays until Bosun is restarted; the banner offers **Restart Bosun** first.
-5. The runaway guard: more than 5 such exceptions within 60 s makes the sixth
-   un-handled; the process exits, and the log says `no longer handling them, so Bosun will exit`.
+4. `Get-BosunLog 'Unhandled dispatcher exception'`.
+   **Expected:** one Critical entry: `Unhandled dispatcher exception (handled; 1 in the last 60 s, 1 since start).
+   Supervision continues; the tray icon is marked faulted.` Preceded, a few seconds earlier, by the warning
+   `FAULT INJECTION ACTIVE (BOSUN_FAULT=ui-exception): an unhandled exception will be thrown on the UI dispatcher in 5 s`.
+5. Supervision really continues. With the persistent host `Mounted` and the icon red, do T3's step 1 (power the host off).
+   **Expected:** within the T3 bound the drive goes away and the log shows the usual `transitioned` lines; the
+   process is still the same one (same `Id` in `Get-Process Bosun`).
+6. Wait 5 minutes with the window open.
+   **Expected:** the icon stays red until Bosun is restarted, there is no second `Unhandled dispatcher exception`
+   entry, and the banner offers **Restart Bosun** first.
+7. The runaway guard (more than 5 exceptions within 60 s ends the process, with `no longer handling
+   them, so Bosun will exit`) **cannot be reached with this hook**, which fires once. It is covered
+   by `DispatcherExceptionPolicy`'s unit tests only; record it as such. Clicking **Restart Bosun** starts a
+   new process that inherits the variable, so it throws once more about 5 seconds after its UI is up and goes
+   red again; that is one exception per process, not a runaway.
+
+Do **F4** at the end.
+
+**PASS** when steps 2 to 6 match. **FAIL** otherwise. A start with no `FAULT INJECTION` line is `VOID`.
 
 ### T14 — Copy diagnostics works
 
