@@ -17,6 +17,8 @@ internal sealed class FakeMountSupervisor : IMountSupervisor
 
     public Exception? MountRequestException { get; set; }
 
+    public Exception? UnmountRequestException { get; set; }
+
     public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
     public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
@@ -34,7 +36,7 @@ internal sealed class FakeMountSupervisor : IMountSupervisor
     public Task RequestUnmountAsync(string hostKey, CancellationToken cancellationToken = default)
     {
         UnmountRequests.Add(hostKey);
-        return Task.CompletedTask;
+        return UnmountRequestException is not null ? Task.FromException(UnmountRequestException) : Task.CompletedTask;
     }
 
     public Task RequestRetryNowAsync(string hostKey, CancellationToken cancellationToken = default)

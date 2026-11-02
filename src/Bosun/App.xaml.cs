@@ -278,7 +278,9 @@ public partial class App : Application
             services.GetRequiredService<ILogger<HostActionDispatcher>>(),
             dependencies.Diagnostics,
             repairCommands,
-            dependencies.RestartNotice);
+            dependencies.RestartNotice,
+            // bs-ngo: a refused Mount click says why, through the same queued, window-owned dialog.
+            dialogPrompt);
 
         _mainWindow = new MainWindow { Logger = services.GetRequiredService<ILogger<MainWindow>>() };
         _mainWindow.Configure(statusReadModel, actionDispatcher, appHealth);

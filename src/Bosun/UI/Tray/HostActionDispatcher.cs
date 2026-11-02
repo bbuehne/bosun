@@ -30,6 +30,7 @@ public sealed class HostActionDispatcher
     private readonly CopyDiagnosticsCommand? _diagnostics;
     private readonly RepairCommands? _repair;
     private readonly IRestartNotice? _restartNotice;
+    private readonly IRepairPrompt? _prompt;
 
     public HostActionDispatcher(
         IMountSupervisor supervisor,
@@ -37,7 +38,8 @@ public sealed class HostActionDispatcher
         ILogger<HostActionDispatcher>? logger = null,
         CopyDiagnosticsCommand? diagnostics = null,
         RepairCommands? repair = null,
-        IRestartNotice? restartNotice = null)
+        IRestartNotice? restartNotice = null,
+        IRepairPrompt? prompt = null)
     {
         ArgumentNullException.ThrowIfNull(supervisor);
         ArgumentNullException.ThrowIfNull(launcher);
@@ -48,6 +50,7 @@ public sealed class HostActionDispatcher
         _diagnostics = diagnostics;
         _repair = repair;
         _restartNotice = restartNotice;
+        _prompt = prompt;
     }
 
     /// <summary>
@@ -105,9 +108,10 @@ public sealed class HostActionDispatcher
 
     /// <summary>
     /// Dispatches one menu click. Mount/Unmount are fire-and-forget against the supervisor's
-    /// command channel -- this method returns immediately; a refusal (e.g.
-    /// <c>MountRequestRefusedException</c> while suspended) is logged, not surfaced as a dialog.
-    /// The supervisor itself is the authority on whether the action is currently valid (it no-ops
+    /// command channel -- this method returns immediately. A refusal (e.g.
+    /// <c>MountRequestRefusedException</c> while suspended) is shown to the user in the app's one
+    /// dialog (bs-ngo, <see cref="HostActionFailure"/>), and any other failure is logged with a generic
+    /// message shown. The supervisor itself is the authority on whether the action is currently valid (it no-ops
     /// a Mount/Unmount call that does not apply to the host's current state) --
     /// <see cref="HostContextMenuBuilder"/> only decides whether to let the user click in the
     /// first place; this method does not re-check <see cref="HostMenuAction.IsEnabled"/>.
@@ -119,11 +123,11 @@ public sealed class HostActionDispatcher
         switch (kind)
         {
             case HostMenuActionKind.Mount:
-                FireAndForget(() => _supervisor.RequestMountAsync(row.HostKey), row.HostKey, "mount");
+                FireAndForget(() => _supervisor.RequestMountAsync(row.HostKey), row, isMount: true);
                 break;
 
             case HostMenuActionKind.Unmount:
-                FireAndForget(() => _supervisor.RequestUnmountAsync(row.HostKey), row.HostKey, "unmount");
+                FireAndForget(() => _supervisor.RequestUnmountAsync(row.HostKey), row, isMount: false);
                 break;
 
             case HostMenuActionKind.OpenTerminal:
@@ -142,7 +146,16 @@ public sealed class HostActionDispatcher
         }
     }
 
-    private void FireAndForget(Func<Task> action, string hostKey, string verb)
+    /// <remarks>
+    /// <b>Why the dialog and not a tray balloon (bs-ngo).</b> A refusal answers a click the user just
+    /// made, so it must be seen and must stay until read. A balloon is neither: Focus Assist swallows
+    /// it, and it times out. <see cref="IRepairPrompt.ShowError"/> is the path Copy diagnostics and
+    /// the repairs already use (bs-6bc, bs-3hx): it is queued until the menu that raised the click has
+    /// closed, so the dialog is not destroyed with the menu, and it is owned by the main window.
+    /// Balloons stay for things nobody clicked for (an unexpected unmount, a fault). The cost is that
+    /// the main window is brought forward to own the dialog, which a repair dialog does too.
+    /// </remarks>
+    private void FireAndForget(Func<Task> action, HostStatusRow row, bool isMount)
     {
         _ = RunAsync();
 
@@ -152,10 +165,47 @@ public sealed class HostActionDispatcher
             {
                 await action().ConfigureAwait(false);
             }
+            catch (OperationCanceledException ex)
+            {
+                // Bosun shutting down cancels in-flight requests. Not a failure to report.
+                _logger?.LogDebug(ex, "The {Verb} request for {HostKey} was cancelled", isMount ? "mount" : "unmount", row.HostKey);
+            }
             catch (Exception ex)
             {
-                _logger?.LogWarning(ex, "Failed to {Verb} {HostKey} from the UI", verb, hostKey);
+                var failure = HostActionFailure.Describe(ex, row.DisplayName, isMount);
+
+                if (failure.IsExpectedRefusal)
+                {
+                    _logger?.LogInformation(
+                        "The {Verb} request for {HostKey} was refused: {Reason}",
+                        isMount ? "mount" : "unmount", row.HostKey, ex.Message);
+                }
+                else
+                {
+                    _logger?.LogWarning(ex, "Failed to {Verb} {HostKey} from the UI", isMount ? "mount" : "unmount", row.HostKey);
+                }
+
+                TellTheUser(failure);
             }
+        }
+    }
+
+    private void TellTheUser(HostActionFailure failure)
+    {
+        if (_prompt is null)
+        {
+            _logger?.LogWarning("No dialog prompt is configured, so this was not shown to the user: {Message}", failure.Message);
+            return;
+        }
+
+        try
+        {
+            _prompt.ShowError(failure.Title, failure.Message);
+        }
+        catch (Exception ex)
+        {
+            // ShowError is meant not to throw; this is the last place anything could still be said.
+            _logger?.LogError(ex, "Could not show the '{Title}' dialog to the user", failure.Title);
         }
     }
 }
