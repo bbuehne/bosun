@@ -1,3 +1,4 @@
+using Bosun.Hosting;
 using Bosun.Tests.UI.Fakes;
 using Bosun.UI;
 
@@ -26,7 +27,7 @@ public sealed class MainWindowControllerTests
     {
         var (controller, window, _) = CreateSut();
 
-        controller.Initialize(LaunchContext.Manual);
+        controller.Initialize(LaunchContext.Manual, ConfigReadinessState.Loaded);
 
         Assert.True(window.IsVisible);
         Assert.True(window.ShowInTaskbar);
@@ -39,7 +40,7 @@ public sealed class MainWindowControllerTests
     {
         var (controller, window, _) = CreateSut();
 
-        controller.Initialize(LaunchContext.Autostart);
+        controller.Initialize(LaunchContext.Autostart, ConfigReadinessState.Loaded);
 
         Assert.False(window.IsVisible);
         Assert.False(window.ShowInTaskbar);
@@ -52,7 +53,7 @@ public sealed class MainWindowControllerTests
     {
         var (controller, window, _) = CreateSut();
 
-        controller.Initialize(LaunchContext.Autostart);
+        controller.Initialize(LaunchContext.Autostart, ConfigReadinessState.Loaded);
 
         Assert.Equal(1, window.ApplyPlacementCallCount);
     }
@@ -62,7 +63,7 @@ public sealed class MainWindowControllerTests
     {
         var (controller, window, _) = CreateSut(saved: null);
 
-        controller.Initialize(LaunchContext.Manual);
+        controller.Initialize(LaunchContext.Manual, ConfigReadinessState.Loaded);
 
         var expected = WindowPlacementClamper.CreateDefault(Screen);
         Assert.Equal(expected, window.GetPlacement());
@@ -75,7 +76,7 @@ public sealed class MainWindowControllerTests
         var saved = new WindowPlacement { Left = 5000, Top = 5000, Width = 800, Height = 600, IsMaximized = false };
         var (controller, window, _) = CreateSut(saved);
 
-        controller.Initialize(LaunchContext.Manual);
+        controller.Initialize(LaunchContext.Manual, ConfigReadinessState.Loaded);
 
         var applied = window.GetPlacement();
         Assert.True(applied.Left + applied.Width <= Screen.Right);
@@ -164,6 +165,147 @@ public sealed class MainWindowControllerTests
         Assert.Equal(1, store.SaveCallCount);
         Assert.True(window.IsVisible);
         Assert.Equal(0, window.HideCallCount);
+    }
+
+    // -- bs-ww9.1.3 / ADR-012: first run (no hosts.toml) shows the window whatever the launch context --
+
+    [Theory]
+    [InlineData(LaunchContext.Manual, ConfigReadinessState.Loaded, true)]
+    [InlineData(LaunchContext.UserRestart, ConfigReadinessState.Loaded, true)]
+    [InlineData(LaunchContext.Autostart, ConfigReadinessState.Loaded, false)]
+    [InlineData(LaunchContext.WatchdogRestart, ConfigReadinessState.Loaded, false)]
+    [InlineData(LaunchContext.Autostart, ConfigReadinessState.Invalid, false)]
+    [InlineData(LaunchContext.WatchdogRestart, ConfigReadinessState.Invalid, false)]
+    [InlineData(LaunchContext.Manual, ConfigReadinessState.AwaitingFirstRun, true)]
+    [InlineData(LaunchContext.UserRestart, ConfigReadinessState.AwaitingFirstRun, true)]
+    [InlineData(LaunchContext.Autostart, ConfigReadinessState.AwaitingFirstRun, true)]
+    [InlineData(LaunchContext.WatchdogRestart, ConfigReadinessState.AwaitingFirstRun, true)]
+    public void ShouldShowOnStartup_ShowsForAskingContexts_AndAlwaysOnFirstRun(
+        LaunchContext context, ConfigReadinessState state, bool expected)
+    {
+        Assert.Equal(expected, MainWindowController.ShouldShowOnStartup(context, state));
+    }
+
+    [Theory]
+    [InlineData(LaunchContext.Autostart)]
+    [InlineData(LaunchContext.WatchdogRestart)]
+    public void Initialize_OnFirstRun_ShowsTheWindow_EvenForAQuietLaunchContext(LaunchContext context)
+    {
+        var (controller, window, _) = CreateSut();
+
+        controller.Initialize(context, ConfigReadinessState.AwaitingFirstRun);
+
+        Assert.True(window.IsVisible);
+        Assert.True(window.ShowInTaskbar);
+        Assert.Equal(1, window.ShowCallCount);
+        Assert.Equal(1, window.ActivateCallCount);
+    }
+
+    [Fact]
+    public void Initialize_WithAutostartAndAReadyConfig_StaysHidden()
+    {
+        var (controller, window, _) = CreateSut();
+
+        controller.Initialize(LaunchContext.Autostart, ConfigReadinessState.Loaded);
+
+        Assert.False(window.IsVisible);
+        Assert.Equal(0, window.ShowCallCount);
+    }
+
+    [Fact]
+    public void Initialize_WithManual_StillShowsTheWindow_WhateverTheConfigState()
+    {
+        foreach (var state in Enum.GetValues<ConfigReadinessState>())
+        {
+            var (controller, window, _) = CreateSut();
+
+            controller.Initialize(LaunchContext.Manual, state);
+
+            Assert.True(window.IsVisible);
+            Assert.Equal(1, window.ShowCallCount);
+        }
+    }
+
+    [Fact]
+    public void ReadinessBecomingAwaitingFirstRun_AfterInitialize_ShowsTheHiddenWindowOnce()
+    {
+        var (controller, window, _) = CreateSut();
+        controller.Initialize(LaunchContext.Autostart, ConfigReadinessState.Invalid);
+        Assert.False(window.IsVisible);
+
+        controller.OnConfigStateObserved(ConfigReadinessState.AwaitingFirstRun);
+
+        Assert.True(window.IsVisible);
+        Assert.True(window.ShowInTaskbar);
+        Assert.Equal(1, window.ShowCallCount);
+        Assert.Equal(1, window.ActivateCallCount);
+    }
+
+    [Fact]
+    public void ReadinessRepublished_AsAwaitingFirstRun_NeverShowsOrActivatesTheWindowAgain()
+    {
+        var (controller, window, _) = CreateSut();
+        controller.Initialize(LaunchContext.Autostart, ConfigReadinessState.Invalid);
+        controller.OnConfigStateObserved(ConfigReadinessState.AwaitingFirstRun);
+
+        // The user closes the window; the orchestrator publishes further snapshots that still say first run.
+        controller.HideToTray();
+        controller.OnConfigStateObserved(ConfigReadinessState.AwaitingFirstRun);
+        controller.OnConfigStateObserved(ConfigReadinessState.AwaitingFirstRun);
+
+        Assert.False(window.IsVisible);
+        Assert.Equal(1, window.ShowCallCount);
+        Assert.Equal(1, window.ActivateCallCount);
+    }
+
+    [Fact]
+    public void FirstRunShownDuringInitialize_IsNotShownAgainByALaterObservation()
+    {
+        var (controller, window, _) = CreateSut();
+        controller.Initialize(LaunchContext.Autostart, ConfigReadinessState.AwaitingFirstRun);
+        controller.HideToTray();
+
+        controller.OnConfigStateObserved(ConfigReadinessState.AwaitingFirstRun);
+
+        Assert.False(window.IsVisible);
+        Assert.Equal(1, window.ShowCallCount);
+    }
+
+    [Fact]
+    public void FirstRunObserved_WhileTheWindowIsAlreadyShown_DoesNotActivateItAgain()
+    {
+        var (controller, window, _) = CreateSut();
+        controller.Initialize(LaunchContext.Manual, ConfigReadinessState.Invalid);
+
+        controller.OnConfigStateObserved(ConfigReadinessState.AwaitingFirstRun);
+
+        Assert.Equal(1, window.ShowCallCount);
+        Assert.Equal(1, window.ActivateCallCount);
+    }
+
+    [Theory]
+    [InlineData(ConfigReadinessState.Loaded)]
+    [InlineData(ConfigReadinessState.Invalid)]
+    public void ObservingAnyOtherConfigState_AfterInitialize_LeavesAHiddenWindowHidden(ConfigReadinessState state)
+    {
+        var (controller, window, _) = CreateSut();
+        controller.Initialize(LaunchContext.Autostart, ConfigReadinessState.Invalid);
+
+        controller.OnConfigStateObserved(state);
+
+        Assert.False(window.IsVisible);
+        Assert.Equal(0, window.ShowCallCount);
+    }
+
+    [Fact]
+    public void ObservingFirstRun_BeforeInitialize_DoesNothing()
+    {
+        var (controller, window, _) = CreateSut();
+
+        controller.OnConfigStateObserved(ConfigReadinessState.AwaitingFirstRun);
+
+        Assert.False(window.IsVisible);
+        Assert.Equal(0, window.ApplyPlacementCallCount);
     }
 
     [Fact]

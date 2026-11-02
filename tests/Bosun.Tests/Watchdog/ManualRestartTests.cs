@@ -158,7 +158,7 @@ public sealed class ManualRestartTests
             new Bosun.Tests.UI.Fakes.FakeWindowPlacementStore(null),
             new Bosun.Tests.UI.Fakes.FakeVirtualScreenProvider(new ScreenBounds(0, 0, 1920, 1080)));
 
-        controller.Initialize(context);
+        controller.Initialize(context, Bosun.Hosting.ConfigReadinessState.Loaded);
 
         Assert.Equal(shown, window.IsVisible);
         Assert.Equal(shown ? 1 : 0, window.ShowCallCount);

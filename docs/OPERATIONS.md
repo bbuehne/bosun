@@ -48,8 +48,13 @@ writes a template with a `[global]` block and every example host commented out â
 it configures zero hosts deliberately (a template that tried to mount
 `nas.example.internal` on first launch would be worse than no config at all). Add
 a `[hosts.<key>]` section and restart Bosun to bring a host up. This is the
-expected first-run path, not an error; a first-run window is the intended way to
-discover it (E9).
+expected first-run path, not an error. Because there is nothing else to see,
+Bosun shows its main window on first run however it was started (from
+`shell:startup`, after a restart by the watchdog, or by hand), once per run. The
+window reads **No hosts configured yet**, shows the full path of `hosts.toml`
+(select it to copy), and has an **Add Host...** button. The same panel appears
+whenever the loaded config holds no hosts. If `hosts.toml` exists but is invalid,
+the panel does not appear; the banner explains the problem instead.
 
 If `hosts.toml` exists but fails to parse or fails validation, Bosun keeps
 running with mounting and remote provisioning disabled â€” the same graceful

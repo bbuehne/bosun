@@ -202,5 +202,42 @@
                 <DataGridTextColumn Header="Details" Binding="{Binding StatusText, Mode=OneWay}" Width="*" />
             </DataGrid.Columns>
         </DataGrid>
+
+        <!--
+            bs-ww9.1.3 / ADR-012: the empty state. Shown over the (empty) host table when the config
+            loaded and holds zero hosts (a first run, or a valid file with no hosts. Bound to
+            HostsEmptyStateViewModel (DataContext set in MainWindow's constructor). Same neutral
+            window colours and the banner's 1px, 3px-radius border; the path is a read-only TextBox
+            so it can be selected and copied. The Add Host button runs the same handler as the header's.
+        -->
+        <Border x:Name="EmptyStatePanel"
+                Grid.Row="2"
+                Padding="24"
+                BorderThickness="1"
+                CornerRadius="3"
+                BorderBrush="#D0D0D0"
+                Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+                Visibility="{Binding IsVisible, Converter={StaticResource BoolToVisibility}}">
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="560">
+                <TextBlock Text="{Binding Title}" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
+                <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Margin="0,8,0,0" />
+                <TextBox x:Name="HostsFilePathBox"
+                         Text="{Binding HostsFilePath, Mode=OneWay}"
+                         IsReadOnly="True"
+                         TextWrapping="Wrap"
+                         FontFamily="Consolas"
+                         Margin="0,8,0,0"
+                         Padding="6,4"
+                         BorderBrush="#D0D0D0"
+                         Background="#F5F5F5" />
+                <Button x:Name="EmptyStateAddHostButton"
+                        Content="Add Host..."
+                        Click="OnAddHostClick"
+                        HorizontalAlignment="Left"
+                        Margin="0,16,0,0"
+                        Padding="14,5"
+                        Visibility="{Binding CanAddHost, Converter={StaticResource BoolToVisibility}}" />
+            </StackPanel>
+        </Border>
     </Grid>
 </Window>

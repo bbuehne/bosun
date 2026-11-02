@@ -1,3 +1,4 @@
+using Bosun.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Bosun.UI;
@@ -24,7 +25,9 @@ namespace Bosun.UI;
 /// ADR-018 rule 2 is the entire reason this class exists as a separate seam from ordinary WPF
 /// window plumbing: launched at login (<see cref="LaunchContext.Autostart"/>), the window must
 /// stay hidden and out of the taskbar. Launched by hand
-/// (<see cref="LaunchContext.Manual"/>), it must show immediately.
+/// (<see cref="LaunchContext.Manual"/>), it must show immediately. The one override is first run
+/// (no <c>hosts.toml</c>, <see cref="ConfigReadinessState.AwaitingFirstRun"/>): ADR-012 says it is a
+/// window shown actively, so it shows under every launch context (bs-ww9.1.3).
 /// </para>
 /// </remarks>
 public sealed class MainWindowController
@@ -33,6 +36,8 @@ public sealed class MainWindowController
     private readonly IWindowPlacementStore _store;
     private readonly IVirtualScreenProvider _screenProvider;
     private readonly ILogger<MainWindowController>? _logger;
+    private bool _initialized;
+    private bool _firstRunHandled;
 
     public MainWindowController(
         IAppWindow window,
@@ -54,12 +59,27 @@ public sealed class MainWindowController
     /// its "Show window"/"Hide window" toggle menu item correctly.</summary>
     public bool IsWindowVisible => _window.IsVisible;
 
+    /// <summary>
+    /// Whether the window is shown when Bosun starts (ADR-018 rule 2, ADR-012 Decision 2). True when
+    /// the launch context asks for a window (<see cref="LaunchContext.Manual"/>,
+    /// <see cref="LaunchContext.UserRestart"/>), and also whenever there is no <c>hosts.toml</c> yet
+    /// (<see cref="ConfigReadinessState.AwaitingFirstRun"/>), whatever the launch context: a first run
+    /// started at login or by the watchdog has nothing else to show the user (bs-ww9.1.3).
+    /// </summary>
+    public static bool ShouldShowOnStartup(LaunchContext context, ConfigReadinessState configState) =>
+        context.ShowsWindowAtStartup() || configState == ConfigReadinessState.AwaitingFirstRun;
+
     /// <summary>Loads (and clamps -- see <see cref="WindowPlacementClamper"/>) the persisted
-    /// placement, applies it to the window, and shows the window only if
-    /// <paramref name="context"/> is <see cref="LaunchContext.Manual"/> or <see cref="LaunchContext.UserRestart"/>
-    /// (ADR-018 rule 2; a watchdog restart stays hidden like autostart, bs-aoz). Call
-    /// exactly once, before any other method on this class.</summary>
-    public void Initialize(LaunchContext context)
+    /// placement, applies it to the window, and shows the window if
+    /// <see cref="ShouldShowOnStartup"/> says so: the launch context is
+    /// <see cref="LaunchContext.Manual"/> or <see cref="LaunchContext.UserRestart"/> (ADR-018 rule 2;
+    /// an autostart or watchdog restart stays hidden, bs-aoz), or <paramref name="configState"/> is
+    /// <see cref="ConfigReadinessState.AwaitingFirstRun"/> (bs-ww9.1.3). Call exactly once, before any
+    /// other method on this class.</summary>
+    /// <param name="configState">The config readiness known when the UI is built. It may not be final:
+    /// if it is not <see cref="ConfigReadinessState.AwaitingFirstRun"/> yet, a later change is
+    /// reported through <see cref="OnConfigStateObserved"/>.</param>
+    public void Initialize(LaunchContext context, ConfigReadinessState configState)
     {
         var virtualScreen = _screenProvider.GetVirtualScreenBounds();
         var saved = _store.TryLoad();
@@ -68,13 +88,44 @@ public sealed class MainWindowController
             : WindowPlacementClamper.Clamp(saved, virtualScreen);
 
         _window.ApplyPlacement(placement);
+        _initialized = true;
 
-        if (context.ShowsWindowAtStartup())
+        if (configState == ConfigReadinessState.AwaitingFirstRun)
+        {
+            // Whatever shows the window below, the first-run window has now had its turn.
+            _firstRunHandled = true;
+        }
+
+        if (ShouldShowOnStartup(context, configState))
         {
             ShowAndActivate();
         }
 
-        _logger?.LogInformation("Main window initialized for launch context {LaunchContext}", context);
+        _logger?.LogInformation(
+            "Main window initialized for launch context {LaunchContext}, config state {ConfigState}", context, configState);
+    }
+
+    /// <summary>
+    /// Tells the controller the config readiness changed after <see cref="Initialize"/> (the startup
+    /// sequence publishes it as it goes). The first time it becomes
+    /// <see cref="ConfigReadinessState.AwaitingFirstRun"/> the window is shown if it is not already;
+    /// every later call, and every other state, does nothing. At most once per process, so a
+    /// readiness republish can never pull the window back over what the user is doing, and a window
+    /// the user closed stays closed. Must be called on the UI thread.
+    /// </summary>
+    public void OnConfigStateObserved(ConfigReadinessState configState)
+    {
+        if (!_initialized || _firstRunHandled || configState != ConfigReadinessState.AwaitingFirstRun)
+        {
+            return;
+        }
+
+        _firstRunHandled = true;
+        if (!_window.IsVisible)
+        {
+            _logger?.LogInformation("No hosts.toml yet; showing the main window for first run");
+            ShowAndActivate();
+        }
     }
 
     /// <summary>Shows the window, gives it a taskbar presence (ADR-018 rule 4), and brings it to
