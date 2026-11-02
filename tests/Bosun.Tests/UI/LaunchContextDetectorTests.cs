@@ -39,6 +39,39 @@ public sealed class LaunchContextDetectorTests
         Assert.Equal(LaunchContext.Autostart, LaunchContextDetector.Detect(["--AutoStart"]));
     }
 
+    // bs-e28: session.autostart opens Terminal tabs for the Run-key launch and nothing else.
+    [Theory]
+    [InlineData(LaunchContext.Manual, false)]
+    [InlineData(LaunchContext.Autostart, true)]
+    [InlineData(LaunchContext.WatchdogRestart, false)]
+    [InlineData(LaunchContext.UserRestart, false)]
+    public void OpensAutostartTerminalTabs_IsTrueOnlyForAutostart(LaunchContext context, bool expected)
+    {
+        Assert.Equal(expected, context.OpensAutostartTerminalTabs());
+    }
+
+    [Fact]
+    public void EveryLaunchContextIsCoveredByTheTabsRule()
+    {
+        // A new LaunchContext must make a deliberate choice about tabs, not inherit one by accident.
+        Assert.Equal(
+            [LaunchContext.Autostart],
+            Enum.GetValues<LaunchContext>().Where(c => c.OpensAutostartTerminalTabs()));
+    }
+
+    [Theory]
+    [InlineData(false, new string[0])]
+    [InlineData(true, new[] { "--autostart" })]
+    [InlineData(false, new[] { "--restarted-by-watchdog", "123" })]
+    [InlineData(false, new[] { "--restarted-by-user", "123" })]
+    // A restarted Bosun inherits the original's arguments, so the restart flag must win over --autostart.
+    [InlineData(false, new[] { "--autostart", "--restarted-by-watchdog", "123" })]
+    [InlineData(false, new[] { "--autostart", "--restarted-by-user", "123" })]
+    public void FromTheCommandLine_OnlyAPlainAutostartLaunchOpensTabs(bool expected, string[] args)
+    {
+        Assert.Equal(expected, LaunchContextDetector.Detect(args).OpensAutostartTerminalTabs());
+    }
+
     [Fact]
     public void Detect_Throws_WhenArgsIsNull()
     {

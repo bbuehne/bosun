@@ -38,6 +38,15 @@ public static class LaunchContextExtensions
     /// Bosun by hand, or asked it to restart. False when it starts quietly to the tray.</summary>
     public static bool ShowsWindowAtStartup(this LaunchContext context) =>
         context is LaunchContext.Manual or LaunchContext.UserRestart;
+
+    /// <summary>
+    /// True only for <see cref="LaunchContext.Autostart"/> (bs-e28): <c>session.autostart</c> opens
+    /// Terminal tabs when Bosun starts from the Run key at Windows login, and never on a manual
+    /// start, a watchdog restart or a user restart. A restart re-launches Bosun mid-session and must
+    /// not open a second set of tabs the user already has.
+    /// </summary>
+    public static bool OpensAutostartTerminalTabs(this LaunchContext context) =>
+        context is LaunchContext.Autostart;
 }
 
 /// <summary>

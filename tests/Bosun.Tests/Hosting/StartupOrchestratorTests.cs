@@ -13,6 +13,7 @@ using Bosun.Tests.Rclone.Fakes;
 using Bosun.Tests.Rclone.Process.Fakes;
 using Bosun.Tests.Supervisor.Fakes;
 using Bosun.Tests.Terminal.Fakes;
+using Bosun.UI;
 using Bosun.UI.Banner;
 using Bosun.UI.Tray;
 using Microsoft.Extensions.DependencyInjection;
@@ -848,16 +849,189 @@ public sealed class StartupOrchestratorTests
         Assert.True(condition(), "condition was not reached within the deadline");
     }
 
+    // ----------------------------------------------------------------------------------------
+    // bs-e28: session.autostart opens Terminal tabs, only for a Run-key launch
+    // ----------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(new string[0], false)]
+    [InlineData(new[] { "--autostart" }, true)]
+    [InlineData(new[] { "--restarted-by-watchdog", "123" }, false)]
+    [InlineData(new[] { "--restarted-by-user", "123" }, false)]
+    [InlineData(new[] { "--autostart", "--restarted-by-watchdog", "123" }, false)]
+    public async Task AutostartTabs_OpenOnlyForTheRunKeyLaunchContext(string[] args, bool expectLaunch)
+    {
+        // The context goes through the same detector and mapping App uses to set the option.
+        var openTabs = LaunchContextDetector.Detect(args).OpensAutostartTerminalTabs();
+        var launcher = new FakeTerminalTabLauncher();
+        await using var harness = new Harness(
+            ValidConfig(HostBlock("nas", MountMode.OnDemand, autostart: true)),
+            tabLauncher: launcher,
+            openAutostartTabs: openTabs);
+
+        await harness.StartAsync();
+
+        Assert.Equal(expectLaunch ? 1 : 0, launcher.Calls.Count);
+        if (expectLaunch)
+        {
+            Assert.Equal(["-w", "0", "new-tab", "-p", "nas"], launcher.Calls[0]);
+        }
+    }
+
+    [Fact]
+    public async Task AutostartTabs_AllAutostartHostsAreChainedInOneCall_NoneModeIncluded_OthersExcluded()
+    {
+        var launcher = new FakeTerminalTabLauncher();
+        await using var harness = new Harness(
+            ValidConfig(
+                HostBlock("alpha", MountMode.Persistent, drive: "P:", autostart: true),
+                HostBlock("bravo", MountMode.None, autostart: true),
+                HostBlock("charlie", MountMode.None, autostart: false),
+                HostBlock("delta", MountMode.OnDemand, drive: "Q:", autostart: true)),
+            tabLauncher: launcher,
+            openAutostartTabs: true);
+
+        await harness.StartAsync();
+
+        var call = Assert.Single(launcher.Calls);
+        Assert.Equal(
+            ["-w", "0", "new-tab", "-p", "alpha", ";", "new-tab", "-p", "bravo", ";", "new-tab", "-p", "delta"],
+            call);
+    }
+
+    [Fact]
+    public async Task AutostartTabs_NoHostWithAutostart_LaunchesNothing()
+    {
+        var launcher = new FakeTerminalTabLauncher();
+        await using var harness = new Harness(
+            ValidConfig(HostBlock("nas", MountMode.OnDemand, autostart: false)),
+            tabLauncher: launcher,
+            openAutostartTabs: true);
+
+        await harness.StartAsync();
+
+        Assert.Empty(launcher.Calls);
+    }
+
+    [Fact]
+    public async Task AutostartTabs_FragmentWriteFailed_LaunchesNothing()
+    {
+        var launcher = new FakeTerminalTabLauncher();
+        await using var harness = new Harness(
+            ValidConfig(HostBlock("nas", MountMode.OnDemand, autostart: true)),
+            failFragmentWriteWith: new IOException("disk full"),
+            tabLauncher: launcher,
+            openAutostartTabs: true);
+
+        await harness.StartAsync();
+
+        Assert.False(harness.Orchestrator.Current.TerminalFragmentWritten);
+        Assert.Empty(launcher.Calls);
+        // The rest of startup is unaffected.
+        Assert.True(harness.Orchestrator.Current.SupervisorRunning);
+    }
+
+    [Fact]
+    public async Task AutostartTabs_InvalidConfig_LaunchesNothing()
+    {
+        var launcher = new FakeTerminalTabLauncher();
+        await using var harness = new Harness(
+            "this is not valid toml [[[", tabLauncher: launcher, openAutostartTabs: true);
+
+        await harness.StartAsync();
+
+        Assert.Empty(launcher.Calls);
+    }
+
+    [Fact]
+    public async Task AutostartTabs_OpenExactlyOnce_EvenThoughReadinessIsPublishedSeveralTimes()
+    {
+        var launcher = new FakeTerminalTabLauncher();
+        await using var harness = new Harness(
+            ValidConfig(HostBlock("nas", MountMode.Persistent, drive: "P:", autostart: true)),
+            tabLauncher: launcher,
+            openAutostartTabs: true);
+        var readinessPublications = 0;
+        harness.Orchestrator.ReadinessChanged += (_, _) => readinessPublications++;
+
+        await harness.StartAsync();
+
+        // Sanity: the sequence really did publish more than once (WinFsp, rclone, provisioning,
+        // supervisor), so "one launch" is not just "one publication".
+        Assert.True(readinessPublications > 1, $"expected several readiness publications, saw {readinessPublications}");
+        Assert.Single(launcher.Calls);
+    }
+
+    [Fact]
+    public async Task AutostartTabs_DoNotWaitForRclone_AFailedRcloneStillGetsItsTabs()
+    {
+        var launcher = new FakeTerminalTabLauncher();
+        await using var harness = new Harness(
+            ValidConfig(HostBlock("nas", MountMode.Persistent, drive: "P:", autostart: true)),
+            winFspReader: () => null,
+            tabLauncher: launcher,
+            openAutostartTabs: true);
+
+        await harness.StartAsync();
+
+        Assert.False(harness.Orchestrator.Current.WinFspInstalled);
+        Assert.Single(launcher.Calls);
+    }
+
+    [Fact]
+    public async Task AutostartTabs_ALauncherThatThrows_NeverAbortsStartup()
+    {
+        var launcher = new FakeTerminalTabLauncher { ThrowOnOpen = new InvalidOperationException("no wt.exe") };
+        await using var harness = new Harness(
+            ValidConfig(HostBlock("nas", MountMode.Persistent, drive: "P:", autostart: true)),
+            tabLauncher: launcher,
+            openAutostartTabs: true);
+
+        await harness.StartAsync();
+
+        Assert.Single(launcher.Calls);
+        Assert.True(harness.Orchestrator.Current.RcloneHealthy);
+        Assert.True(harness.Orchestrator.Current.SupervisorRunning);
+    }
+
+    [Fact]
+    public async Task AutostartTabs_NoLauncherRegistered_NeverAbortsStartup()
+    {
+        await using var harness = new Harness(
+            ValidConfig(HostBlock("nas", MountMode.OnDemand, autostart: true)),
+            tabLauncher: null,
+            openAutostartTabs: true);
+
+        await harness.StartAsync();
+
+        Assert.True(harness.Orchestrator.Current.SupervisorRunning);
+    }
+
+    [Fact]
+    public async Task AutostartTabs_ASemicolonInTheHostName_IsEscapedInTheLaunchedArguments()
+    {
+        var launcher = new FakeTerminalTabLauncher();
+        await using var harness = new Harness(
+            ValidConfig(HostBlock("nas", MountMode.None, autostart: true, displayName: "Prod; Web")),
+            tabLauncher: launcher,
+            openAutostartTabs: true);
+
+        await harness.StartAsync();
+
+        Assert.Equal(["-w", "0", "new-tab", "-p", @"Prod\; Web"], Assert.Single(launcher.Calls));
+    }
+
     // identity_file is a literal, non-existent path everywhere here -- the harness registers
     // IHostConfigStore with identityFileExists: _ => true, so no test needs a real file on disk
     // for it (simpler than threading a real per-test path through every TOML fixture, and no less
     // faithful: ConfigValidator's existence check is HostConfigStoreTests'/ConfigValidatorTests'
     // job, not this file's).
-    private static string HostBlock(string key, MountMode mode, string drive = "P:") => mode switch
+    private static string HostBlock(
+        string key, MountMode mode, string drive = "P:", bool autostart = false, string? displayName = null) => mode switch
     {
         MountMode.None => $"""
             [hosts.{key}]
-            display_name  = "{key}"
+            display_name  = "{displayName ?? key}"
             hostname      = "{key}.example.internal"
             port          = 22
             user          = "someuser"
@@ -867,7 +1041,7 @@ public sealed class StartupOrchestratorTests
               mode = "none"
 
               [hosts.{key}.session]
-              autostart = false
+              autostart = {(autostart ? "true" : "false")}
               reconnect = false
               tmux      = false
               tab_color    = "#2D5F3F"
@@ -879,7 +1053,7 @@ public sealed class StartupOrchestratorTests
             """,
         MountMode.Persistent => $"""
             [hosts.{key}]
-            display_name  = "{key}"
+            display_name  = "{displayName ?? key}"
             hostname      = "{key}.example.internal"
             port          = 22
             user          = "someuser"
@@ -894,7 +1068,7 @@ public sealed class StartupOrchestratorTests
               idle_unmount_seconds = 0
 
               [hosts.{key}.session]
-              autostart = false
+              autostart = {(autostart ? "true" : "false")}
               reconnect = false
               tmux      = false
               tab_color    = "#2D5F3F"
@@ -903,6 +1077,31 @@ public sealed class StartupOrchestratorTests
               [hosts.{key}.probe]
               interval_seconds = 60
               deep_probe       = true
+            """,
+        MountMode.OnDemand => $"""
+            [hosts.{key}]
+            display_name  = "{displayName ?? key}"
+            hostname      = "{key}.example.internal"
+            port          = 22
+            user          = "someuser"
+            identity_file = "/fake/identity"
+
+              [hosts.{key}.mount]
+              mode                 = "on-demand"
+              drive                = "{drive}"
+              remote_path          = "/srv/share"
+              vfs_cache_mode       = "writes"
+              network_mode         = true
+              idle_unmount_seconds = 600
+
+              [hosts.{key}.session]
+              autostart = {(autostart ? "true" : "false")}
+              reconnect = false
+              tmux      = false
+
+              [hosts.{key}.probe]
+              interval_seconds = 0
+              deep_probe       = false
             """,
         _ => throw new ArgumentOutOfRangeException(nameof(mode)),
     };
@@ -957,7 +1156,9 @@ public sealed class StartupOrchestratorTests
             Exception? failFragmentWriteWith = null,
             FakeFragmentFileSystem? fragmentFileSystem = null,
             bool withHealth = false,
-            Exception? failSupervisorResolutionWith = null)
+            Exception? failSupervisorResolutionWith = null,
+            ITerminalTabLauncher? tabLauncher = null,
+            bool openAutostartTabs = false)
         {
             Root = Path.Combine(Path.GetTempPath(), "bosun-tests", "orchestrator", Guid.NewGuid().ToString("N"));
             ConfigPath = Path.Combine(Root, "hosts.toml");
@@ -1057,9 +1258,19 @@ public sealed class StartupOrchestratorTests
                 services.AddSingleton<IAppHealthReporter>(sp => sp.GetRequiredService<AppHealthService>());
             }
 
+            if (tabLauncher is not null)
+            {
+                services.AddSingleton(tabLauncher);
+            }
+
             Services = services.BuildServiceProvider();
 
-            var options = new BosunHostOptions { LogDirectory = Root, ConfigPath = ConfigPath };
+            var options = new BosunHostOptions
+            {
+                LogDirectory = Root,
+                ConfigPath = ConfigPath,
+                OpenAutostartTerminalTabs = openAutostartTabs,
+            };
             Orchestrator = new StartupOrchestrator(
                 Services,
                 options,

@@ -7,6 +7,9 @@
 # [probe] table (interval_seconds, deep_probe). Everything in [session] is optional -- the whole
 # table may be left out. Defaults: autostart = false, reconnect = true, tmux = false, and no
 # tab_color / color_scheme (Windows Terminal then uses its own).
+#
+# autostart = true opens a Windows Terminal tab for that host when Bosun itself starts at Windows
+# login (its own autostart). It does nothing on a manual start or a restart.
 
 [global]
 rclone_rc_port                  = 5572

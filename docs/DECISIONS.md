@@ -1204,6 +1204,16 @@ or a marker file because it is visible in the shortcut's own Target field (so th
 autostart registration is self-documenting to anyone who inspects it) and needs no
 process-wide state that could leak into a manual launch started from the same shell.
 
+**Amendment (`bs-e28`): the launch context also gates `session.autostart`.**
+`hosts.<key>.session.autostart = true` opens a Windows Terminal tab for that host only
+when Bosun starts with `--autostart` at Windows login (`LaunchContext.Autostart`). A
+manual start, a watchdog restart and a user restart open nothing: a restart happens
+mid-session, and a second set of tabs is a duplicate the user closes by hand. All
+autostart hosts open as tabs of one `wt -w 0` call, once per process, after the Terminal
+fragment write succeeds (skipped and logged if it failed). It does not wait for rclone or
+a mount and does not react to config reloads. A `mode = "none"` host gets its tab:
+autostart is a terminal-session axis, independent of mounting (ADR-008).
+
 
 ---
 
