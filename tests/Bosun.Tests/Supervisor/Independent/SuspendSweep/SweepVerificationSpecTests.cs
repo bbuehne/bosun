@@ -138,28 +138,22 @@ public sealed class SweepVerificationSpecTests
     }
 
     /// <summary>
-    /// <b>Protects:</b> rule 5, "A failed or hung request on one host does not delay or stop the others", read
-    /// together with the per-host escalation "at arrival plus budget" (bs-7d7) -- the brief's "rcd answering
-    /// some calls and hanging others". alpha's <c>mount/unmount</c> hangs for its whole 30 s call timeout;
-    /// bravo's returns at once but does not take effect, so bravo needs its forced unmount inside the budget.
-    /// <b>Catches:</b> a verification/escalation phase that waits for EVERY request to finish (a WhenAll over
-    /// the requests), so one hung call holds bravo's forced unmount until arrival + 30 s -- long after
-    /// Windows has suspended the machine (it gives the handler about 2 s; the budget is 3 s).
+    /// <b>Protects:</b> rule 5 as amended 2026-11-02 after this test first failed: a hung request on one host
+    /// does NOT hold back any other host's FIRST request (all leave at arrival, I8), but the sweep's
+    /// verification and forced unmounts wait for the slowest request. alpha's <c>mount/unmount</c> hangs for its
+    /// whole 30 s timeout; bravo's returns at once but does not take effect.
+    /// <b>Catches:</b> bravo's first request held behind alpha's (a serial sweep); bravo never escalated once
+    /// alpha's call returns, or escalated twice.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// <b>Fails at c0d4a7c, deliberately left failing (reported to the orchestrator under bs-5o4).</b> The
-    /// sweep holds the channel on a WhenAll over every request, so bravo's verification and forced unmount
-    /// come at arrival + 30 s. The amendment accepts that "the request phase takes as long as its slowest
-    /// call", but rule 5 also says "A failed or hung request on one host does not delay or stop the others"
-    /// and that escalation follows at arrival + budget. The two cannot both hold; this needs a decision.
-    /// </para>
+    /// Originally written to require bravo's forced unmount by arrival + budget; that failed at c0d4a7c and the
+    /// spec was amended to accept the delay (ARCHITECTURE §4 rule 5; note after the bs-5o4 amendment in
+    /// DECISIONS.md): a second identical request at 3 s or 30 s both land after Windows has slept.
     /// The clock is moved in 10 ms steps. The channel is pumped again only when the previous pump has
-    /// finished, so there is never a second consumer: if the supervisor holds its channel while alpha's call
-    /// hangs, nothing else can run, which is exactly the delay this test is about.
+    /// finished, so there is never a second consumer.
     /// </remarks>
     [Fact]
-    public async Task One_hung_unmount_does_not_hold_another_hosts_forced_unmount_past_the_budget()
+    public async Task One_hung_unmount_never_holds_another_hosts_first_request_and_its_forced_unmount_follows_the_slowest_call()
     {
         var h = await MountedAsync();
         h.Rclone.ConfirmUnmountAtCall("N:", 2); // bravo: the first request does nothing; the forced one works
@@ -184,11 +178,14 @@ public sealed class SweepVerificationSpecTests
         await h.FinishAsync(pump, "the sweep never finished after alpha's call timed out", suspend);
         await h.AdvanceAsync(TimeSpan.FromSeconds(1), Step);
 
+        var bravoFirst = h.HRclone.Calls.First(c => c.Operation == "unmount" && c.Target == "N:");
+        Assert.Equal(arrival, bravoFirst.At);
+
         var escalations = h.EscalationTimes("bravo");
-        Assert.NotEmpty(escalations);
+        Assert.Single(escalations);
         Assert.True(
-            escalations[0] <= arrival.AddSeconds(Budget) + Step,
-            $"bravo's forced unmount came {(escalations[0] - arrival).TotalSeconds:0.##} s after the suspend arrived; " +
-            $"the budget is {Budget} s. alpha's hung call held it.");
+            escalations[0] >= arrival.AddSeconds(Budget) && escalations[0] <= until + TimeSpan.FromSeconds(1),
+            $"bravo's forced unmount came {(escalations[0] - arrival).TotalSeconds:0.##} s after arrival; expected after " +
+            $"the budget and no later than alpha's call returning (30 s).");
     }
 }

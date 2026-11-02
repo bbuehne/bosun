@@ -2198,3 +2198,10 @@ rule 5 has the behaviour):
 - Not changed, and left open: a host that is still unconfirmed after the sweep retries on its own timer,
   so when several reach the same deadline their re-issued requests run one host's step at a time. Each
   of them has already had its first request issued.
+
+*Note (2026-11-02, independent review of `bs-5o4`).* The sweep awaits every request before
+verifying, on the channel, so one hung `mount/unmount` (up to its 30 s timeout) delays the other hosts'
+verification and forced unmount past arrival plus the budget. Accepted rather than adding per-host
+continuations: every host's first request still leaves at arrival, which is what I8 needs; a second
+identical request at 3 s or 30 s both land after Windows has slept (~2 s); resume reconciles
+(ADR-017). `docs/ARCHITECTURE.md` §4 rule 5 states this.

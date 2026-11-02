@@ -446,8 +446,16 @@ right before building any UI.
    with one more `mount/listmounts`; one not yet due, or still unconfirmed,
    retries on its own per-host timer as after any single drain step. Each host
    keeps its own `Draining` state, escalation flag and deadline; there is no new
-   state or transition. A failed or hung request on one host does not delay or
-   stop the others. The reason: the drain used to be one host's whole step
+   state or transition. A failed request on one host does not stop the others: every first request
+   is already on the wire. A *hung* request does delay the rest of the sweep,
+   though: verification, completion and any forced unmount for every host wait
+   until the slowest request returns (at most its 30 s call timeout), so a forced
+   unmount can come later than arrival plus the budget. This is accepted
+   (2026-11-02, found by independent testing of `bs-5o4`): the first request,
+   which is what I8 needs, leaves at arrival for every host; Windows allows about
+   2 s, so a second identical request at 3 s or at 30 s lands after the machine
+   has slept either way, and resume reconciles (ADR-017). Hosts already
+   `Draining` are re-driven after the sweep, so they wait the same way. The reason: the drain used to be one host's whole step
    (`mount/unmount`, `mount/listmounts`, forced `mount/unmount`,
    `mount/listmounts` — up to about 80 s against a stuck `rclone rcd`) before the
    next host's unmount was even requested, so with a stuck rcd the later hosts
