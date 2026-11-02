@@ -817,6 +817,7 @@ public sealed class StartupOrchestratorTests
                 sp.GetRequiredService<IHostConfigStore>(),
                 sp.GetRequiredService<IRcloneClient>(),
                 sp.GetRequiredService<IProbe>(),
+                new FakeDriveTypeReader(),
                 SupervisorTime,
                 sp.GetRequiredService<ILogger<MountSupervisor>>()));
             services.AddSingleton<IMountSupervisor>(sp => sp.GetRequiredService<MountSupervisor>());

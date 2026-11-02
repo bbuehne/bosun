@@ -29,7 +29,7 @@ internal sealed class IndependentHarness
         Rclone = new RcloneDouble(Log);
         Store = new ReloadableConfigStoreDouble(config);
         Supervisor = new MountSupervisor(
-            Store, Rclone, Probe, Time, NullLogger<MountSupervisor>.Instance);
+            Store, Rclone, Probe, new Bosun.Tests.Supervisor.Fakes.FakeDriveTypeReader(), Time, NullLogger<MountSupervisor>.Instance);
     }
 
     public FakeTimeProvider Time { get; }

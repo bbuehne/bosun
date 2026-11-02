@@ -44,6 +44,7 @@ internal sealed class RepairHarness
             new ReloadableConfigStoreDouble(config),
             Rclone,
             new RecordingProbe(Probe, Log),
+            new Bosun.Tests.Supervisor.Fakes.FakeDriveTypeReader(),
             Time,
             NullLogger<MountSupervisor>.Instance);
         Log.TransitionCount = () => Supervisor.GetTransitionHistory().Count;

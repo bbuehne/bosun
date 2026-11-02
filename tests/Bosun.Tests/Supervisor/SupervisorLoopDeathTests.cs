@@ -184,7 +184,7 @@ public sealed class SupervisorLoopDeathTests
         });
         supervisor = new MountSupervisor(
             new FakeHostConfigStore(HostFixtures.Build(HostFixtures.Global(), HostFixtures.OnDemand("archive", drive: "Q:"))),
-            slow, new FakeProbe(), time, new CapturingLogger<MountSupervisor>());
+            slow, new FakeProbe(), new FakeDriveTypeReader(), time, new CapturingLogger<MountSupervisor>());
 
         await Run(supervisor, supervisor.StartAsync());
         await Run(supervisor, supervisor.RequestMountAsync("archive"));

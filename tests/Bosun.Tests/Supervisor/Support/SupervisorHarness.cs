@@ -22,6 +22,9 @@ internal sealed class SupervisorHarness
 
     public FakeRcloneMountClient Rclone { get; } = new();
 
+    /// <summary>Reports <c>Network</c> for every drive unless a test says otherwise (bs-dtk).</summary>
+    public FakeDriveTypeReader DriveTypes { get; } = new();
+
     public MountSupervisor Supervisor { get; }
 
     /// <summary>Records every log call the supervisor makes (bs-x57: tests assert on severity).</summary>
@@ -31,7 +34,7 @@ internal sealed class SupervisorHarness
     {
         Time = new FakeTimeProvider(start);
         var configStore = new FakeHostConfigStore(config);
-        Supervisor = new MountSupervisor(configStore, Rclone, Probe, Time, Log);
+        Supervisor = new MountSupervisor(configStore, Rclone, Probe, DriveTypes, Time, Log);
     }
 
     /// <summary>Enqueues <paramref name="operation"/>, drains the channel until the resulting work

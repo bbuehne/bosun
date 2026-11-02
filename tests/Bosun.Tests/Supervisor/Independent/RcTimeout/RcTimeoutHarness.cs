@@ -76,7 +76,7 @@ internal sealed class RcTimeoutHarness
         Rclone = new FaultInjectingRcloneDouble(Time);
         Probe = new FaultableProbe(new ProbeDouble(new SupervisorCallLog()));
         Logger = new LevelRecordingLogger<MountSupervisor>();
-        Supervisor = new MountSupervisor(new FakeHostConfigStore(config), Rclone, Probe, Time, Logger);
+        Supervisor = new MountSupervisor(new FakeHostConfigStore(config), Rclone, Probe, new Bosun.Tests.Supervisor.Fakes.FakeDriveTypeReader(), Time, Logger);
         Rclone.TransitionCount = () => Supervisor.GetTransitionHistory().Count;
         drives = config.Hosts.ToDictionary(h => h.Key, h => h.Value.Mount.Drive, StringComparer.Ordinal);
     }
