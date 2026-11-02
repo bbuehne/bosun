@@ -709,7 +709,7 @@ state directly, it posts commands to the same channel.
 | Failure | Required behaviour |
 |---|---|
 | Host unreachable while mounted | Unmount within `interval × failures_before_unmount`. Explorer must not hang. |
-| Host stays TCP-reachable but the mount's SSH channel dies (sleep/resume, a network blip too brief to trip the shallow threshold) | Detected by the recurring deep probe, not the shallow one — unmount within `2 × mounted_deep_probe_interval_seconds` (the fixed deep-probe failure threshold). See ADR-016. |
+| Host stays TCP-reachable but the mount's SSH channel dies (sleep/resume, a network blip too brief to trip the shallow threshold) | Detected by the recurring deep probe, not the shallow one — the drain begins within `2 × mounted_deep_probe_interval_seconds + 2 × probe_timeout_seconds` (two consecutive failures, the fixed deep-probe failure threshold, each failing probe taking up to the timeout); 610 s with the defaults 300 and 5. See ADR-016 and its 2026-11-02 amendment. |
 | `rclone rcd` dies | Detect via health check, restart it, reconcile mounts from scratch. |
 | `rclone rcd` orphaned by a dead Bosun, still holding the rc port | Prevented by the Job Object; if one survives anyway (the few ms before assignment), the next launch kills it when its command line is exactly Bosun's own and it runs as the current user. Otherwise the port holder is reported by PID and image path. The fault text names the real cause (HTTP 401, exit code, port holder), never a generic "did not respond". See ADR-020 §1-2. |
 | WinFsp not installed | Detect at startup, show an actionable message, disable all mount features, leave terminal features working. |
