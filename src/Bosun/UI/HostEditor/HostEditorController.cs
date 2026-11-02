@@ -198,6 +198,9 @@ public sealed class HostEditorController
 
         var claimedByOtherHost = config.Hosts.Values
             .Where(h => editingHostKey is null || !string.Equals(h.Key, editingHostKey, StringComparison.Ordinal))
+            // A mode = "none" host claims no letter (bs-5bk item 2, mirrors ConfigValidator): its
+            // stale `drive` must not show as "already used" when the validator would accept it.
+            .Where(h => h.Mount.Mode != MountMode.None)
             .Where(h => !string.IsNullOrWhiteSpace(h.Mount.Drive))
             .ToDictionary(
                 h => h.Mount.Drive!.TrimEnd(':').ToUpperInvariant(),

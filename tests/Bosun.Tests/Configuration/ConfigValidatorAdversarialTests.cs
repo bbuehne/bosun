@@ -272,6 +272,72 @@ public sealed class ConfigValidatorAdversarialTests
         Assert.Equal("invalid-drive-letter", error.Rule);
     }
 
+    /// <summary>
+    /// bs-5bk item 2 (maintainer decision 2026-11-01): a <c>mode = "none"</c> host mounts nothing,
+    /// so a leftover <c>drive = "N:"</c> claims nothing. Catches the old behaviour, where a jump
+    /// host with a commented-out mode and a stale letter blocked the NAS from using N:.
+    /// </summary>
+    [Fact]
+    public void Validate_NoneModeHostAndPersistentHostSharingALetter_IsValid()
+    {
+        var config = ConfigOf(
+            ValidHost("jump") with { Mount = new MountConfig { Mode = MountMode.None, Drive = "N:" } },
+            ValidHost("nas") with { Mount = ValidMount() with { Drive = "N:" } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.Empty(result.Errors);
+    }
+
+    /// <summary>
+    /// The exclusion is for <c>none</c> only: two hosts that really mount N: still collide, even
+    /// when a none-mode host holds N: as well. Catches an exclusion widened to "on-demand" or
+    /// applied to every host.
+    /// </summary>
+    [Theory]
+    [InlineData(MountMode.Persistent, MountMode.Persistent)]
+    [InlineData(MountMode.Persistent, MountMode.OnDemand)]
+    [InlineData(MountMode.OnDemand, MountMode.OnDemand)]
+    public void Validate_TwoMountingHostsSharingALetter_StillCollide_EvenWithANoneModeHostOnIt(
+        MountMode first, MountMode second)
+    {
+        var config = ConfigOf(
+            ValidHost("host-a") with { Mount = ValidMount() with { Mode = first, Drive = "N:" } },
+            ValidHost("host-b") with { Mount = ValidMount() with { Mode = second, Drive = "N:" } },
+            ValidHost("jump") with { Mount = new MountConfig { Mode = MountMode.None, Drive = "N:" } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("drive-collision", error.Rule);
+        Assert.Contains("host-a", error.Message, StringComparison.Ordinal);
+        Assert.Contains("host-b", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("jump", error.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Excluding a none-mode host from collision detection must not exempt it from the FORMAT
+    /// rule (docs/CONFIG-SCHEMA.md states it unconditionally). Catches an exclusion implemented
+    /// by skipping the whole host, or by treating a none-mode letter as "not present".
+    /// </summary>
+    [Theory]
+    [InlineData("C:")]
+    [InlineData("n:")]
+    [InlineData("NN:")]
+    [InlineData("N")]
+    public void Validate_NoneModeHostWithAMalformedLetter_IsStillRejected_EvenWhenNothingCollides(string drive)
+    {
+        var config = ConfigOf(
+            ValidHost("jump") with { Mount = new MountConfig { Mode = MountMode.None, Drive = drive } },
+            ValidHost("nas") with { Mount = ValidMount() with { Drive = "R:" } });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-drive-letter", error.Rule);
+        Assert.Contains("jump", error.Message, StringComparison.Ordinal);
+    }
+
     // -- drive letters ------------------------------------------------------------------------
 
     /// <summary>

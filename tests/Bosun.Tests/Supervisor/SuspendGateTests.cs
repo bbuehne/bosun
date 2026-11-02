@@ -139,8 +139,10 @@ public sealed class SuspendGateTests
         await h.SuspendAsync();
         h.Probe.SetShallow(Hostname("prod"), ShallowProbeOutcome.Success);
 
-        // Route 1: an explicit mount request against a Ready host.
-        await h.RunAsync(() => h.Supervisor.RequestMountAsync("archive"));
+        // Route 1: an explicit mount request against a Ready host. Refused loudly since bs-oly
+        // (see SuspendedMountRequestTests); the point here is that it mounts nothing.
+        await Assert.ThrowsAsync<MountRequestRefusedException>(
+            () => h.RunAsync(() => h.Supervisor.RequestMountAsync("archive")));
         // Route 2: a network change re-probes the Unreachable persistent host, which goes Ready.
         await h.RunAsync(() => h.Supervisor.NetworkChangedAsync());
         // Route 3: "retry now".

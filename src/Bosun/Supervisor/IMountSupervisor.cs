@@ -72,9 +72,20 @@ public interface IMountSupervisor
     /// Against an <see cref="MountState.Unreachable"/> host, this is never a silent no-op
     /// (docs/ARCHITECTURE.md §4 rule 8 / ADR-014): it resets the backoff ladder and probes
     /// immediately, mounting only if that probe passes. Throws <see cref="MountRequestRefusedException"/>
-    /// if the probe it triggers fails, or if the system is currently suspended (refused outright,
-    /// without probing -- Invariant I8 in reverse). Throws <see cref="MountingUnavailableException"/>
-    /// if mounting is currently unavailable process-wide (bs-yvw.1), checked before any of the above.
+    /// if the probe it triggers fails.
+    /// <para>
+    /// While the system is suspended EVERY request throws <see cref="MountRequestRefusedException"/>
+    /// with the reason "the system is suspended", whatever the host's state (Ready, Unreachable,
+    /// Disabled, parked): refused outright, without probing and without touching any host state
+    /// (Invariant I8 in reverse; bs-oly). In particular a refused request does NOT clear the
+    /// host's <see cref="HostMountSnapshot.UserParked"/> flag; only a request that is actually
+    /// attempted does. This is checked first of all. Automatic mount paths are separately held back
+    /// by the gate in <c>TryBeginMountAsync</c> (bs-bv0).
+    /// </para>
+    /// <para>
+    /// Throws <see cref="MountingUnavailableException"/> if mounting is currently unavailable
+    /// process-wide (bs-yvw.1), checked before the host-specific rules above.
+    /// </para>
     /// </remarks>
     Task RequestMountAsync(string hostKey, CancellationToken cancellationToken = default);
 
