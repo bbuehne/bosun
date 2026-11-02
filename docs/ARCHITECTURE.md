@@ -403,7 +403,9 @@ right before building any UI.
    best-effort by design, bounded by a budget that can elapse. It reconciles
    against `mount/listmounts` first; any host still `Mounted` is force-probed
    shallow *and* deep, and drains on a single deep failure once `rclone rcd` has
-   answered `core/version`. Everything else previously enabled goes to `Probing`.
+   answered `core/version`. Everything else previously enabled is re-probed
+   immediately: a `Disabled` host through `Probing`, a `Ready` or `Unreachable`
+   host in place (rule 10).
    A network address change takes the identical path. See ADR-017.
 6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount.
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
@@ -434,9 +436,30 @@ right before building any UI.
    remounts after a fresh probe, an on-demand host rests in `Ready`, and a host the
    user parked earlier stays parked.
 
+10. **`Probing` is one-shot** (`bs-but`). A host enters `Probing` only from
+    `Disabled`, for the initial check that follows an "enable": at startup, on
+    resume for a host the suspend left `Disabled`, after a drain's automatic or
+    paced re-enable (including the repair and mount-retry paths above), and when a
+    host is added to the config or changed from `mode = "none"`. The probe's
+    outcome leaves `Probing` for `Ready` or `Unreachable`, and it is not entered
+    again from either.
+
+    **Recurring probes run in place and log no transition.** The idle probe on a
+    `Ready` or `Unreachable` host (the backoff ladder, an immediate re-probe on
+    resume or network change, "retry now") and the shallow and deep probes on a
+    `Mounted` host all happen without leaving the state they run in. Only a probe
+    whose *result* changes the state produces a transition — `Ready → Unreachable`
+    and `Unreachable → Ready` on the idle probe, `Mounted → Draining` on the
+    failure threshold — so a state change in the transition log means something
+    happened. If every recurring probe re-entered `Probing`, the log (the primary
+    triage artifact in `docs/OPERATIONS.md`) would record a transition per probe
+    per host and bury the ones that matter. Anywhere else in this document that
+    says a host is "probed" without naming a state change means this in-place probe.
+
 ### Backoff
 
-`Unreachable → Probing` uses the configured backoff ladder, default
+An `Unreachable` host's next probe, which runs in place (rule 10), is paced by the
+configured backoff ladder, default
 `[5, 15, 30, 60, 300]` seconds, holding at the last value. Backoff is **reset to
 zero** by a network address change, a power resume, or an explicit user "retry
 now". This is what makes the dock/undock experience feel immediate rather than
@@ -471,7 +494,7 @@ a host that is *known-stale* is a worse answer than one that is unknown.
 
 #### A failed mount attempt is paced too, on its own ladder
 
-Everything above paces `Unreachable → Probing` — a host that cannot be *reached*.
+Everything above paces the re-probe of an `Unreachable` host — one that cannot be *reached*.
 A host can be perfectly reachable and still be impossible to **mount**: an expired
 key, a disabled SFTP subsystem, a drive letter already claimed by something else.
 That is a different failure and it needs its own rule (`bs-k4k`).
