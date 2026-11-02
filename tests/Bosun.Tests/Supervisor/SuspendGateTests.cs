@@ -152,7 +152,7 @@ public sealed class SuspendGateTests
 
         await h.ResumeAsync();
 
-        // The persistent host mounts; the on-demand one is not auto-mounted (that is bs-hrg).
+        // The persistent host mounts; the on-demand one was never mounted by the user, so there is nothing to bring back (ADR-022).
         Assert.Equal(MountState.Mounted, h.State("prod"));
         Assert.Equal(MountState.Ready, h.State("archive"));
         Assert.Equal(0, h.Rclone.MountCount("Q:"));
@@ -199,8 +199,8 @@ public sealed class SuspendGateTests
 
     /// <summary>
     /// <b>Protects:</b> rule 6 across resume. An on-demand host rests in Ready and is not
-    /// auto-mounted at resume. (Remounting on-demand hosts that suspend dropped is separate future
-    /// work, bs-hrg; this pins that this change does not build it.)
+    /// auto-mounted at resume when the user had not mounted it before the sleep (one the user had
+    /// mounted is remounted, ADR-022; see RemountAfterResumeTests).
     /// <b>Catches:</b> resume handling that mounts any Ready host rather than only persistent ones.
     /// </summary>
     [Fact]

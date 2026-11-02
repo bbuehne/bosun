@@ -216,6 +216,22 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         /// delivery report and <see cref="HostMountSnapshot.UserParked"/>.</summary>
         public bool UserParked;
 
+        /// <summary>ADR-022 (bs-hrg): set by <see cref="SuspendAsync"/> on an ON-DEMAND host that was
+        /// <see cref="MountState.Mounted"/> or <see cref="MountState.Mounting"/> when suspend arrived,
+        /// i.e. a drive the user mounted that the suspend drain is about to take down. Consumed by
+        /// the FIRST <see cref="EnableHostAsync"/> after resume: if that probe reaches
+        /// <see cref="MountState.Ready"/> the host is mounted again through <c>Ready -&gt; Mounting</c>
+        /// exactly as a click would (<see cref="OnEnteredReadyAsync"/>); if it does not, the record is
+        /// simply gone and the host stays unmounted. Deliberately in memory only, and deliberately not
+        /// part of <see cref="HostMountSnapshot"/> (nothing in the UI needs it). Scope is suspend only:
+        /// no other drain cause sets it. Cleared by that consumption, a user unmount
+        /// (<see cref="RequestUnmountAsync"/>), the host being removed or changing mode
+        /// (<see cref="ApplyHostConfigChangeAsync"/>), and the app restarting (a new process starts
+        /// with every record false). A host removed from config needs no clearing of its own: its
+        /// runtime is evicted (<see cref="RemoveFromSupervision"/>), record and all, and a host later
+        /// added under the same key gets a fresh one.</summary>
+        public bool RemountAfterResume;
+
         public int ConsecutiveMountedFailures;
 
         /// <summary>Consecutive DEEP-probe failures while <see cref="MountState.Mounted"/> (bs-2eg
@@ -432,6 +448,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         EnqueueAndWait(async ct =>
         {
             var host = RequireHost(hostKey);
+
+            // ADR-022 decision 5: a user unmount clears the remount record, whatever state the host is
+            // in. The case that matters is a click while the suspend drain is already running (the
+            // host is Draining, so the request below is ignored): the user said "take it down", and
+            // the drain taking it down must not be undone by a remount at wake.
+            host.RemountAfterResume = false;
+
             if (host.State is not (MountState.Mounting or MountState.Mounted))
             {
                 logger.LogDebug(
@@ -482,6 +505,16 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         foreach (var host in hosts.Values.Where(h => h.State is MountState.Mounting or MountState.Mounted).ToList())
         {
+            // ADR-022 decision 1: remember that the user had this on-demand drive up, before the drain
+            // takes it down. Set here, not in BeginDrainAsync, so a drain for any other cause (probe
+            // failure, idle timeout, repair, config change) never sets it (decision 6). A host already
+            // Draining or Disabled when suspend arrives is not in this list: it was not up. A second
+            // suspend simply sets an already-set record again.
+            if (host.Config.Mount.Mode == MountMode.OnDemand)
+            {
+                host.RemountAfterResume = true;
+            }
+
             await BeginDrainAsync(host, "system suspend", DrainCause.Suspend, ct).ConfigureAwait(false);
         }
 
@@ -1094,6 +1127,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
+        // ADR-022 decisions 2 and 3: the remount record belongs to THIS probe, the first one after the
+        // suspend drain, and is spent whichever way it goes. Taken before the probe so nothing later
+        // (a failed probe, a refused mount, a failed mount) can leave it behind to fire on some
+        // later, unrelated arrival at Ready. Only an on-demand host honours it: a mode change clears
+        // it already, so the mode test is belt and braces for a persistent host, which mounts itself.
+        var remountAfterResume = host.RemountAfterResume && host.Config.Mount.Mode == MountMode.OnDemand;
+        host.RemountAfterResume = false;
+
         SetState(host, MountState.Probing, trigger);
 
         var result = await ProbeShallowSafelyAsync(
@@ -1103,13 +1144,21 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         {
             host.Backoff = BackoffState.Initial;
             SetState(host, MountState.Ready, $"initial probe succeeded ({trigger})");
-            await OnEnteredReadyAsync(host, ct).ConfigureAwait(false);
+            await OnEnteredReadyAsync(host, remountAfterResume, ct).ConfigureAwait(false);
         }
         else
         {
             host.Backoff = host.Backoff.RecordFailure();
             SetState(host, MountState.Unreachable, $"initial probe failed: {result.Outcome} ({trigger})");
             ArmIdleProbeTimer(host);
+
+            if (remountAfterResume)
+            {
+                logger.LogInformation(
+                    "Not remounting {HostKey} after resume: its first post-resume probe failed ({Outcome}); the " +
+                    "record is dropped and the host stays unmounted until the user mounts it (ADR-022)",
+                    host.Key, result.Outcome);
+            }
         }
     }
 
@@ -1126,7 +1175,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// a network change), exactly as rule 6 intends; it only skips the one arrival immediately
     /// following the user's own "take it down" instruction.
     /// </remarks>
-    private async Task OnEnteredReadyAsync(HostRuntime host, CancellationToken ct)
+    private async Task OnEnteredReadyAsync(HostRuntime host, bool remountAfterResume, CancellationToken ct)
     {
         if (host.Config.Mount.Mode == MountMode.Persistent && !host.UserParked)
         {
@@ -1134,6 +1183,20 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             if (host.State != MountState.Ready)
             {
                 // Moved on to Mounting/Mounted/Draining -- that path owns its own timers now.
+                return;
+            }
+        }
+        else if (remountAfterResume)
+        {
+            // ADR-022 decision 2: an on-demand drive the user had up before the suspend. The probe that
+            // just put the host in Ready is the fresh evidence I1 asks for, and TryBeginMountAsync
+            // still deep-probes before mount/mount, exactly as for a click. Its gates apply unchanged:
+            // if mounting is unavailable it refuses and the host rests in Ready (the record is already
+            // spent, so nothing retries it later).
+            await TryBeginMountAsync(host, "remount after resume: user-mounted before suspend (ADR-022)", ct)
+                .ConfigureAwait(false);
+            if (host.State != MountState.Ready)
+            {
                 return;
             }
         }
@@ -1164,7 +1227,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             if (wasUnreachable)
             {
                 SetState(host, MountState.Ready, $"probe succeeded ({trigger})");
-                await OnEnteredReadyAsync(host, ct).ConfigureAwait(false);
+                await OnEnteredReadyAsync(host, remountAfterResume: false, ct).ConfigureAwait(false);
                 return;
             }
         }
@@ -2281,6 +2344,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         var oldHostConfig = host.Config;
         var oldMode = oldHostConfig.Mount.Mode;
         var newMode = newHostConfig.Mount.Mode;
+
+        if (newMode != oldMode)
+        {
+            // ADR-022 decision 5: a mode change clears the remount record. The user's mount click was
+            // about an on-demand drive; whatever tier the host has now is a different arrangement.
+            host.RemountAfterResume = false;
+        }
 
         if (newMode == MountMode.None && oldMode != MountMode.None)
         {

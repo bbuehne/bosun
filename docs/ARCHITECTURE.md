@@ -430,8 +430,7 @@ right before building any UI.
    next becomes `Ready`. A parked host (rule 9) and an on-demand host (rule 6) are
    not mounted by resume; a `Disabled` or `Unreachable` host reaches `Ready`
    through `Probing` or the backoff ladder as before and the ordinary persistent
-   auto-mount applies. (Re-mounting an on-demand host that suspend dropped is covered by
-   ADR-022, `bs-hrg`.)
+   auto-mount applies. (Re-mounting an on-demand host that suspend dropped is rule 9a.)
 6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount. The one
    exception is ADR-022: an on-demand host the user mounted before a suspend is
    mounted again after resume if its first post-resume probe reaches `Ready`.
@@ -462,6 +461,38 @@ right before building any UI.
    drain cause; a persistent host then re-enters through `Probing -> Ready` and
    remounts after a fresh probe, an on-demand host rests in `Ready`, and a host the
    user parked earlier stays parked.
+
+9a. **An on-demand drive the user had mounted comes back after a sleep**
+    (ADR-022, `bs-hrg`). The reverse of rule 9: a suspend must not undo a user's
+    mount any more than a drain may undo a user's unmount.
+
+    - **Recorded at suspend.** The suspend handler notes, in memory, each
+      `on-demand` host that is `Mounted` or `Mounting`, then drains it under rule 5
+      as before. A host already `Draining` or `Disabled` when suspend arrives is not
+      noted (it was not up), and a drain for any other cause (probe failures, the
+      idle timeout, a repair, a config change, a failed mount, a deep probe after a
+      network change) never sets the record. A `persistent` host is not noted; it
+      comes back by its own tier rule (rule 6).
+    - **Spent by the first post-resume probe.** The record belongs to the host's
+      first probe after the suspend drain: the `Disabled → Probing` that resume
+      runs, or, if the unmount had not yet confirmed at resume, the ordinary
+      re-enable that follows the drain. If that probe reaches `Ready`, the host
+      enters `Mounting` exactly as a user click would (rule 1; the deep probe of
+      rule 2 comes first, and the gates of rule 5 and of the availability check
+      apply unchanged). If it does not, the host is `Unreachable`, stays unmounted
+      and is not polled (rule 8's click still works); nothing mounts it later, on
+      whatever network the machine has moved to. The record is cleared when the
+      probe starts, so a refused or failed remount is not retried either.
+    - **The idle timer starts fresh.** The remount is a new mount (rule 7), so
+      `idle_unmount_seconds` counts from it, not from the time already idle before
+      the sleep.
+    - **Cleared by** the remount, a user unmount (including a click while the
+      suspend drain is still running), the host's mode changing, the host being
+      removed from the config, or Bosun restarting. It is never persisted, and a
+      network change neither spends nor sets it.
+
+    No new transition: the path is `Disabled → Probing → Ready → Mounting`, which
+    rules 1, 2 and 10 already describe.
 
 10. **`Probing` is one-shot** (`bs-but`). A host enters `Probing` only from
     `Disabled`, for the initial check that follows an "enable": at startup, on
