@@ -431,8 +431,10 @@ right before building any UI.
    not mounted by resume; a `Disabled` or `Unreachable` host reaches `Ready`
    through `Probing` or the backoff ladder as before and the ordinary persistent
    auto-mount applies. (Re-mounting an on-demand host that suspend dropped is
-   separate work, `bs-hrg`.)
-6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount.
+   ADR-022, `bs-hrg`.)
+6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount. The one
+   exception is ADR-022: an on-demand host the user mounted before a suspend is
+   mounted again after resume if its first post-resume probe reaches `Ready`.
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
    `Mounted → Draining` after that period without filesystem activity.
 

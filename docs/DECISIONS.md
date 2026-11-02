@@ -1838,3 +1838,58 @@ Decision 3.
 
 *Delete a record once `wt.exe` starts.* `wt.exe` starting does not mean the tab resumed; a
 failed resume would lose the session without a word.
+
+---
+
+## ADR-022 — An on-demand drive the user mounted comes back after a sleep
+
+**Status:** Accepted (2026-11-01). The maintainer made each choice below in conversation on
+2026-11-01 (`bs-u4a` item 6, `bs-hrg`). Mirrors ADR-015.
+
+**Context.** Invariant I8 drains every mounted host before the machine sleeps. On resume a
+persistent host comes back on its own (§4 rule 6). An on-demand host does not: it rests in
+`Ready`, so a drive the user mounted from the tray twenty minutes before closing the lid is
+gone after wake, and the user has to click Mount again. ADR-015 settled the reverse case, a
+user's unmount that Bosun must not undo. Nothing recorded whether a suspend may undo a
+user's mount. Independent testing of E6 found the gap (`bs-u4a` item 6).
+
+**Decision.**
+
+1. When suspend arrives, the supervisor records, in memory, each on-demand host that is
+   `Mounted` or `Mounting`. It then drains them under I8 as before.
+2. After resume, such a host takes the ordinary path back (`Disabled → Probing`). If that
+   **first** post-resume probe reaches `Ready`, the supervisor mounts it exactly as a user
+   click would, through `Ready → Mounting` (Invariant I1 is unchanged).
+3. If that first probe does not reach `Ready`, the record is dropped. The host shows
+   `Unreachable` and stays unmounted; a later click mounts it as usual. Bosun never mounts it
+   later on its own, on whatever network the machine has moved to by then.
+4. The remount is a new mount: the idle-unmount timer starts fresh.
+5. The record is cleared by: the remount itself, a user unmount, the host being removed from
+   the config or its mode changed, or a restart of Bosun. It is never persisted.
+6. Scope is suspend only. An on-demand drive drained because its host failed (probe failure,
+   deep probe after a network change) does not come back on its own; rule 6 still governs it.
+
+**Reasoning.** The user's click expressed intent that the suspend did not revoke; the suspend
+drain exists for safety (I8), not because the user changed their mind. Requiring the first
+post-resume probe to pass keeps I1 intact, and dropping the intent when it fails keeps the
+remount tied to the moment of wake, which is when the user expects it. A mount that appears
+hours later on another network would be a surprise of the kind ADR-015 exists to prevent.
+
+**Consequences.**
+
+- `docs/ARCHITECTURE.md` §4 gains a rule stating this, next to rule 9.
+- One more piece of per-host, in-memory state in the supervisor, set only by suspend.
+- ADR-015's note that `Disabled` conflates several meanings applies here too: a host
+  suspend-drained with this record is a fourth reading of `Disabled`.
+
+**Rejected alternatives.**
+
+*Keep the intent until the host is next reachable.* On-demand hosts that are `Unreachable`
+are not polled (ADR-014), so this would need new polling after wake, and it produces the
+late surprise mount described above.
+
+*Carry the idle time used before the sleep.* More state for little gain; a drive that was
+nearly idle-expired would unmount soon after wake, which reads as a fault.
+
+*Leave it as it is.* Simple and safe, and declined by the maintainer: remounting by hand after
+every wake is the friction the on-demand tier was not meant to add.
