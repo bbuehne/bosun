@@ -35,6 +35,10 @@ public sealed class SuspendGateTests
     /// <b>Catches:</b> a gate with no resume handling: the host sits in Ready forever, un-mounted.
     /// Also catches a resume that mounts without probing (I1, ADR-017): the shallow probe count must
     /// rise across resume.
+    /// <para>Changed for ADR-023 (bs-4in, decision D5): the host used to reach Ready here through its
+    /// own idle-probe tick. Ticks now skip while suspended, so the tick leaves it Unreachable (asserted)
+    /// and the host reaches Ready through a command that probes (a user "retry now"). What is protected
+    /// is unchanged: a host that arrives at Ready while suspended is held back and mounted by resume.</para>
     /// </summary>
     [Fact]
     public async Task A_persistent_host_held_back_while_suspended_mounts_after_resume_once_a_probe_passes()
@@ -46,9 +50,15 @@ public sealed class SuspendGateTests
 
         await h.SuspendAsync();
         h.Probe.SetShallow(Hostname("prod"), ShallowProbeOutcome.Success);
+        var probesAtSuspend = h.Probe.ShallowCount(Hostname("prod"));
         await h.AdvanceAsync(TimeSpan.FromHours(1));
 
-        // The periodic probe succeeded while suspended: the host is Ready, and held back.
+        // D5: the idle-probe tick does not run while suspended.
+        Assert.Equal(MountState.Unreachable, h.State("prod"));
+        Assert.Equal(probesAtSuspend, h.Probe.ShallowCount(Hostname("prod")));
+
+        // A command that probes (the user's "retry now") brings it to Ready while suspended: held back.
+        await h.RunAsync(() => h.Supervisor.RequestRetryNowAsync("prod"));
         Assert.Equal(MountState.Ready, h.State("prod"));
         Assert.Equal(0, h.Rclone.TotalMountCalls);
         var probesBeforeResume = h.Probe.ShallowCount(Hostname("prod"));
@@ -67,6 +77,8 @@ public sealed class SuspendGateTests
     /// fresh probe fails, it goes Unreachable and is not mounted.
     /// <b>Catches:</b> a resume that mounts a held-back Ready host on the strength of the stale Ready
     /// it earned before the machine slept.
+    /// <para>Changed for ADR-023 (decision D5): the host reaches Ready through "retry now", not through
+    /// its own idle-probe tick, which now skips while suspended. Same protection.</para>
     /// </summary>
     [Fact]
     public async Task A_held_back_host_whose_resume_probe_fails_is_not_mounted()
@@ -76,7 +88,7 @@ public sealed class SuspendGateTests
         await h.StartAsync();
         await h.SuspendAsync();
         h.Probe.SetShallow(Hostname("prod"), ShallowProbeOutcome.Success);
-        await h.AdvanceAsync(TimeSpan.FromHours(1));
+        await h.RunAsync(() => h.Supervisor.RequestRetryNowAsync("prod"));
         Assert.Equal(MountState.Ready, h.State("prod"));
 
         h.Probe.SetShallow(Hostname("prod"), ShallowProbeOutcome.ConnectionRefused);
@@ -169,6 +181,8 @@ public sealed class SuspendGateTests
     /// Unreachable and came back Ready while suspended is not mounted at resume.
     /// <b>Catches:</b> the resume handling mounting every Ready persistent host without the parked
     /// check, undoing the user's explicit unmount on the next wake.
+    /// <para>Changed for ADR-023 (decision D5): the host comes back to Ready while suspended through
+    /// "retry now" rather than through its own idle-probe tick, which now skips while suspended.</para>
     /// </summary>
     [Fact]
     public async Task A_parked_host_is_not_auto_mounted_after_resume()
@@ -188,7 +202,7 @@ public sealed class SuspendGateTests
         Assert.Equal(MountState.Unreachable, h.State("prod"));
         await h.SuspendAsync();
         h.Probe.SetShallow(Hostname("prod"), ShallowProbeOutcome.Success);
-        await h.AdvanceAsync(TimeSpan.FromHours(1));
+        await h.RunAsync(() => h.Supervisor.RequestRetryNowAsync("prod"));
         Assert.Equal(MountState.Ready, h.State("prod"));
 
         await h.ResumeAsync();

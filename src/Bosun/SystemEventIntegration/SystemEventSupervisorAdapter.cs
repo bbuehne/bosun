@@ -31,7 +31,12 @@ namespace Bosun.SystemEventIntegration;
 /// continuation has been dequeued AND fully run. If a slow drain for some other host is already
 /// in flight -- or simply queued ahead of this call -- <c>SuspendAsync</c>'s returned
 /// <see cref="Task"/> will not complete until that finishes, which could be far longer than the
-/// suspend budget. <see cref="WaitForSuspendDrainAsync"/> races that task against
+/// suspend budget. Since ADR-023 (bs-4in) that is true only of work that is not a recurring check:
+/// <c>SuspendAsync</c> cancels the recurring tick in flight (a hung probe or <c>vfs/stats</c> sample)
+/// from this very thread before it queues itself, closes the I8 mount gate at the same moment, and
+/// counts its budget from the call, so a routine check can no longer make the suspend wait. A drain,
+/// a mount, a user command or the probe of an enable ahead of it still can, which is why the race
+/// below stays. <see cref="WaitForSuspendDrainAsync"/> races that task against
 /// <c>Task.Delay(budget, timeProvider)</c> with <see cref="Task.WhenAny(Task, Task)"/> instead of
 /// simply <c>await</c>-ing it, so this method returns the moment the budget elapses regardless of
 /// what the channel is doing. The in-flight <c>SuspendAsync</c> call is never cancelled or

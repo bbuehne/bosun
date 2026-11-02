@@ -174,10 +174,33 @@ internal sealed class TimedRcloneClient(RcloneDouble inner, TimeProvider time) :
     public Task<IReadOnlyDictionary<string, string>?> GetConfigAsync(string remoteName, CancellationToken cancellationToken) =>
         inner.GetConfigAsync(remoteName, cancellationToken);
 
-    public Task<RcloneMountResult> MountAsync(RcloneMountRequest request, CancellationToken cancellationToken)
+    private TaskCompletionSource? heldMount;
+    private bool holdNextMount;
+
+    /// <summary>The next <c>mount/mount</c> does not complete until <see cref="ReleaseMount"/>. Lets a
+    /// test have a suspend arrive while <c>mount/mount</c> is already on the wire.</summary>
+    public void HoldNextMount() => holdNextMount = true;
+
+    public bool IsHoldingMount => heldMount is { Task.IsCompleted: false };
+
+    /// <summary>The token the held <c>mount/mount</c> was called with.</summary>
+    public CancellationToken MountToken { get; private set; }
+
+    public void ReleaseMount() =>
+        (heldMount ?? throw new InvalidOperationException("No mount/mount is being held.")).SetResult();
+
+    public async Task<RcloneMountResult> MountAsync(RcloneMountRequest request, CancellationToken cancellationToken)
     {
         calls.Add(new TimedRcloneCall(time.GetUtcNow(), "mount", request.MountPoint));
-        return inner.MountAsync(request, cancellationToken);
+        if (holdNextMount)
+        {
+            holdNextMount = false;
+            MountToken = cancellationToken;
+            heldMount = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await heldMount.Task;
+        }
+
+        return await inner.MountAsync(request, cancellationToken);
     }
 
     public Task UnmountAsync(string mountPoint, CancellationToken cancellationToken)

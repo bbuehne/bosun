@@ -985,7 +985,11 @@ means something changed. Recipe for explaining any result:
 | `Mounted probe failed for <key> (<outcome>): n/N consecutive failures` | A shallow (TCP) probe of a mounted host failed. |
 | `Deep probe failed for mounted host <key> (...): n/2 consecutive deep-probe failures ...` | The SFTP-level probe of a mounted host failed (ADR-016). |
 | `Forced deep probe failed for mounted host <key> immediately after <resume or network change> ...` | The same probe forced by a transition; one failure is enough (ADR-017). |
-| `Not mounting <key> (...): the system is suspended (Invariant I8) ...` | A mount was held back because the machine is suspending. |
+| `Not mounting <key> (...): the system is suspended or a suspend is pending (Invariant I8) ...` | A mount was held back because the machine is suspending, or a suspend has been called and is waiting its turn. |
+| `The <tick> tick for <key> was preempted by a pending suspend (Invariant I8, ADR-023) ...` | A routine check (idle probe, mounted shallow or deep probe, VFS sample, idle-unmount, reconciliation) was cut short by a suspend. Its result was thrown away; it did not count as a failed probe. |
+| `Abandoning the mount of <key> (...): its deep probe passed but a suspend is pending ...` | A mount that was about to be sent was dropped because the machine is about to sleep. Not a mount failure. |
+| `Not enabling <key> (...): a suspend is pending ...` | A host's re-enable was held back; it stays `Disabled` and resume enables it. |
+| `Idle probe tick for <key> skipped: the system is suspended ...` | The recurring idle probe does nothing while suspended; resume probes the host. |
 
 **Triggers on a transition** (`<x>` is filled in at run time; wording may change, so the
 code's typed `drainCause` in `hosts.json` is the reliable field for scripts):
@@ -1006,6 +1010,7 @@ code's typed `drainCause` in `hosts.json` is the reliable field for scripts):
 | | `resume: persistent host held back while suspended`, `mounting became available` | A mount that was held back is now allowed. |
 | `Mounting -> Mounted` | `mount/mount succeeded` | The mount worked and read back as a network drive. |
 | `Mounting -> Draining` | `deep probe failed entering Mounting: <detail>`, `mount/mount failed: <x>`, `... is presented as a <type> drive ...`, `... does not exist (drive type NoRootDirectory) ...`, `could not verify that <drive> is a network drive ...` | The mount was refused or torn down (Invariants I1 and I7). |
+| | `system suspend pending: mount abandoned before mount/mount` | A suspend arrived during a mount's deep probe; `mount/mount` was never sent (ADR-023). |
 | `Mounted -> Draining` | `system suspend` | I8: unmount before sleep. |
 | | `user unmount` | You asked. The host is parked and will not remount by itself. |
 | | `<n> consecutive mounted-probe failures (threshold <N>)` | The host stopped answering (T3). |

@@ -2049,3 +2049,122 @@ record that is not waiting (the first probe resolved it) never meets the limit.
 **Note (2026-11-02, `bs-brb`):** the Context's "closing the lid" is the laptop-era phrasing
 ADR-001's amendment retracted. On the desktop this runs on, the event is the machine going to
 sleep; the Decision is unchanged.
+
+---
+
+## ADR-023 — A suspend preempts routine checks
+
+**Status:** Accepted (2026-11-02). The maintainer decided it in conversation on 2026-11-02
+(`bs-4in`; `bs-7d7` and `bs-4ca` share its mechanism and are decided with it). Extends Invariant
+I8 and ADR-017. It adds no state, no transition and no rc call.
+
+**Context.** Windows gives the suspend handler about two seconds; `global.suspend_unmount_timeout_seconds`
+defaults to 3 (`bs-ajh`). The supervisor's channel runs one action at a time, and `SuspendAsync` was an
+ordinary command on it, so it waited for whatever was running. Independent review of `bs-obf` found the
+worst case, and the troubleshooter's analysis of 2026-11-02 (at `9a93b77`) measured it:
+
+- One hung recurring check is enough. A mounted on-demand host's shallow tick is a probe plus a
+  `vfs/stats` sample, up to 5 s plus 5 s. With the host's other ticks queued behind it, about 30 s;
+  each further on-demand host with an idle clock adds 20 s.
+- The I8 gate was the `suspended` flag, which the suspend action sets only when it is dequeued. Work
+  queued **ahead** of the suspend could still send `mount/mount` in the meantime: a user's click, the
+  auto-mount of a persistent host whose idle probe was queued, a resume's sweep. A drive created in the
+  seconds before sleep survives the sleep, which is what I8 exists to prevent.
+- Rule 5 says the budget counts "from the moment suspend arrives". The code counted from when the suspend
+  was dequeued (`bs-7d7`), so a suspend that had waited its whole budget in the channel still allowed a
+  further whole budget.
+- `HostProbe` reports a cancelled probe as the outcome `Cancelled`, not as an exception, and the mounted
+  handlers count every outcome other than `Success` as a failure. Any fix that cancels a probe by linking
+  a token therefore turns every suspend into an `Automatic` drain (with a toast) for a host one failure
+  short of its threshold. The same flaw already existed at shutdown (`bs-4ca`).
+
+**Decision.**
+
+1. **The gate closes on the caller's thread.** `SuspendAsync` increments a `pendingSuspends` counter
+   before it queues anything; the suspend action decrements it as its first statement. Every place that
+   used `suspended` as an I8 gate reads `suspended || SuspendPending` (`MountingSuspended`) instead:
+   `TryBeginMountAsync`, `RequestMountAsync`, `RepairAllAsync`, the mount-retry callback, the re-enable
+   after a drain, and the remount-record resolution and sweep. `EnableHostAsync` returns before
+   `SetState(Probing)` while a suspend is pending; the host stays `Disabled` and resume enables it. It is
+   a counter, not a flag, because suspend, resume, suspend can be pending together.
+2. **A suspend preempts the recurring tick that is running.** Five timer callbacks run under
+   `RunTickAsync`, which publishes a per-tick `CancellationTokenSource`: the idle probe, the mounted
+   shallow probe (including its VFS sample), the mounted deep probe, the idle-unmount fire and the
+   reconciliation tick. The prologue of `SuspendAsync` calls `CancelAsync()` on the running one. It is
+   `CancelAsync`, never `Cancel`: `Cancel` runs the registered callbacks (the linked sources that release
+   a hung probe or rc call) inline, on the calling thread, which in production is `SystemEvents`' single
+   notification thread. The prologue never throws and never blocks; a fault in it is logged. The order is
+   fixed: increment, then cancel, then queue. A tick that starts while a suspend is pending sees the
+   counter, cancels itself and skips its I/O, so ticks queued ahead of the suspend do no work either.
+3. **"Preempted" is decided by the token, never by the outcome or the exception type.** When a tick's
+   preemption token is cancelled, whatever its I/O returned is discarded, `Success` included. No counter
+   (`ConsecutiveMountedFailures`, `ConsecutiveDeepProbeFailures`, `Backoff`), state, VFS bookkeeping,
+   `rcdAnswering`, warning or repeating-fault entry changes. The tick re-arms its own timer and logs one
+   Information line. The probe wrappers keep two tokens apart: the supervisor's own token (shutdown), which
+   alone decides their catch filter, and the preemption token, which is only linked into the token the probe
+   is handed. Using one token for both would let a cancellation escape and strand a `Mounted` host with no
+   probe timer (ADR-011, I2).
+4. **Not preempted:** drains, `mount/mount` once sent, commands (resume, network change, user actions,
+   repair, config change, `OnRcloneRestartedAsync`), and the probe that `EnableHostAsync` is already running.
+   There is no `Probing -> Disabled` edge and none is added.
+5. **D1: a mount that has passed its deep probe is abandoned if a suspend is pending.** After the deep probe
+   passes and before `mount/mount` is sent, a pending suspend abandons the mount on the existing
+   `Mounting -> Draining` edge with `DrainCause.Suspend`. It is not a mount failure: no counter, no retry
+   backoff, no failure row. An on-demand host keeps or gets the ADR-022 remount record, because by the time
+   the suspend action runs this host is no longer `Mounting` and the action cannot set it. A deep-probe
+   *failure* still wins and is still a mount failure. The VFS baseline sample that follows a mount is
+   skipped while a suspend is pending.
+6. **D5: idle-probe ticks skip while `suspended`**, as the mount-retry callback does. The timer is still
+   re-armed. The forced probes of resume, network change and "retry now" are commands and still probe.
+7. **`bs-7d7`: the budget counts from arrival.** The arrival time is read from the injected `TimeProvider` on
+   the caller's thread and passed into the suspend action; suspend drains start their clock from it, and a
+   host already draining gets the deadline `arrival + budget`.
+8. **`bs-4ca`: a probe that returns while the supervisor's own token is cancelled is shutdown**, whatever it
+   returned. The probe wrappers throw `OperationCanceledException` in that case, so a cancelled probe is not
+   counted as a failure and a host one failure short of its threshold is not drained as `Automatic` while
+   Bosun exits. This is the same check as decision 3, applied to the other token.
+
+**What is not preempted, and why.** A drain is what a suspend wants; cancelling its `mount/unmount` would
+abandon the one thing the budget is for. `mount/mount` once sent has an unknown outcome if cancelled, and a
+half-made mount is the worse state to hand to a suspend. A command changes state the suspend is about to
+reason about; cancelling it leaves the change half-applied, and which commands are safe to cancel is a
+separate question (D3, below). The enable probe runs in `Probing`, which has no edge to `Disabled`.
+What remains is bounded by those actions and not by the number of hosts' routine checks. The adapter's race
+against the budget (`WaitForSuspendDrainAsync`) stays as the backstop for it.
+
+**Rejected alternatives.**
+
+*A priority lane for suspend.* Let the suspend jump the channel. It breaks suspend, resume, suspend: the
+second suspend would run before the resume it follows, and the resume would then run last, leaving the
+machine "resumed" as it goes to sleep. It also reorders every command queued ahead of the suspend (a
+user's unmount, for one), so each would run against state the suspend had already changed. The
+troubleshooter ruled it out on those two grounds (`bs-4in` notes). The counter gives the same early gate
+without reordering anything.
+
+*Make the suspend's drain not wait behind the channel.* The drain is channel work; running it beside the
+channel gives up the single-writer discipline that §5 depends on.
+
+**Not taken, and deferred.**
+
+*D2: a `Probing -> Disabled` edge, so an enable probe in flight could be abandoned.* Not taken. It would add a
+transition and change rule 10 (`Probing` is one-shot) for a probe that is bounded by the probe timeout. The
+early return in `EnableHostAsync` closes the part of the hole that matters, which is a probe *starting*.
+
+*D3: preempting commands.* Deferred to its own issue. It needs a decision per command.
+
+**Consequences.**
+
+- `docs/ARCHITECTURE.md` §3, §4 rules 5 and 10 and §5 are updated. The `SuspendAsync` prologue is the one
+  piece of supervisor code that runs off the channel; it increments a counter and cancels a token and
+  does nothing else.
+- Existing tests whose meaning changed: the ones that reached `Ready` through an idle tick *while suspended*
+  now use "retry now" (D5), and the ones that suspend during a held deep probe now see an abandoned mount
+  (D1). Each was reworded against its stated intent, not edited to pass; the mount-in-flight interleaving
+  they used to cover is kept as its own test with `mount/mount` held open.
+- A `mount/mount` request queued ahead of a suspend is now refused with "the system is suspended", the same
+  refusal as during the suspend (`bs-oly`). It used to mount and be drained a moment later.
+- Residual: a suspend that arrives during the VFS baseline sample that follows a mount waits for it (at most
+  one probe timeout), because the sample is the tail of a command and not a tick. Not starting the sample
+  while a suspend is already pending covers the likelier case.
+- The counter is not decremented if the supervisor loop is already dead. Nothing can mount without the loop,
+  so the closed gate costs nothing.
