@@ -9,7 +9,7 @@ namespace Bosun.Tests.Terminal;
 public sealed class AutostartTerminalTabsTests
 {
     [Fact]
-    public void OnlyHostsWithAutostart_GetATab_ByDisplayName_InKeyOrder()
+    public void OnlyHostsWithAutostart_GetATab_ByProfileGuid_InKeyOrder()
     {
         var launcher = new FakeTerminalTabLauncher();
         var config = Config(
@@ -22,7 +22,11 @@ public sealed class AutostartTerminalTabsTests
         Assert.Equal(2, opened);
         var call = Assert.Single(launcher.Calls);
         Assert.Equal(
-            ["-w", "0", "new-tab", "-p", "Alpha Box", ";", "new-tab", "-p", "Zeta Box"], call);
+            [
+                "-w", "0", "new-tab", "-p", Guid("alpha"),
+                ";", "new-tab", "-p", Guid("zeta"),
+            ],
+            call);
     }
 
     [Fact]
@@ -34,7 +38,7 @@ public sealed class AutostartTerminalTabsTests
 
         new AutostartTerminalTabs(launcher, NullLogger.Instance).Open(config);
 
-        Assert.Equal(["-w", "0", "new-tab", "-p", "Example Jump"], Assert.Single(launcher.Calls));
+        Assert.Equal(["-w", "0", "new-tab", "-p", Guid("jump")], Assert.Single(launcher.Calls));
     }
 
     [Fact]
@@ -60,14 +64,38 @@ public sealed class AutostartTerminalTabsTests
     }
 
     [Fact]
-    public void ADisplayNameWithASemicolon_IsEscapedInTheLaunchedArguments()
+    public void TheDisplayName_NeverReachesTheLaunchedArguments_SoRenamingAHostCannotBreakItsTab()
     {
+        // ADR-013 Decision 2: the key is the identity, display_name is only a label. A name that
+        // would need escaping, or that is blank, is irrelevant to the tab.
         var launcher = new FakeTerminalTabLauncher();
-        var config = Config(Host("k", "Prod; Web", autostart: true));
+        var config = Config(
+            Host("k1", "Prod; Web", autostart: true),
+            Host("k2", " ", autostart: true));
 
-        new AutostartTerminalTabs(launcher, NullLogger.Instance).Open(config);
+        var opened = new AutostartTerminalTabs(launcher, NullLogger.Instance).Open(config);
 
-        Assert.Equal(@"Prod\; Web", Assert.Single(launcher.Calls)[^1]);
+        Assert.Equal(2, opened);
+        Assert.Equal(
+            [
+                "-w", "0", "new-tab", "-p", Guid("k1"),
+                ";", "new-tab", "-p", Guid("k2"),
+            ],
+            Assert.Single(launcher.Calls));
+    }
+
+    [Fact]
+    public void TheLaunchedArgument_IsTheGuidTheFragmentGeneratorEmitsForTheHost()
+    {
+        // Same derivation as the fragment: if the generator's GUID changes, this must follow it.
+        var launcher = new FakeTerminalTabLauncher();
+        var host = Host("nas", "Some Display Name", autostart: true);
+
+        new AutostartTerminalTabs(launcher, NullLogger.Instance).Open(Config(host));
+
+        Assert.Equal(
+            FragmentProfileGenerator.CreateProfile(host).Guid.ToString("B"),
+            Assert.Single(launcher.Calls)[^1]);
     }
 
     [Fact]
@@ -82,17 +110,7 @@ public sealed class AutostartTerminalTabsTests
         Assert.Single(launcher.Calls);
     }
 
-    [Fact]
-    public void ABlankDisplayName_IsLoggedNotPropagated_AndLaunchesNothing()
-    {
-        var launcher = new FakeTerminalTabLauncher();
-        var config = Config(Host("a", " ", autostart: true));
-
-        var opened = new AutostartTerminalTabs(launcher, NullLogger.Instance).Open(config);
-
-        Assert.Equal(0, opened);
-        Assert.Empty(launcher.Calls);
-    }
+    private static string Guid(string hostKey) => TerminalProfileArgument.For(hostKey);
 
     private static BosunConfig Config(params HostConfig[] hosts) => new()
     {
