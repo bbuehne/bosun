@@ -36,7 +36,7 @@ identity_file = "~/.ssh/id_ed25519"
   network_mode         = true           # must be true — see Invariant I7
   idle_unmount_seconds = 0              # 0 = never; on-demand only
 
-  [hosts.prod-web.session]
+  [hosts.prod-web.session]            # the whole table is optional; so is every key in it
   autostart    = false                  # open a WT tab at login
   reconnect    = true                   # wrap in the reconnect loop
   tmux         = true
@@ -48,6 +48,38 @@ identity_file = "~/.ssh/id_ed25519"
   interval_seconds = 60                 # 0 = never poll (on-demand default)
   deep_probe       = true               # verify SFTP before mounting
 ```
+
+### Required and optional fields
+
+A host with only the "required" rows below is valid. A missing required field is a parse error
+that names the field (`hosts.<key>.probe.deep_probe is required`) and rejects the whole config.
+
+| Table | Field | Required? | Default when absent |
+|---|---|---|---|
+| `[hosts.<key>]` | `display_name`, `hostname`, `port`, `user`, `identity_file` | **Required** | none |
+| `[hosts.<key>.mount]` | table itself, and `mode` | **Required** | none |
+| `[hosts.<key>.mount]` | `drive`, `remote_path` | Required when `mode != "none"` (validation) | none |
+| `[hosts.<key>.mount]` | `vfs_cache_mode` | Optional | `writes` |
+| `[hosts.<key>.mount]` | `network_mode`, `idle_unmount_seconds` | Optional | none bound; absent is not an error (only an explicit `network_mode = false` is rejected, I7) |
+| `[hosts.<key>.probe]` | table itself, `interval_seconds`, `deep_probe` | **Required** | none: probe cadence affects safety (ADR-011), so it is a conscious choice per host |
+| `[hosts.<key>.session]` | the whole table | Optional | all session defaults below |
+| `[hosts.<key>.session]` | `autostart` | Optional | `false` |
+| `[hosts.<key>.session]` | `reconnect` | Optional | `true` |
+| `[hosts.<key>.session]` | `tmux` | Optional | `false` |
+| `[hosts.<key>.session]` | `tmux_session` | Optional; required (validation) when `tmux = true` | none |
+| `[hosts.<key>.session]` | `tab_color` | Optional | absent: Windows Terminal's own default |
+| `[hosts.<key>.session]` | `color_scheme` | Optional | absent: Windows Terminal's own default |
+
+Absent colours are not written as empty strings: the generated Terminal profile omits the
+`tabColor` / `colorScheme` key. An empty or whitespace-only value in `hosts.toml` is treated
+the same as absent. The defaults are applied in the config layer (`ConfigParser`), so nothing
+downstream sees a null for the booleans.
+
+When the host editor saves, `HostConfigTomlWriter` writes only the `[session]` values that
+differ from these defaults, and leaves the `[session]` table out entirely when nothing
+differs. A hand-written minimal host therefore stays minimal after a save; re-reading what was
+written gives the same configuration. This also means the defaults are part of the schema: a
+future change to one would change the meaning of files saved by an earlier Bosun.
 
 ## Claude Code sessions
 
@@ -70,6 +102,8 @@ Not per host: a Claude Code session is not tied to a configured SSH host.
 | `probe.interval_seconds` | Polling cadence **while the host is idle** (`Ready` / `Unreachable`). `0` means never poll while idle — the sensible default for on-demand hosts (ADR-008). It does **not** disable probing while the host is `Mounted`; see `mounted_probe_interval_seconds` and ADR-011. |
 | `global.mounted_probe_interval_seconds` | Upper bound on the probe interval for a host in `Mounted`. A mounted host is always probed: at `interval_seconds` when that is greater than zero and smaller than this value, otherwise at this value. Bounds worst-case unmount latency to `mounted_probe_interval_seconds × failures_before_unmount` (default 3 minutes). |
 | `global.mounted_deep_probe_interval_seconds` | Independent, slower cadence at which a `Mounted` host is also DEEP-probed (`operations/list`, over loopback HTTP to `rclone rcd` — never by touching the drive letter itself). A shallow (TCP) probe only proves the host's port answers; it cannot detect a mount whose SSH channel died while the host stayed reachable (sleep/resume, a network blip shorter than `failures_before_unmount × mounted_probe_interval_seconds`). Deep-probe failures accumulate on their own counter (`ConsecutiveDeepProbeFailures`, kept structurally separate from the shallow probe's `ConsecutiveMountedFailures` — see ADR-016) and drain after a fixed 2 consecutive failures, deliberately fewer than `failures_before_unmount`: a dead mount confirmed by `operations/list` is stronger evidence than a TCP timeout. A deep-probe success resets its own counter. |
+| `session.autostart` / `session.reconnect` / `session.tmux` | Optional (bs-aoq). Defaults `false` / `true` / `false`; see "Required and optional fields". |
+| `session.tab_color` / `session.color_scheme` | Optional (bs-aoq). Absent means Windows Terminal's own default, and the fragment profile omits the key. |
 | `session.reconnect` | Wraps the ssh invocation in a loop that retries on exit code 255 (dropped) but exits cleanly on 0 (user typed `exit`). Capped at 5 attempts (`FragmentProfileGenerator.MaxReconnectAttempts`, bs-ew1) — an uncapped loop cannot distinguish "connection keeps dropping" from "`ssh.exe` cannot be launched at all" (`cmd.exe`'s own not-recognised exit code, 9009, is ≥ 255 and so satisfies the same retry condition), and would otherwise spin forever with nothing surfaced. After the cap, the tab prints a message with the last exit code and exits. This cap is a maintainer recommendation on an open decision, not settled — easily reverted to unbounded if preferred. |
 | `session.tmux` | Strongly recommended. Reconnect gives a *new shell* otherwise — scrollback and working directory are lost. tmux makes reconnection resume the actual session. |
 | `claude_sessions.enabled` | `true` makes Bosun generate its Claude Code plugin, watch session records, and restore sessions lost to a reboot, shutdown, logoff, or Terminal exit (ADR-021). Absent, whether the field or the whole `[claude_sessions]` table, means `false`: turning it on leads to a plugin the user installs into their own Claude Code configuration, so it is never on by default. `HostConfigTomlWriter` must round-trip this table (ADR-019). |
@@ -120,7 +154,7 @@ Reject the whole config, keep the previous one, and surface the error if any of:
 - `global.rclone_rc_port` outside `1`–`65535`
 - `global.suspend_unmount_timeout_seconds` zero or negative — Invariant I8
   requires everything unmounted within this window before the machine sleeps.
-- `session.tmux = true` with a null or empty `session.tmux_session` — otherwise
+- `session.tmux = true` with a null, absent or empty `session.tmux_session` — otherwise
   `FragmentProfileGenerator` silently falls back to a shared default session name
   (`"main"`), which is defence-in-depth, not something authors should rely on.
 

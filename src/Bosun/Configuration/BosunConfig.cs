@@ -142,19 +142,35 @@ public sealed record MountConfig
     public int? IdleUnmountSeconds { get; init; }
 }
 
-/// <summary><c>[hosts.&lt;key&gt;.session]</c>.</summary>
+/// <summary>
+/// <c>[hosts.&lt;key&gt;.session]</c>. Every field is optional in TOML, and so is the whole table
+/// (bs-aoq, maintainer decision 2026-11-01): <see cref="ConfigParser"/> applies the documented
+/// defaults at bind time, so nothing downstream ever sees a null for the booleans. The two
+/// colours are the exception by design -- absent means "Terminal's own default", which is
+/// represented as <see langword="null"/> and makes the generated profile omit the key.
+/// </summary>
 public sealed record SessionConfig
 {
-    public required bool Autostart { get; init; }
-    public required bool Reconnect { get; init; }
-    public required bool Tmux { get; init; }
+    public const bool DefaultAutostart = false;
+    public const bool DefaultReconnect = true;
+    public const bool DefaultTmux = false;
+
+    public bool Autostart { get; init; } = DefaultAutostart;
+    public bool Reconnect { get; init; } = DefaultReconnect;
+    public bool Tmux { get; init; } = DefaultTmux;
 
     /// <summary>Only meaningful (and, per the example config, only ever present) when
     /// <see cref="Tmux"/> is true.</summary>
     public string? TmuxSession { get; init; }
 
-    public required string TabColor { get; init; }
-    public required string ColorScheme { get; init; }
+    /// <summary>Hex tab colour, or <see langword="null"/> for Terminal's own default. Never an
+    /// empty or whitespace string: <see cref="ConfigParser"/> and the host editor both normalise
+    /// blank to null.</summary>
+    public string? TabColor { get; init; }
+
+    /// <summary>Colour scheme name, or <see langword="null"/> for Terminal's own default. Never
+    /// an empty or whitespace string.</summary>
+    public string? ColorScheme { get; init; }
 }
 
 /// <summary><c>[hosts.&lt;key&gt;.probe]</c>.</summary>

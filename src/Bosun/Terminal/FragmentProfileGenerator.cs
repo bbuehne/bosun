@@ -103,8 +103,10 @@ public static class FragmentProfileGenerator
             Guid = TerminalGuid.DeriveProfileGuid(AppName, host.Key),
             CommandLine = commandLine,
             StartingDirectory = DefaultStartingDirectory,
-            ColorScheme = host.Session.ColorScheme,
-            TabColor = host.Session.TabColor,
+            // Absent colours mean Terminal's own default (bs-aoq): null here, and the serialiser
+            // drops a null, so the key is omitted rather than written as an empty string.
+            ColorScheme = string.IsNullOrWhiteSpace(host.Session.ColorScheme) ? null : host.Session.ColorScheme,
+            TabColor = string.IsNullOrWhiteSpace(host.Session.TabColor) ? null : host.Session.TabColor,
         };
     }
 
