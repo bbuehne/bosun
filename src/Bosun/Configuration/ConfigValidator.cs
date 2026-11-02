@@ -168,7 +168,13 @@ public static class ConfigValidator
         IReadOnlyDictionary<string, HostConfig> hosts,
         List<ConfigValidationError> errors)
     {
+        // bs-5bk item 2 (maintainer decision 2026-11-01): a mode = "none" host mounts nothing, so it
+        // claims no drive letter -- a jump host with a stale `drive = "N:"` left behind must not
+        // stop the NAS using N:. It is excluded here only; its letter's FORMAT is still checked
+        // unconditionally in ValidateHost. If the host later flips to a mounting mode, it joins the
+        // collision check at that point, which is when the letter starts to mean something.
         foreach (var group in hosts.Values
+                     .Where(h => h.Mount.Mode != MountMode.None)
                      .Where(h => h.Mount.Drive is not null)
                      .GroupBy(h => h.Mount.Drive, StringComparer.OrdinalIgnoreCase))
         {

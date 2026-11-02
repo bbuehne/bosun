@@ -100,7 +100,7 @@ Not per host: a Claude Code session is not tied to a configured SSH host.
 | Field | Notes |
 |---|---|
 | `mount.mode` | `persistent` mounts automatically once probing succeeds. `on-demand` rests in `Ready` and mounts only on user action. `none` disables mounting entirely; terminal features still apply. |
-| `mount.drive` | Required when `mode != "none"`. Must be a free letter with a colon. Collisions are a validation error, not something to auto-resolve. |
+| `mount.drive` | Required when `mode != "none"`. Must be a free letter with a colon. Collisions between hosts that mount are a validation error, not something to auto-resolve. A `mode = "none"` host claims no letter, so an optional leftover `drive` on it never collides (its format is still checked). |
 | `mount.vfs_cache_mode` | `writes` is the floor. Validated as an **allow-list** of `{writes, full}`, compared case-insensitively — anything else, including a typo or a differently-cased spelling of a rejected value (`Off`, `OFF`), is a validation error. Absent is not an error: it is defaulted to `writes` in the config layer (`ConfigParser`), so nothing downstream ever sees a null. |
 | `mount.network_mode` | Must be `true`. Present as a field for debugging only. An explicit `false` is a validation error. |
 | `mount.idle_unmount_seconds` | `0` = never (on-demand only). Negative is a validation error. |
@@ -134,7 +134,12 @@ Reject the whole config, keep the previous one, and surface the error if any of:
   duplicate `display_name` (compared **case-insensitively**: `"Prod"` and
   `"prod"` collide, because `wt -p` resolution is undocumented on a tie and
   a differently-cased duplicate is the same hazard as an exact one)
-- two hosts claiming the same drive letter
+- two hosts claiming the same drive letter. A host with `mode = "none"` claims
+  **no** letter (it mounts nothing), so a leftover `drive = "N:"` on a
+  shell-only host does not collide with another host that mounts N:. Its
+  letter's *format* is still validated (the `drive` pattern rule below), because
+  that rule is unconditional. The host editor's drive-letter picker applies the same
+  rule
 - `mode != "none"` with no `drive` or no `remote_path`
 - `drive` not matching `^[D-Z]:$` (A–C reserved)
 - `vfs_cache_mode`, when present, not one of `{writes, full}` (**allow-list**,
