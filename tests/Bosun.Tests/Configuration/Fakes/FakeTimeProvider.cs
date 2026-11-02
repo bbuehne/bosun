@@ -54,7 +54,57 @@ internal sealed class FakeTimeProvider : TimeProvider
             }
         }
 
+        NotifyScheduled(timer);
         return timer;
+    }
+
+    private readonly List<(DateTimeOffset After, DateTimeOffset NotLaterThan, TaskCompletionSource Tcs)> _dueWaiters = [];
+
+    /// <summary>
+    /// Completes once some active timer is due in (<paramref name="after"/>,
+    /// <paramref name="notLaterThan"/>] -- immediately, if one already is. Lets a test that holds a
+    /// call open on another thread wait, without a wall-clock sleep, until the code under test has
+    /// armed the timeout that is meant to release it (bs-obf: a hung rcd poll must be bounded by a
+    /// timer on the injected clock), and only then advance the clock to it.
+    /// </summary>
+    public Task WhenTimerDueWithinAsync(DateTimeOffset after, DateTimeOffset notLaterThan)
+    {
+        lock (_gate)
+        {
+            if (_timers.Any(t => !t.IsDisposed && t.NextDue > after && t.NextDue <= notLaterThan))
+            {
+                return Task.CompletedTask;
+            }
+
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _dueWaiters.Add((after, notLaterThan, tcs));
+            return tcs.Task;
+        }
+    }
+
+    private void NotifyScheduled(FakeTimer timer)
+    {
+        List<TaskCompletionSource>? satisfied = null;
+        lock (_gate)
+        {
+            for (var i = _dueWaiters.Count - 1; i >= 0; i--)
+            {
+                var (after, notLaterThan, tcs) = _dueWaiters[i];
+                if (!timer.IsDisposed && timer.NextDue > after && timer.NextDue <= notLaterThan)
+                {
+                    (satisfied ??= []).Add(tcs);
+                    _dueWaiters.RemoveAt(i);
+                }
+            }
+        }
+
+        if (satisfied is not null)
+        {
+            foreach (var tcs in satisfied)
+            {
+                tcs.TrySetResult();
+            }
+        }
     }
 
     private readonly List<(int Count, TaskCompletionSource Tcs)> _waiters = [];
@@ -162,6 +212,7 @@ internal sealed class FakeTimeProvider : TimeProvider
 
             NextDue = owner.GetUtcNow() + (newDueTime < TimeSpan.Zero ? TimeSpan.Zero : newDueTime);
             _period = newPeriod;
+            owner.NotifyScheduled(this);
             return true;
         }
 
