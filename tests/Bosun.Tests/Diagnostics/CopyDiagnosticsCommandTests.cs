@@ -9,7 +9,7 @@ public sealed class CopyDiagnosticsCommandTests
 {
     private readonly FakeBundleBuilder _builder = new();
     private readonly FakeExplorerRevealer _revealer = new();
-    private readonly FakeErrorPresenter _presenter = new();
+    private readonly FakeDiagnosticsPresenter _presenter = new();
 
     private CopyDiagnosticsCommand Create() => new(_builder, _revealer, _presenter);
 
@@ -32,6 +32,68 @@ public sealed class CopyDiagnosticsCommandTests
         Assert.Empty(_revealer.Revealed);
         var shown = Assert.Single(_presenter.Errors);
         Assert.Contains("The disk is full", shown);
+    }
+
+    [Fact]
+    public async Task A_bundle_with_collection_problems_is_revealed_and_the_user_is_told_how_many()
+    {
+        _builder.Problems = ["events.json could not be collected: IOException: busy", "logs/x.log could not be copied: IOException: busy"];
+
+        await Create().RunAsync();
+
+        Assert.Equal([_builder.Path], _revealer.Revealed);
+        Assert.Empty(_presenter.Errors);
+        var notice = Assert.Single(_presenter.Notices);
+        Assert.Contains("Diagnostics bundle written with 2 collection problems", notice);
+        Assert.Contains("events.json could not be collected: IOException: busy", notice);
+        Assert.Contains("logs/x.log could not be copied: IOException: busy", notice);
+        Assert.Contains("summary.txt", notice);
+    }
+
+    [Fact]
+    public async Task One_problem_is_not_pluralised()
+    {
+        _builder.Problems = ["events.json could not be collected: IOException: busy"];
+
+        await Create().RunAsync();
+
+        Assert.Contains("written with 1 collection problem,", Assert.Single(_presenter.Notices));
+    }
+
+    [Fact]
+    public async Task A_bundle_with_no_problems_shows_no_notice()
+    {
+        await Create().RunAsync();
+
+        Assert.Empty(_presenter.Notices);
+        Assert.Empty(_presenter.Errors);
+    }
+
+    [Fact]
+    public async Task Only_the_first_few_problems_are_listed_and_the_rest_are_counted()
+    {
+        _builder.Problems = Enumerable.Range(1, 7).Select(n => $"section {n} could not be collected").ToArray();
+
+        await Create().RunAsync();
+
+        var notice = Assert.Single(_presenter.Notices);
+        Assert.Contains("written with 7 collection problems", notice);
+        Assert.Contains("section 5 could not be collected", notice);
+        Assert.DoesNotContain("section 6 could not be collected", notice, StringComparison.Ordinal);
+        Assert.Contains("and 2 more", notice);
+    }
+
+    [Fact]
+    public async Task A_notice_that_cannot_be_shown_neither_escapes_nor_turns_the_bundle_into_a_failure()
+    {
+        _builder.Problems = ["events.json could not be collected: IOException: busy"];
+        _presenter.Throws = new InvalidOperationException("no dispatcher");
+
+        await Create().RunAsync();
+
+        Assert.Equal([_builder.Path], _revealer.Revealed);
+        Assert.Empty(_presenter.Errors);
+        Assert.Single(_presenter.Notices);
     }
 
     [Fact]

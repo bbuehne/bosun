@@ -25,7 +25,7 @@ namespace Bosun.Diagnostics;
 /// </para>
 /// </remarks>
 public sealed class DispatchedDiagnosticsPresenter(ILogger<DispatchedDiagnosticsPresenter>? logger = null)
-    : IDiagnosticsErrorPresenter
+    : IDiagnosticsPresenter
 {
     /// <summary>The dialog title, without the "Bosun - " prefix the dialog adds.</summary>
     public const string DialogTitle = "Copy diagnostics";
@@ -39,7 +39,13 @@ public sealed class DispatchedDiagnosticsPresenter(ILogger<DispatchedDiagnostics
         Volatile.Write(ref _prompt, prompt);
     }
 
-    public void ShowError(string message)
+    public void ShowError(string message) => Show(message);
+
+    // The repair prompt's "error" dialog is a plain OK box with no icon, so it carries a notice as well
+    // as an error; there is no separate notice dialog to build.
+    public void ShowNotice(string message) => Show(message);
+
+    private void Show(string message)
     {
         var prompt = Volatile.Read(ref _prompt);
         if (prompt is null)

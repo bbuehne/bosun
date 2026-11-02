@@ -279,6 +279,6 @@ public sealed class BosunHostFactoryTests : IDisposable
         // bs-6bc: a bundle failure is shown through the dispatched, window-owned prompt that App
         // attaches, never an unowned MessageBox from the tray click.
         Assert.IsType<Bosun.Diagnostics.DispatchedDiagnosticsPresenter>(
-            host.Services.GetRequiredService<Bosun.Diagnostics.IDiagnosticsErrorPresenter>());
+            host.Services.GetRequiredService<Bosun.Diagnostics.IDiagnosticsPresenter>());
     }
 }

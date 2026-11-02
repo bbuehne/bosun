@@ -80,15 +80,26 @@ internal sealed class FakeExplorerRevealer : IExplorerRevealer
     }
 }
 
-internal sealed class FakeErrorPresenter : IDiagnosticsErrorPresenter
+internal sealed class FakeDiagnosticsPresenter : IDiagnosticsPresenter
 {
     public List<string> Errors { get; } = [];
+
+    public List<string> Notices { get; } = [];
 
     public Exception? Throws { get; set; }
 
     public void ShowError(string message)
     {
         Errors.Add(message);
+        if (Throws is { } ex)
+        {
+            throw ex;
+        }
+    }
+
+    public void ShowNotice(string message)
+    {
+        Notices.Add(message);
         if (Throws is { } ex)
         {
             throw ex;
@@ -104,6 +115,9 @@ internal sealed class FakeBundleBuilder : IDiagnosticsBundleBuilder
 
     public string Path { get; set; } = @"C:\fake\bosun-diagnostics-20261001-090000.zip";
 
+    /// <summary>The collection problems the fake build reports.</summary>
+    public IReadOnlyList<string> Problems { get; set; } = [];
+
     /// <summary>When set, the build does not finish until this completes.</summary>
     public TaskCompletionSource? Gate { get; set; }
 
@@ -115,6 +129,6 @@ internal sealed class FakeBundleBuilder : IDiagnosticsBundleBuilder
             await Gate.Task;
         }
 
-        return Throws is { } ex ? throw ex : new DiagnosticsBundleResult(Path, []);
+        return Throws is { } ex ? throw ex : new DiagnosticsBundleResult(Path, Problems);
     }
 }

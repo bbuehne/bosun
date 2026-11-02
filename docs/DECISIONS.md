@@ -1358,7 +1358,14 @@ an accurate explanation. Fixing them must not need a coding agent.**
    contains recent logs, the health model, every host's state and last
    transition reason, the rclone processes and the rc port's owner, mapped drive
    letters, and the version and build. Secrets are excluded: no rc credential,
-   and no key contents.
+   and no key contents. *Amended (bs-1kt, bs-6bc, bs-egu):* the bundle does not need the
+   mount supervisor or the rc client. They are read inside the sections that use them, so when
+   either cannot be built (the case bs-4js surfaces) those sections read `unavailable: <reason>`
+   and the log tail, config, health issues and a new `startup.json` (which holds
+   `SupervisorFaultMessage`) are still written. It also holds `rclone-mounts.json` (`mount/listmounts`,
+   asked only after `core/version` answers) and `%TEMP%\Bosun\bootstrap-failures.log` if present.
+   A failure to write the bundle, and a bundle written with collection problems, are shown through
+   the dispatched, window-owned prompt (the bs-3hx pattern), never an inline `MessageBox`.
 7. **Application shutdown is bounded.** Exit completes within a fixed bound even
    when the supervisor is wedged. If the loop has died, pending
    `EnqueueAndWait` callers are failed rather than left waiting forever.

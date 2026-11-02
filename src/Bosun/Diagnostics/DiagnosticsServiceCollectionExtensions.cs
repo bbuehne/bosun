@@ -19,7 +19,7 @@ public static class DiagnosticsServiceCollectionExtensions
     /// Registers <see cref="IDiagnosticsBundleBuilder"/> and <see cref="CopyDiagnosticsCommand"/>. The
     /// machine-reading seams (<see cref="IProcessLister"/>, <see cref="IDriveLister"/>,
     /// <see cref="IWindowsEventSource"/>, ...), <see cref="IExplorerRevealer"/> and
-    /// <see cref="IDiagnosticsErrorPresenter"/> are the caller's to register, so a test supplies fakes
+    /// <see cref="IDiagnosticsPresenter"/> are the caller's to register, so a test supplies fakes
     /// and nothing here can reach the real process table or Event Log.
     /// </summary>
     /// <remarks>
@@ -30,8 +30,14 @@ public static class DiagnosticsServiceCollectionExtensions
     /// <see cref="CopyDiagnosticsCommand"/> unresolvable in exactly that case, so the tray item only
     /// logged. Everything resolved eagerly below has no dependency on config or the supervisor.
     /// </remarks>
+    /// <param name="bootstrapFailuresLogPath">
+    /// The file <c>BootstrapDiagnosticSink</c> appends to, included in the bundle if it exists (bs-egu).
+    /// Required rather than defaulted so that a test cannot reach the real <c>%TEMP%\Bosun</c> by leaving
+    /// it out: production passes <see cref="Bosun.Hosting.BootstrapDiagnosticSink.DefaultFallbackFilePath"/>,
+    /// a test passes a temp path or null.
+    /// </param>
     public static IServiceCollection AddDiagnosticsBundle(
-        this IServiceCollection services, string logDirectory, string configPath)
+        this IServiceCollection services, string logDirectory, string configPath, string? bootstrapFailuresLogPath)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentException.ThrowIfNullOrWhiteSpace(logDirectory);
@@ -41,7 +47,10 @@ public static class DiagnosticsServiceCollectionExtensions
             DiagnosticsBundleOptions.ForLogDirectory(
                 logDirectory,
                 configPath,
-                () => sp.GetRequiredService<IHostConfigStore>().Current.Global.RcloneRcPort),
+                () => sp.GetRequiredService<IHostConfigStore>().Current.Global.RcloneRcPort) with
+            {
+                BootstrapFailuresLogPath = bootstrapFailuresLogPath,
+            },
             sp.GetRequiredService<IAppHealth>(),
             () => sp.GetRequiredService<IMountSupervisor>(),
             () => sp.GetRequiredService<IRcloneClient>(),
@@ -64,7 +73,7 @@ public static class DiagnosticsServiceCollectionExtensions
         services.AddSingleton(sp => new CopyDiagnosticsCommand(
             sp.GetRequiredService<IDiagnosticsBundleBuilder>(),
             sp.GetRequiredService<IExplorerRevealer>(),
-            sp.GetRequiredService<IDiagnosticsErrorPresenter>(),
+            sp.GetRequiredService<IDiagnosticsPresenter>(),
             sp.GetRequiredService<ILogger<CopyDiagnosticsCommand>>()));
 
         return services;

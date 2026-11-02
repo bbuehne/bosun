@@ -83,6 +83,20 @@ public sealed class DispatchedDiagnosticsPresenterTests
     }
 
     [Fact]
+    public void A_notice_goes_through_the_same_prompt_with_the_same_title()
+    {
+        var prompt = new RecordingPrompt();
+        var presenter = new DispatchedDiagnosticsPresenter();
+        presenter.Attach(prompt);
+
+        presenter.ShowNotice("Diagnostics bundle written with 2 collection problems");
+
+        var shown = Assert.Single(prompt.Errors);
+        Assert.Equal(DispatchedDiagnosticsPresenter.DialogTitle, shown.Title);
+        Assert.Equal("Diagnostics bundle written with 2 collection problems", shown.Message);
+    }
+
+    [Fact]
     public void An_error_before_a_prompt_is_attached_is_dropped_without_throwing()
     {
         var presenter = new DispatchedDiagnosticsPresenter();

@@ -264,7 +264,7 @@ public sealed class UserInterfaceDependencyResolverTests : IDisposable
 
     /// <summary>Registers the real "Copy diagnostics" wiring over fakes for every machine-reading seam,
     /// with the log directory and config under a temp root, so nothing reaches the real machine.</summary>
-    private (FakeExplorerRevealer Revealer, FakeErrorPresenter Presenter) AddDiagnostics(
+    private (FakeExplorerRevealer Revealer, FakeDiagnosticsPresenter Presenter) AddDiagnostics(
         IServiceCollection services, string configContent)
     {
         var logs = Path.Combine(_diagnosticsRoot, "logs");
@@ -274,7 +274,7 @@ public sealed class UserInterfaceDependencyResolverTests : IDisposable
         File.WriteAllText(Path.Combine(logs, "bosun-20261101.log"), "a log line that must survive\n");
 
         var revealer = new FakeExplorerRevealer();
-        var presenter = new FakeErrorPresenter();
+        var presenter = new FakeDiagnosticsPresenter();
         services.AddSingleton<IPortOwnerResolver>(new FakePortOwnerResolver());
         services.AddSingleton<IProcessInspector>(new FakeProcessInspector());
         services.AddSingleton<IProcessLister>(new FakeProcessLister());
@@ -282,8 +282,8 @@ public sealed class UserInterfaceDependencyResolverTests : IDisposable
         services.AddSingleton<IWindowsEventSource>(new FakeWindowsEventSource());
         services.AddSingleton<IEnvironmentInfoSource>(new FakeEnvironmentInfoSource());
         services.AddSingleton<IExplorerRevealer>(revealer);
-        services.AddSingleton<IDiagnosticsErrorPresenter>(presenter);
-        services.AddDiagnosticsBundle(logs, config);
+        services.AddSingleton<IDiagnosticsPresenter>(presenter);
+        services.AddDiagnosticsBundle(logs, config, Path.Combine(_diagnosticsRoot, "bootstrap-failures.log"));
         return (revealer, presenter);
     }
 
@@ -336,6 +336,7 @@ public sealed class UserInterfaceDependencyResolverTests : IDisposable
         });
         services.AddSingleton<IAppHealth>(health);
         var (revealer, presenter) = AddDiagnostics(services, "[global]\nrclone_rc_port = 5572\n");
+        File.WriteAllText(Path.Combine(_diagnosticsRoot, "bootstrap-failures.log"), "the host failed to build\n");
 
         var deps = Resolve(services);
 
@@ -353,6 +354,9 @@ public sealed class UserInterfaceDependencyResolverTests : IDisposable
         Assert.Contains(fault, files["summary.txt"]);
         Assert.Contains(fault, files["health.json"]);
         Assert.Contains("a log line that must survive", files["logs/bosun-20261101.log"]);
+        // bs-egu: the bootstrap failure log reaches the bundle through the real wiring (the path
+        // AddDiagnosticsBundle was given), not only through the builder's options.
+        Assert.Contains("the host failed to build", files["bootstrap-failures.log"]);
     }
 
     [Fact]

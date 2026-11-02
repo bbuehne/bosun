@@ -244,7 +244,7 @@ once.
 | Terminal profiles duplicated | Something wrote to `settings.json`. Invariant I5 violation. |
 | Files fail to save from an editor | `vfs_cache_mode` below `writes`. Validation should have caught this. |
 | The health banner is showing, or a drive is stuck | Use the repair buttons in the banner, or **Repair** in the tray menu (ADR-020). *Restart rclone* replaces `rclone rcd` and reconciles every host. *Unmount all & re-probe* drops every mounted drive and brings persistent hosts back after a fresh check (it does not park hosts or un-park ones you unmounted). *Restart Bosun* starts a fresh Bosun and shows its window; it does not count against the watchdog's restart limit. Each asks first if a drive would disconnect. Use **Copy diagnostics** before restarting if you want to keep the evidence. |
-| Red tray icon and a banner reading **The mount supervisor failed to start: …** | Nothing is being probed or mounted this session, and nothing will retry. The text after the colon is the real exception message (the tooltip may cut it short; the banner shows it whole). Typical cause: a startup dependency the program could not build, which is a Bosun bug rather than something wrong with your hosts. Find the full exception in the log (search for `Failed to start the mount supervisor`), then **Restart Bosun**. Terminal profiles still work. The window will list no hosts and **Copy diagnostics** will not work, because both need the supervisor. |
+| Red tray icon and a banner reading **The mount supervisor failed to start: …** | Nothing is being probed or mounted this session, and nothing will retry. The text after the colon is the real exception message (the tooltip may cut it short; the banner shows it whole). Typical cause: a startup dependency the program could not build, which is a Bosun bug rather than something wrong with your hosts. Find the full exception in the log (search for `Failed to start the mount supervisor`), then **Restart Bosun**. Terminal profiles still work. The window will list no hosts. **Copy diagnostics** still works: `hosts.json` reads `unavailable: <reason>`, and `startup.json` and `summary.txt` carry the supervisor's failure message. |
 | "Bosun restarted itself" notice | The watchdog found the mount supervisor stalled and restarted Bosun (the window stays hidden for that). The notice gives the time and reason; **Dismiss** removes it, or it goes after 24 hours. The log has the details. |
 
 ### Repair actions: expected result
@@ -340,4 +340,15 @@ exceptions Bosun did not expect; a 401, a refused connection or an rc timeout is
 described in words.
 
 **What a bundle holds.** *Copy diagnostics* includes every `*.log` file modified in
-the last three days, rolled `_001` files included.
+the last three days, rolled `_001` files included. It also holds `summary.txt` (open
+this first), the health issues, `startup.json` (config state and errors, WinFsp, rclone
+and the supervisor's own start failure), `hosts.json`, the rclone processes and the rc
+port's owner, `drives.json`, `rclone-mounts.json` (rclone's own list of mounts from
+`mount/listmounts`, to compare with `drives.json`; only asked when rclone answers),
+`events.json`, `version.txt`, the config with secrets masked, and
+`bootstrap-failures.log` (the last 64 KiB of `%TEMP%\Bosun\bootstrap-failures.log`, only if
+it exists). A section that cannot be collected says why and the rest are still written.
+If any could not be, the dialog after the bundle opens says "Diagnostics bundle written with N
+collection problems" and lists the first few; `summary.txt` lists them all. A section that is
+`unavailable` because the supervisor or rclone is down is the state being diagnosed, not a
+collection problem.

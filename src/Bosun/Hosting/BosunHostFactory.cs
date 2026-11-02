@@ -292,8 +292,9 @@ public static class BosunHostFactory
         // bs-6bc: failures are shown through the dispatched, window-owned prompt, never an unowned
         // MessageBox from the tray click. App.InitializeUserInterface attaches the prompt.
         builder.Services.AddSingleton<DispatchedDiagnosticsPresenter>();
-        builder.Services.AddSingleton<IDiagnosticsErrorPresenter>(sp => sp.GetRequiredService<DispatchedDiagnosticsPresenter>());
-        builder.Services.AddDiagnosticsBundle(options.LogDirectory, options.ConfigPath);
+        builder.Services.AddSingleton<IDiagnosticsPresenter>(sp => sp.GetRequiredService<DispatchedDiagnosticsPresenter>());
+        builder.Services.AddDiagnosticsBundle(
+            options.LogDirectory, options.ConfigPath, BootstrapDiagnosticSink.DefaultFallbackFilePath);
 
         // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
         // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without
