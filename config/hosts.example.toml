@@ -2,6 +2,11 @@
 #
 # Copy to config/hosts.toml and edit. hosts.toml is gitignored.
 # Full schema: docs/CONFIG-SCHEMA.md
+#
+# Required per host: display_name, hostname, port, user, identity_file, [mount] mode, and the
+# [probe] table (interval_seconds, deep_probe). Everything in [session] is optional -- the whole
+# table may be left out. Defaults: autostart = false, reconnect = true, tmux = false, and no
+# tab_color / color_scheme (Windows Terminal then uses its own).
 
 [global]
 rclone_rc_port                  = 5572
@@ -36,6 +41,7 @@ identity_file = "~/.ssh/id_ed25519"
   network_mode         = true
   idle_unmount_seconds = 0
 
+  # Every [session] key is optional; values equal to the default are shown only for illustration.
   [hosts.example-nas.session]
   autostart    = false
   reconnect    = true
@@ -101,3 +107,21 @@ identity_file = "~/.ssh/id_ed25519"
   [hosts.example-jump.probe]
   interval_seconds = 0
   deep_probe       = false
+
+
+# The smallest valid host: no [session] table at all (shell tab with every default, Terminal's own
+# colours) and a probe cadence you must choose. Uncomment to try it.
+#
+# [hosts.example-minimal]
+# display_name  = "Example Minimal"
+# hostname      = "minimal.example.com"
+# port          = 22
+# user          = "youruser"
+# identity_file = "~/.ssh/id_ed25519"
+#
+#   [hosts.example-minimal.mount]
+#   mode = "none"
+#
+#   [hosts.example-minimal.probe]
+#   interval_seconds = 0
+#   deep_probe       = false

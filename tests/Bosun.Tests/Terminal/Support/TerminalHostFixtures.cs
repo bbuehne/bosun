@@ -13,8 +13,8 @@ internal static class TerminalHostFixtures
         bool tmux = false,
         string? tmuxSession = null,
         bool reconnect = false,
-        string tabColor = "#2D5F3F",
-        string colorScheme = "Campbell",
+        string? tabColor = "#2D5F3F",
+        string? colorScheme = "Campbell",
         MountMode mountMode = MountMode.Persistent) => new()
     {
         Key = key,

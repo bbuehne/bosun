@@ -103,18 +103,67 @@ internal static class HostConfigTomlWriter
         AppendIntIfNotNull(sb, "idle_unmount_seconds", host.Mount.IdleUnmountSeconds, indent: "  ");
         sb.Append('\n');
 
-        sb.Append("  [").Append("hosts.").Append(tomlKey).Append(".session]\n");
-        AppendBool(sb, "autostart", host.Session.Autostart, indent: "  ");
-        AppendBool(sb, "reconnect", host.Session.Reconnect, indent: "  ");
-        AppendBool(sb, "tmux", host.Session.Tmux, indent: "  ");
-        AppendStringIfNotNull(sb, "tmux_session", host.Session.TmuxSession, indent: "  ");
-        AppendString(sb, "tab_color", host.Session.TabColor, indent: "  ");
-        AppendString(sb, "color_scheme", host.Session.ColorScheme, indent: "  ");
-        sb.Append('\n');
+        WriteSession(sb, tomlKey, host.Session);
 
         sb.Append("  [").Append("hosts.").Append(tomlKey).Append(".probe]\n");
         AppendInt(sb, "interval_seconds", host.Probe.IntervalSeconds, indent: "  ");
         AppendBool(sb, "deep_probe", host.Probe.DeepProbe, indent: "  ");
+    }
+
+    // bs-aoq: every [session] field is optional, with a documented default (SessionConfig.Default*).
+    // Only a value that DIFFERS from its default is written, and the whole table is left out when
+    // nothing differs. Reasons:
+    //   - A hand-written minimal host (no [session] at all) stays minimal after a save through the
+    //     host editor, rather than sprouting lines the user never wrote.
+    //   - It cannot change meaning: the parsed model holds a plain bool, so "absent" and "explicitly
+    //     the default" are the same value by the time they reach this class, and re-parsing the
+    //     omitted form yields exactly the same SessionConfig (covered by the round-trip tests).
+    // The cost is that an explicit `reconnect = true` a user typed is not preserved as text -- but
+    // this class already regenerates the whole file (comments and ordering are not preserved
+    // either), and the semantic value is. If a default is ever changed, files saved by an older
+    // Bosun change meaning, so these defaults are part of the documented schema, not tuning.
+    // Colours are written only when non-blank, because null means Terminal's own default.
+    private static void WriteSession(StringBuilder sb, string tomlKey, SessionConfig session)
+    {
+        var isAllDefault = session.Autostart == SessionConfig.DefaultAutostart
+            && session.Reconnect == SessionConfig.DefaultReconnect
+            && session.Tmux == SessionConfig.DefaultTmux
+            && session.TmuxSession is null
+            && string.IsNullOrWhiteSpace(session.TabColor)
+            && string.IsNullOrWhiteSpace(session.ColorScheme);
+        if (isAllDefault)
+        {
+            return;
+        }
+
+        sb.Append("  [").Append("hosts.").Append(tomlKey).Append(".session]\n");
+        if (session.Autostart != SessionConfig.DefaultAutostart)
+        {
+            AppendBool(sb, "autostart", session.Autostart, indent: "  ");
+        }
+
+        if (session.Reconnect != SessionConfig.DefaultReconnect)
+        {
+            AppendBool(sb, "reconnect", session.Reconnect, indent: "  ");
+        }
+
+        if (session.Tmux != SessionConfig.DefaultTmux)
+        {
+            AppendBool(sb, "tmux", session.Tmux, indent: "  ");
+        }
+
+        AppendStringIfNotNull(sb, "tmux_session", session.TmuxSession, indent: "  ");
+        AppendStringIfNotBlank(sb, "tab_color", session.TabColor, indent: "  ");
+        AppendStringIfNotBlank(sb, "color_scheme", session.ColorScheme, indent: "  ");
+        sb.Append('\n');
+    }
+
+    private static void AppendStringIfNotBlank(StringBuilder sb, string key, string? value, string indent = "")
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            AppendString(sb, key, value, indent);
+        }
     }
 
     private static string ToTomlValue(MountMode mode) => mode switch

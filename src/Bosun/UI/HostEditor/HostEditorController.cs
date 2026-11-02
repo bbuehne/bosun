@@ -123,6 +123,9 @@ public sealed class HostEditorController
         return form;
     }
 
+    private static string? NullIfBlank(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private static HostFormModel ToFormModel(HostConfig host, bool isNewHost) => new()
     {
         Key = host.Key,
@@ -141,8 +144,8 @@ public sealed class HostEditorController
         Reconnect = host.Session.Reconnect,
         Tmux = host.Session.Tmux,
         TmuxSession = host.Session.TmuxSession ?? string.Empty,
-        TabColor = host.Session.TabColor,
-        ColorScheme = host.Session.ColorScheme,
+        TabColor = host.Session.TabColor ?? string.Empty,
+        ColorScheme = host.Session.ColorScheme ?? string.Empty,
         ProbeIntervalSeconds = host.Probe.IntervalSeconds.ToString(CultureInfo.InvariantCulture),
         DeepProbe = host.Probe.DeepProbe,
     };
@@ -403,8 +406,9 @@ public sealed class HostEditorController
                 Reconnect = model.Reconnect,
                 Tmux = model.Tmux,
                 TmuxSession = tmuxSession,
-                TabColor = model.TabColor.Trim(),
-                ColorScheme = model.ColorScheme.Trim(),
+                // Blank means "Terminal's own default" (bs-aoq): null, so nothing is written.
+                TabColor = NullIfBlank(model.TabColor),
+                ColorScheme = NullIfBlank(model.ColorScheme),
             },
             Probe = new ProbeConfig
             {

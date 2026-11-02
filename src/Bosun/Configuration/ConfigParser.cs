@@ -79,7 +79,9 @@ public static class ConfigParser
     private static HostConfig MapHost(string key, HostConfigRaw raw)
     {
         var mountRaw = RequireTable(raw.Mount, $"hosts.{key}.mount");
-        var sessionRaw = RequireTable(raw.Session, $"hosts.{key}.session");
+        // bs-aoq: [session] is optional, wholly (an absent table binds the same as an empty one).
+        // [mount] and [probe] stay required.
+        var sessionRaw = raw.Session ?? new SessionConfigRaw();
         var probeRaw = RequireTable(raw.Probe, $"hosts.{key}.probe");
 
         return new HostConfig
@@ -104,12 +106,14 @@ public static class ConfigParser
             },
             Session = new SessionConfig
             {
-                Autostart = RequireField(sessionRaw.Autostart, $"hosts.{key}.session.autostart"),
-                Reconnect = RequireField(sessionRaw.Reconnect, $"hosts.{key}.session.reconnect"),
-                Tmux = RequireField(sessionRaw.Tmux, $"hosts.{key}.session.tmux"),
+                // bs-aoq: defaulted here, in the config layer, so nothing downstream sees a null.
+                Autostart = sessionRaw.Autostart ?? SessionConfig.DefaultAutostart,
+                Reconnect = sessionRaw.Reconnect ?? SessionConfig.DefaultReconnect,
+                Tmux = sessionRaw.Tmux ?? SessionConfig.DefaultTmux,
                 TmuxSession = sessionRaw.TmuxSession,
-                TabColor = RequireField(sessionRaw.TabColor, $"hosts.{key}.session.tab_color"),
-                ColorScheme = RequireField(sessionRaw.ColorScheme, $"hosts.{key}.session.color_scheme"),
+                // Absent (or blank) means Terminal's own default: null, so the fragment omits the key.
+                TabColor = NullIfBlank(sessionRaw.TabColor),
+                ColorScheme = NullIfBlank(sessionRaw.ColorScheme),
             },
             Probe = new ProbeConfig
             {
@@ -118,6 +122,8 @@ public static class ConfigParser
             },
         };
     }
+
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 
     private static MountMode ParseMountMode(string? mode, string hostKey)
     {
