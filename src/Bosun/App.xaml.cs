@@ -435,20 +435,57 @@ public partial class App : Application
         }
     }
 
+    // bs-twz: built on the first dispatcher exception, not at startup, so a container that cannot
+    // resolve the health reporter (the case bs-4js exists for) cannot stop the handler from existing.
+    private DispatcherExceptionPolicy? _dispatcherExceptionPolicy;
+
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
-        if (_logger is { } logger)
+        if (_logger is not { } logger)
         {
-            logger.LogCritical(e.Exception, "Unhandled dispatcher exception.");
-        }
-        else
-        {
-            // e.Handled is deliberately left false (see bs-twz), so this terminates the process.
-            // Same reasoning as the AppDomain handler above: pre-logger plus fatal must be seen,
-            // not merely recorded.
+            // Pre-logger: e.Handled stays false, so this terminates the process. Same reasoning as the
+            // AppDomain handler above: pre-logger plus fatal must be seen, not merely recorded.
             _bootstrap.ReportTerminalPreLoggerFailure(
                 "Bosun could not start: an unrecoverable UI error occurred during startup.",
                 e.Exception);
+            return;
+        }
+
+        // bs-twz (maintainer decision 2026-11-01): once the logger exists, survive and mark red --
+        // unless the runaway guard says otherwise. All of the decision lives in
+        // DispatcherExceptionPolicy; nothing here may throw, because an exception escaping a
+        // DispatcherUnhandledException handler ends the process with no explanation.
+        try
+        {
+            _dispatcherExceptionPolicy ??= new DispatcherExceptionPolicy(
+                TimeProvider.System, ResolveHealthReporter(), logger);
+            e.Handled = _dispatcherExceptionPolicy.Decide(e.Exception) == DispatcherExceptionDecision.Handle;
+        }
+        catch (Exception ex)
+        {
+            // Last resort: we do not know what state the policy is in, so do not claim to have handled it.
+            e.Handled = false;
+            try
+            {
+                logger.LogCritical(ex, "The dispatcher exception handler itself failed; Bosun will exit.");
+            }
+            catch
+            {
+                // Nothing more can be done; the original exception terminates the process.
+            }
+        }
+    }
+
+    private IAppHealthReporter? ResolveHealthReporter()
+    {
+        try
+        {
+            return _host?.Services.GetService<IAppHealthReporter>();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Could not resolve the application-health reporter for the dispatcher exception handler.");
+            return null;
         }
     }
 }

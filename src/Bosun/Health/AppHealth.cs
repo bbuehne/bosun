@@ -106,6 +106,13 @@ public static class HealthIssueCodes
     // Supervisor loop.
     public const string SupervisorLoopStopped = "supervisor.loop-stopped";
 
+    // UI (bs-twz). Reported by DispatcherExceptionPolicy, not derived.
+
+    /// <summary>An unhandled exception reached the WPF dispatcher and Bosun survived it. Faulted so the
+    /// tray goes red. Never cleared by a later recovery: it stays until Bosun restarts, because the state
+    /// of the UI after the exception is unknown.</summary>
+    public const string UiUnhandledException = "ui.unhandled-exception";
+
     // Watchdog (bs-6to). Reported by SupervisorWatchdog, not derived.
 
     /// <summary>The supervisor loop is dead or has made no progress past the stall threshold. Shown
