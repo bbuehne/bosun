@@ -235,6 +235,32 @@ stops waiting. Issue unmounts with that short timeout and accept that a forced
 unmount may be needed on resume — that is what re-derivation is for, and it is
 now implemented rather than aspirational.
 
+**When the supervisor faults during suspend** (`bs-3al`; `bs-u4a` item 5). The
+suspend handler runs on `Microsoft.Win32.SystemEvents`' single notification
+thread, which has no `catch` above it: an exception that escaped the handler
+would terminate the process, and a dead process never runs resume-side
+re-derivation. So the handler never throws. `SuspendAsync` can fault — the
+supervisor's channel re-surfaces any exception raised while it drains as a
+faulted task — and the adapter handles that without rethrowing:
+
+- Fault *inside* the budget: logged at error level with the exception, and the
+  handler returns to Windows at once. It does not retry and does not compensate.
+- Budget elapsed first: logged as a warning, and the handler returns. The
+  in-flight call is left running; if it faults later, that is logged at error
+  level too rather than left as an unobserved task exception.
+- The same holds for resume and network change, which are fire-and-forget: a
+  faulted call is logged and nothing more.
+
+Whatever the faulted suspend did not unmount is recovered on resume by
+re-derivation (ADR-017), which is why that path is not optional. A fault is
+visible in the log only; the suspend handler does not report it into the health
+model. If the container cannot construct the supervisor at all (`bs-4js`), no
+system-event subscription is made: `StartupOrchestrator` creates the adapter only
+once the supervisor object exists, and the inert stand-in used otherwise mounts
+nothing, so there is nothing to unmount. (A supervisor that was constructed but
+whose initial `StartAsync` failed *is* subscribed, and a suspend then sweeps whatever
+that supervisor holds.)
+
 ## 4. The mount state machine
 
 One instance per configured host. This is the core of the application; get it
