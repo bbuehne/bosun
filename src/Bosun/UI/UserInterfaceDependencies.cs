@@ -39,8 +39,10 @@ public sealed record UserInterfaceDependencies
 
     private static readonly IReadOnlyDictionary<string, string> EmptyProvisioningFailures = new Dictionary<string, string>();
 
-    /// <summary>Null when the diagnostics bundle builder could not be built. It needs the real
-    /// supervisor, so a failed supervisor takes "Copy diagnostics" with it (reported, not hidden).</summary>
+    /// <summary>"Copy diagnostics". Null only when the command itself cannot be built (it is not
+    /// registered, or the health model or one of the machine-reading seams is missing). It does NOT
+    /// need the mount supervisor (bs-1kt): with <see cref="SupervisorIsStandIn"/> true it is still
+    /// resolved, and the bundle's supervisor-derived sections read "unavailable: &lt;reason&gt;".</summary>
     public CopyDiagnosticsCommand? Diagnostics { get; init; }
 
     /// <summary>Null when the host config could not be loaded or the writer could not be built; the

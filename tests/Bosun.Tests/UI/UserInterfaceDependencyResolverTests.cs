@@ -1,14 +1,22 @@
+using System.IO.Compression;
+using System.Text;
 using Bosun.Configuration;
+using Bosun.Diagnostics;
 using Bosun.Health;
+using Bosun.Hosting;
+using Bosun.Rclone.Process;
 using Bosun.Probe;
 using Bosun.Rclone;
 using Bosun.SessionMonitor;
 using Bosun.Status;
 using Bosun.Supervisor;
+using Bosun.Tests.Diagnostics.Fakes;
 using Bosun.Tests.Rclone.Fakes;
+using Bosun.Tests.Rclone.Process.Fakes;
 using Bosun.Tests.SessionMonitor.Fakes;
 using Bosun.Tests.Supervisor.Support;
 using Bosun.Tests.Supervisor.Fakes;
+using Bosun.Tests.UI.Tray.Fakes;
 using Bosun.UI;
 using Bosun.UI.Tray;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,8 +35,24 @@ namespace Bosun.Tests.UI;
 /// constructed (the tray and window are not unit-testable); everything they are built from is.
 /// Every service here is a fake: no rclone, no drive letter, no real fragment path.
 /// </summary>
-public sealed class UserInterfaceDependencyResolverTests
+public sealed class UserInterfaceDependencyResolverTests : IDisposable
 {
+    private readonly string _diagnosticsRoot = Path.Combine(Path.GetTempPath(), "bosun-1kt-ui-" + Guid.NewGuid().ToString("N"));
+
+    public void Dispose()
+    {
+        try
+        {
+            Directory.Delete(_diagnosticsRoot, recursive: true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
     private static ServiceCollection BaseServices()
     {
         var services = new ServiceCollection();
@@ -231,6 +255,136 @@ public sealed class UserInterfaceDependencyResolverTests
         Assert.Null(mount);
         Assert.Null(unmount);
         Assert.Null(diagnostics);
+    }
+
+
+    // ------------------------------------------------------------------------------------------
+    // bs-1kt: Copy diagnostics must not depend on the supervisor
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>Registers the real "Copy diagnostics" wiring over fakes for every machine-reading seam,
+    /// with the log directory and config under a temp root, so nothing reaches the real machine.</summary>
+    private (FakeExplorerRevealer Revealer, FakeErrorPresenter Presenter) AddDiagnostics(
+        IServiceCollection services, string configContent)
+    {
+        var logs = Path.Combine(_diagnosticsRoot, "logs");
+        Directory.CreateDirectory(logs);
+        var config = Path.Combine(_diagnosticsRoot, "hosts.toml");
+        File.WriteAllText(config, configContent);
+        File.WriteAllText(Path.Combine(logs, "bosun-20261101.log"), "a log line that must survive\n");
+
+        var revealer = new FakeExplorerRevealer();
+        var presenter = new FakeErrorPresenter();
+        services.AddSingleton<IPortOwnerResolver>(new FakePortOwnerResolver());
+        services.AddSingleton<IProcessInspector>(new FakeProcessInspector());
+        services.AddSingleton<IProcessLister>(new FakeProcessLister());
+        services.AddSingleton<IDriveLister>(new FakeDriveLister());
+        services.AddSingleton<IWindowsEventSource>(new FakeWindowsEventSource());
+        services.AddSingleton<IEnvironmentInfoSource>(new FakeEnvironmentInfoSource());
+        services.AddSingleton<IExplorerRevealer>(revealer);
+        services.AddSingleton<IDiagnosticsErrorPresenter>(presenter);
+        services.AddDiagnosticsBundle(logs, config);
+        return (revealer, presenter);
+    }
+
+    private static Dictionary<string, string> ReadZip(string path)
+    {
+        using var zip = ZipFile.OpenRead(path);
+        return zip.Entries.ToDictionary(
+            e => e.FullName,
+            e =>
+            {
+                using var reader = new StreamReader(e.Open(), Encoding.UTF8);
+                return reader.ReadToEnd();
+            });
+    }
+
+    [Fact]
+    public async Task The_original_incident_still_resolves_Copy_diagnostics_and_it_writes_a_bundle_that_explains_the_supervisor_fault()
+    {
+        // The bs-4js incident: no TimeProvider, so IProbe and therefore MountSupervisor cannot be built,
+        // and the UI gets the stand-in supervisor. Copy diagnostics used to be null here (the menu item
+        // only logged) because the bundle builder required the supervisor.
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<IHostConfigStore>(new FakeConfigStore(HostFixtures.Build(HostFixtures.Global())));
+        services.AddSingleton<IRcloneClient>(new FakeRcloneClient());
+        services.AddSingleton<ITcpProbeTransport, TcpProbeTransport>();
+        services.AddSingleton<IRemoteRootLister, NoopRemoteRootLister>();
+        services.AddSingleton<IProbe, HostProbe>();
+        services.AddSingleton(sp => new MountSupervisor(
+            sp.GetRequiredService<IHostConfigStore>(),
+            sp.GetRequiredService<IRcloneClient>(),
+            sp.GetRequiredService<IProbe>(),
+            new FakeDriveTypeReader(),
+            TimeProvider.System,
+            sp.GetRequiredService<ILogger<MountSupervisor>>()));
+        services.AddSingleton<IMountSupervisor>(sp => sp.GetRequiredService<MountSupervisor>());
+
+        // The health model as the orchestrator fills it from the same fault.
+        const string fault = "Unable to resolve service for type 'System.TimeProvider'";
+        using var health = new AppHealthService(new Bosun.Tests.Configuration.Fakes.FakeTimeProvider(new DateTimeOffset(2026, 11, 1, 12, 0, 0, TimeSpan.Zero)));
+        health.ObserveStartup(new StartupReadiness
+        {
+            ConfigState = ConfigReadinessState.Loaded,
+            TerminalFragmentWritten = true,
+            WinFspInstalled = true,
+            WinFspMessage = "WinFsp is installed",
+            RcloneHealthy = true,
+            SupervisorRunning = false,
+            SupervisorFaultMessage = fault,
+        });
+        services.AddSingleton<IAppHealth>(health);
+        var (revealer, presenter) = AddDiagnostics(services, "[global]\nrclone_rc_port = 5572\n");
+
+        var deps = Resolve(services);
+
+        Assert.True(deps.SupervisorIsStandIn);
+        Assert.NotNull(deps.Diagnostics);
+
+        await deps.Diagnostics!.RunAsync();
+
+        Assert.Empty(presenter.Errors);
+        var path = Assert.Single(revealer.Revealed);
+        var files = ReadZip(path);
+        Assert.Contains("HOSTS: unavailable: ", files["summary.txt"]);
+        Assert.Contains("unavailable: ", files["hosts.json"]);
+        // The reason the supervisor is gone is in the bundle, from the health model, without the supervisor.
+        Assert.Contains(fault, files["summary.txt"]);
+        Assert.Contains(fault, files["health.json"]);
+        Assert.Contains("a log line that must survive", files["logs/bosun-20261101.log"]);
+    }
+
+    [Fact]
+    public async Task An_invalid_config_which_also_takes_the_rc_client_and_config_store_still_resolves_Copy_diagnostics_and_redacts_the_config()
+    {
+        // Nothing that reads the config can be built, and so neither the supervisor nor the rc client.
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<IAppHealth>(new StubAppHealth());
+        services.AddSingleton<IHostConfigStore>(
+            _ => throw new InvalidConfigException("hosts.toml", ["line 3, column 1: unexpected token"]));
+        services.AddSingleton<IMountSupervisor>(sp => { _ = sp.GetRequiredService<IHostConfigStore>(); return new UnavailableMountSupervisor(); });
+        services.AddSingleton<IRcloneClient>(sp => { _ = sp.GetRequiredService<IHostConfigStore>(); return new FakeRcloneClient(); });
+        var (revealer, presenter) = AddDiagnostics(services, "[hosts.example]\nhostname = \"files.example.net\"\npassword = \"hunter2\"\n[[broken");
+
+        var deps = Resolve(services);
+
+        Assert.True(deps.SupervisorIsStandIn);
+        Assert.True(deps.ConfigStoreIsStandIn);
+        Assert.NotNull(deps.Diagnostics);
+
+        await deps.Diagnostics!.RunAsync();
+
+        Assert.Empty(presenter.Errors);
+        var files = ReadZip(Assert.Single(revealer.Revealed));
+        Assert.Contains("HOSTS: unavailable: ", files["summary.txt"]);
+        Assert.Contains("RC PORT: unavailable: ", files["summary.txt"]);
+        Assert.Contains("rclone: unavailable (", files["version.txt"]);
+        Assert.Contains("files.example.net", files["config.redacted.toml"]);
+        Assert.DoesNotContain("hunter2", files["config.redacted.toml"], StringComparison.Ordinal);
+        Assert.DoesNotContain(files.Values, text => text.Contains("hunter2", StringComparison.Ordinal));
     }
 
     private sealed class NoopRemoteRootLister : IRemoteRootLister

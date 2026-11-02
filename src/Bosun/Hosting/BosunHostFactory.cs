@@ -290,28 +290,7 @@ public static class BosunHostFactory
         builder.Services.AddSingleton<IEnvironmentInfoSource, AssemblyEnvironmentInfoSource>();
         builder.Services.AddSingleton<IExplorerRevealer, ExplorerRevealer>();
         builder.Services.AddSingleton<IDiagnosticsErrorPresenter, MessageBoxDiagnosticsErrorPresenter>();
-        builder.Services.AddSingleton<IDiagnosticsBundleBuilder>(sp => new DiagnosticsBundleBuilder(
-            DiagnosticsBundleOptions.ForLogDirectory(
-                options.LogDirectory,
-                options.ConfigPath,
-                () => sp.GetRequiredService<IHostConfigStore>().Current.Global.RcloneRcPort),
-            sp.GetRequiredService<IAppHealth>(),
-            sp.GetRequiredService<IMountSupervisor>(),
-            sp.GetRequiredService<IRcloneClient>(),
-            sp.GetRequiredService<IPortOwnerResolver>(),
-            sp.GetRequiredService<IProcessInspector>(),
-            sp.GetRequiredService<IProcessLister>(),
-            sp.GetRequiredService<IDriveLister>(),
-            sp.GetRequiredService<IWindowsEventSource>(),
-            sp.GetRequiredService<IEnvironmentInfoSource>(),
-            sp.GetRequiredService<RcloneRcCredential>(),
-            TimeProvider.System,
-            sp.GetRequiredService<ILogger<DiagnosticsBundleBuilder>>()));
-        builder.Services.AddSingleton(sp => new CopyDiagnosticsCommand(
-            sp.GetRequiredService<IDiagnosticsBundleBuilder>(),
-            sp.GetRequiredService<IExplorerRevealer>(),
-            sp.GetRequiredService<IDiagnosticsErrorPresenter>(),
-            sp.GetRequiredService<ILogger<CopyDiagnosticsCommand>>()));
+        builder.Services.AddDiagnosticsBundle(options.LogDirectory, options.ConfigPath);
 
         // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
         // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without
