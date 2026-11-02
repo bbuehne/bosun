@@ -142,6 +142,14 @@
                                     <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
                                     <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" />
                                     <TextBlock Text="{Binding SinceText}" FontSize="11" Opacity="0.75" />
+                                    <!-- bs-mhs: a dismissible notice (Bosun restarted itself) can be dismissed from here
+                                         too, not only when it is the top issue. -->
+                                    <Button Content="Dismiss"
+                                            Command="{Binding Dismiss}"
+                                            HorizontalAlignment="Left"
+                                            Margin="0,4,0,0"
+                                            Padding="10,3"
+                                            Visibility="{Binding CanDismiss, Converter={StaticResource BoolToVisibility}}" />
                                 </StackPanel>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>

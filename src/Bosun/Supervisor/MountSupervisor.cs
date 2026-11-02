@@ -744,8 +744,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     {
         if (suspended)
         {
-            logger.LogWarning("Repair (unmount all and re-probe) ignored: the system is suspended");
-            return;
+            logger.LogWarning("Repair (unmount all and re-probe) refused: the system is suspended");
+            throw new RepairRefusedException("the system is suspended");
         }
 
         var mounted = hosts.Values.Where(h => h.State is MountState.Mounting or MountState.Mounted).ToList();

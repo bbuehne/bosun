@@ -459,8 +459,11 @@ public sealed class RepairAllSpecTests
         await harness.Supervisor.DrainAsync();
         Assert.True(task.IsCompleted, "a refused repair must still complete");
         var refusal = await Record.ExceptionAsync(() => task);
-        Assert.True(refusal is null or MountRequestRefusedException,
-            $"a refused repair must either return or throw the refusal type, not {refusal?.GetType().Name}: {refusal?.Message}");
+
+        // bs-mhs tightened this from "return or throw MountRequestRefusedException": a refused repair
+        // must say so, and with a type whose message is about the repair, not about mounting a host.
+        var refused = Assert.IsType<RepairRefusedException>(refusal);
+        Assert.Equal("the system is suspended", refused.Reason);
 
         await harness.AdvanceAsync(TimeSpan.FromMinutes(30));
 

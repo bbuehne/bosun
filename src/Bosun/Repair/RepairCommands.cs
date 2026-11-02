@@ -218,6 +218,13 @@ public sealed class RepairCommands
 
             logger?.LogInformation("Repair: unmount all and re-probe was accepted by the supervisor");
         }
+        catch (RepairRefusedException ex)
+        {
+            // A refusal the supervisor made on purpose (bs-mhs), like a refused Mount click: say what
+            // happened, in the dialog every other answer to a click uses; the log needs no stack trace.
+            logger?.LogInformation("Repair: unmount all and re-probe was refused: {Reason}", ex.Reason);
+            ShowRefusal("Unmount all & re-probe", $"Nothing was unmounted: {ex.Reason.Trim().TrimEnd('.')}.");
+        }
         catch (SupervisorStoppedException ex)
         {
             Fail("Unmount all & re-probe", "Bosun's mount supervisor has stopped, so nothing was unmounted. Use Restart Bosun.", ex);
@@ -320,6 +327,18 @@ public sealed class RepairCommands
         }
 
         return true;
+    }
+
+    private void ShowRefusal(string title, string message)
+    {
+        try
+        {
+            prompt.ShowError(title, message);
+        }
+        catch (Exception promptEx)
+        {
+            logger?.LogError(promptEx, "Could not show the refusal of '{Title}' to the user", title);
+        }
     }
 
     private void Fail(string title, string message, Exception ex)

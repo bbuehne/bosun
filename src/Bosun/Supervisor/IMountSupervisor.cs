@@ -157,7 +157,9 @@ public interface IMountSupervisor
     /// that was unparked becomes parked. A host the user parked earlier is not mounted, so there is
     /// nothing to drain, and it stays parked (still probed): ADR-015 lets only an explicit action on
     /// that host clear a park, and a repair click for some other problem is not one.
-    /// Refused (logged, no effect) while the system is suspended (Invariant I8 in reverse).
+    /// While the system is suspended (Invariant I8 in reverse) nothing is changed and the call throws
+    /// <see cref="RepairRefusedException"/> (bs-mhs), so the caller can tell the user instead of the click
+    /// appearing to succeed.
     /// </remarks>
     Task RepairAllAsync(CancellationToken cancellationToken = default);
 

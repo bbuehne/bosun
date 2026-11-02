@@ -339,6 +339,21 @@ public sealed class RepairCommandsTests
     }
 
     [Fact]
+    public async Task A_refused_Unmount_all_is_shown_with_its_reason_and_is_not_a_fault()
+    {
+        var h = new Harness();
+        h.Supervisor.RepairAllException = new RepairRefusedException("the system is suspended");
+
+        await h.Commands.UnmountAllAsync();
+
+        var error = Assert.Single(h.Prompt.Errors);
+        Assert.Equal("Unmount all & re-probe", error.Title);
+        Assert.Equal("Nothing was unmounted: the system is suspended.", error.Message);
+        Assert.DoesNotContain(h.Log.Entries, e => e.Level >= LogLevel.Warning);
+        Assert.False(h.Commands.IsUnmountingAll);
+    }
+
+    [Fact]
     public async Task A_stuck_Unmount_all_does_not_stop_the_user_restarting_Bosun()
     {
         var h = new Harness();

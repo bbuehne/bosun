@@ -40,7 +40,9 @@ public enum RepairActionKind
 /// </list>
 /// <para>
 /// <b>Dismiss</b> is offered, first, only when the top issue is <c>watchdog.restarted</c>: that notice
-/// is information, and the thing the user most plausibly wants to do with it is make it go away.
+/// is information, and the thing the user most plausibly wants to do with it is make it go away. When
+/// it is not the top issue it is listed under "N more", and the banner puts its own Dismiss there
+/// (bs-mhs), so the notice never has to wait out its 24 hours.
 /// </para>
 /// </remarks>
 public static class RepairActionPlan
@@ -62,7 +64,7 @@ public static class RepairActionPlan
             return [RepairActionKind.RestartRclone, RepairActionKind.UnmountAllAndReprobe, RepairActionKind.RestartBosun];
         }
 
-        if (topIssueCode == HealthIssueCodes.WatchdogRestarted)
+        if (IsDismissible(topIssueCode))
         {
             return
             [
@@ -75,6 +77,10 @@ public static class RepairActionPlan
 
         return [RepairActionKind.RestartBosun, RepairActionKind.RestartRclone, RepairActionKind.UnmountAllAndReprobe];
     }
+
+    /// <summary>Whether an issue with this code is a notice the user can dismiss (bs-mhs): offered on the
+    /// top issue by <see cref="ForIssue"/>, and on the same issue listed under "N more" by the banner.</summary>
+    public static bool IsDismissible(string code) => code == HealthIssueCodes.WatchdogRestarted;
 
     public static string Label(RepairActionKind kind) => kind switch
     {
