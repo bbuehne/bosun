@@ -37,6 +37,11 @@ public enum StatusCategory
     /// <summary>The host is not responding to reachability probes at all.</summary>
     Unreachable,
 
+    /// <summary>This host's own rclone remote could not be written (bs-qwv) -- see
+    /// <see cref="HostStatusRow.ProvisioningFailure"/>. Host-specific, so it is shown on the row and
+    /// not in the app-wide banner.</summary>
+    ProvisioningFailed,
+
     /// <summary><c>mount.mode = "none"</c> -- this host was never configured to have a mount.</summary>
     NotConfigured,
 
@@ -129,4 +134,9 @@ public sealed record HostStatusRow
 
     /// <summary>See <see cref="HostMountSnapshot.LastMountFailureReason"/> (bs-ww9.4).</summary>
     public string? LastMountFailureReason { get; init; }
+
+    /// <summary>Why <c>IRcloneRemoteProvisioner.EnsureRemoteAsync</c> failed for this host (bs-qwv), or
+    /// <see langword="null"/>. Always <see langword="null"/> for a <see cref="MountMode.None"/> host, which
+    /// mounts nothing and so has nothing to be blocked.</summary>
+    public string? ProvisioningFailure { get; init; }
 }

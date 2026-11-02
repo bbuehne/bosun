@@ -56,6 +56,12 @@ public sealed class StatusReadModel : IStatusReadModel
     private readonly TimeProvider timeProvider;
     private readonly ILogger<StatusReadModel> logger;
 
+    // bs-qwv: host key -> why that host's rclone remote could not be set up, read fresh on every
+    // poll from StartupReadiness.ProvisioningFailuresByHost. A function, not a copy, so a
+    // re-provision (rclone restart, config change) that clears or changes a failure is picked up on
+    // the next poll with no event wiring. Null means "no source" (tests, a host without startup).
+    private readonly Func<IReadOnlyDictionary<string, string>>? provisioningFailures;
+
     // bs-qcs: this runs every second, so a condition that persists must not log every second.
     private readonly RepeatingFaultLogger repeatingFaults;
 
@@ -67,8 +73,10 @@ public sealed class StatusReadModel : IStatusReadModel
         IHostConfigStore configStore,
         ISessionMonitor sessionMonitor,
         TimeProvider timeProvider,
-        ILogger<StatusReadModel> logger)
+        ILogger<StatusReadModel> logger,
+        Func<IReadOnlyDictionary<string, string>>? provisioningFailures = null)
     {
+        this.provisioningFailures = provisioningFailures;
         this.supervisor = supervisor;
         this.configStore = configStore;
         this.sessionMonitor = sessionMonitor;
@@ -106,6 +114,7 @@ public sealed class StatusReadModel : IStatusReadModel
         var snapshots = supervisor.GetSnapshot();
         var hosts = configStore.Current.Hosts;
         var sessionCounts = BuildSessionCounts(sessionMonitor.GetActiveSessions());
+        var failures = provisioningFailures?.Invoke();
 
         var rows = new List<HostStatusRow>(snapshots.Count);
         foreach (var snapshot in snapshots)
@@ -129,7 +138,9 @@ public sealed class StatusReadModel : IStatusReadModel
             logger.LogFaultRecovered(repeatingFaults, "status-drift:" + snapshot.HostKey, $"Status poll: {snapshot.HostKey}");
 
             var sessionCount = sessionCounts.GetValueOrDefault(snapshot.HostKey);
-            rows.Add(StatusDerivation.DeriveRow(snapshot, hostConfig, sessionCount));
+            string? provisioningFailure = null;
+            failures?.TryGetValue(snapshot.HostKey, out provisioningFailure);
+            rows.Add(StatusDerivation.DeriveRow(snapshot, hostConfig, sessionCount, provisioningFailure));
         }
 
         return new StatusSnapshot

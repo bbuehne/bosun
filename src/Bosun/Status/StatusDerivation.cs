@@ -26,12 +26,17 @@ namespace Bosun.Status;
 /// </remarks>
 public static class StatusDerivation
 {
-    public static HostStatusRow DeriveRow(HostMountSnapshot snapshot, HostConfig hostConfig, int sessionCount)
+    /// <param name="provisioningFailure">Why <c>IRcloneRemoteProvisioner.EnsureRemoteAsync</c> failed for
+    /// THIS host (bs-qwv), from <c>StartupReadiness.ProvisioningFailuresByHost</c>; <see langword="null"/>
+    /// when it did not fail or was never attempted. Host-specific by nature, so it appears only on this
+    /// host's row and never in the app-wide banner.</param>
+    public static HostStatusRow DeriveRow(
+        HostMountSnapshot snapshot, HostConfig hostConfig, int sessionCount, string? provisioningFailure = null)
     {
         var drive = hostConfig.Mount.Drive;
         var mode = hostConfig.Mount.Mode;
 
-        var (category, text) = DeriveCategoryAndText(snapshot, hostConfig, drive, mode);
+        var (category, text) = DeriveCategoryAndText(snapshot, hostConfig, drive, mode, provisioningFailure);
 
         return new HostStatusRow
         {
@@ -51,17 +56,28 @@ public static class StatusDerivation
             ConsecutiveIdleFailures = snapshot.ConsecutiveIdleFailures,
             ConsecutiveMountFailures = snapshot.ConsecutiveMountFailures,
             LastMountFailureReason = snapshot.LastMountFailureReason,
+            ProvisioningFailure = mode == MountMode.None ? null : provisioningFailure,
         };
     }
 
     private static (StatusCategory Category, string Text) DeriveCategoryAndText(
-        HostMountSnapshot snapshot, HostConfig hostConfig, string? drive, MountMode mode)
+        HostMountSnapshot snapshot, HostConfig hostConfig, string? drive, MountMode mode, string? provisioningFailure)
     {
         // Rung 0: mode = "none" is not one of the six causes at all -- there is no drive and never
         // will be. Checked first so nothing below has to special-case a null drive.
         if (mode == MountMode.None)
         {
             return (StatusCategory.NotConfigured, $"{hostConfig.DisplayName}: no mount configured");
+        }
+
+        // Rung 0b (bs-qwv): this host's rclone remote could not be written. Ahead of "mounted"
+        // because the case worth showing is exactly the dangerous one: a config change re-provisions
+        // the remote, that fails, and the supervisor remounts against the OLD remote (bs-0tn) -- the
+        // drive is up, so a plain "is mounted" would hide the one fact that says it may be serving
+        // the wrong machine. The not-mounted cases are handled at rung 3b.
+        if (provisioningFailure is not null && snapshot.State == MountState.Mounted)
+        {
+            return (StatusCategory.ProvisioningFailed, $"{drive} is mounted, but {ProvisioningFailureSentence(provisioningFailure)}");
         }
 
         // Rung 1: Mounted is unconditionally healthy. Nothing below can be simultaneously true in
@@ -102,6 +118,17 @@ public static class StatusDerivation
                 // rather than dropping the reason.
                 _ => $"{drive} is not mounted -- {reason}",
             });
+        }
+
+        // Rung 3b (bs-qwv): this host's rclone remote could not be set up. Below process-wide
+        // unavailability (which blocks every host and is the more fundamental statement) and below
+        // Parked (the user's own request), but ahead of reachability and mount-failure history: with
+        // no remote, no mount of this host can succeed however reachable it is, and unlike a probe
+        // failure it will not resolve itself -- it clears only on a successful re-provision (an rclone
+        // restart or a config change).
+        if (provisioningFailure is not null)
+        {
+            return (StatusCategory.ProvisioningFailed, $"{drive} is not mounted -- {ProvisioningFailureSentence(provisioningFailure)}");
         }
 
         // Rung 4: genuinely unreachable right now. Ahead of the mount-failure ladder (rung 5) on
@@ -152,6 +179,9 @@ public static class StatusDerivation
         return (StatusCategory.Pending, pendingText);
     }
 
+    private static string ProvisioningFailureSentence(string reason) =>
+        $"the rclone remote for this host could not be set up: {(string.IsNullOrWhiteSpace(reason) ? "unknown error" : reason)}";
+
     /// <summary>
     /// Aggregate health across every row, for the tray icon (ADR-012 Decision 3, bs-ww9.6). Derived
     /// from the exact same rows the status window renders so the two surfaces can never disagree.
@@ -198,6 +228,22 @@ public static class StatusDerivation
             if (row.Category == StatusCategory.MountFailing && row.Mode == MountMode.Persistent)
             {
                 return AggregateHealth.Error;
+            }
+
+            // bs-qwv: no rclone remote means a persistent host can never mount, and nothing retries
+            // it -- the same "asked for that drive at every login and is not getting it" case as
+            // MountFailing. A host that IS mounted (so its remote may be stale) is Degraded, and an
+            // on-demand host does not escalate at all (the failing click gives its own feedback).
+            if (row.Category == StatusCategory.ProvisioningFailed)
+            {
+                if (row.State == MountState.Mounted)
+                {
+                    sawDegraded = true;
+                }
+                else if (row.Mode == MountMode.Persistent)
+                {
+                    return AggregateHealth.Error;
+                }
             }
 
             if (row.Category == StatusCategory.Unreachable && row.Mode == MountMode.Persistent)

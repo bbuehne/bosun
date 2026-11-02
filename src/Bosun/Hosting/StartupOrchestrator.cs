@@ -706,7 +706,16 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             //
             // EnsureRemoteAsync is idempotent -- it reads the current remote and rewrites only on
             // difference -- so doing this on every config change costs one `config/get` per host.
-            await EnsureRemotesForChangedConfigAsync(config).ConfigureAwait(false);
+            var failures = await EnsureRemotesForChangedConfigAsync(config).ConfigureAwait(false);
+
+            // bs-qwv: publish the outcome, so a host whose remote could not be rewritten says so on
+            // its row, and a host fixed by this edit stops saying it. The startup and rcd-restart
+            // paths already replace the whole dictionary; this one used to only log, which left a
+            // stale "could not be set up" on screen after the user had fixed it.
+            if (failures is not null)
+            {
+                PublishReadiness(Current with { ProvisioningFailuresByHost = failures });
+            }
 
             await mountSupervisor!.ConfigChangedAsync(config, CancellationToken.None).ConfigureAwait(false);
         }
@@ -725,12 +734,16 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
     /// stale, which is bad, but abandoning the whole reload would also strand every other host's
     /// change — including a drive-letter change whose drain is the thing keeping Invariant I2.
     /// </summary>
-    private async Task EnsureRemotesForChangedConfigAsync(BosunConfig config)
+    private async Task<Dictionary<string, string>?> EnsureRemotesForChangedConfigAsync(BosunConfig config)
     {
         if (remoteProvisioner is null)
         {
-            return;
+            // Provisioning never ran (rclone was unhealthy at startup), so there is nothing to
+            // update; the rcd-became-healthy path will provision and publish.
+            return null;
         }
+
+        var failures = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var host in config.Hosts.Values)
         {
@@ -747,8 +760,11 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
                     "Could not re-provision the rclone remote for {HostKey} after a config change; it may mount " +
                     "against stale connection details until Bosun restarts",
                     host.Key);
+                failures[host.Key] = ex.Message;
             }
         }
+
+        return failures;
     }
 
     private void PublishReadiness(StartupReadiness readiness)
