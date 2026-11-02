@@ -162,7 +162,7 @@ Reject the whole config, keep the previous one, and surface the error if any of:
 **Note on "duplicate host key":** this cannot actually reach `ConfigValidator`.
 Tomlyn rejects a TOML document that redefines a table (`[hosts.jump]` appearing
 twice) at **parse** time, before binding — see
-`ConfigParserTests.Toml_DuplicateHostKey_IsRejectedRatherThanLastOneWinning`.
+`ConfigSchemaConformanceTests.Toml_DuplicateHostKey_IsRejectedRatherThanLastOneWinning`.
 It is listed here for completeness of the invariant ("no two hosts share an
 identity"), not because `ConfigValidator` contains, or should ever grow, code
 looking for it — that condition cannot occur by the time a `BosunConfig`
