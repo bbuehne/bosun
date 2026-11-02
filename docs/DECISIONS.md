@@ -1893,3 +1893,67 @@ nearly idle-expired would unmount soon after wake, which reads as a fault.
 
 *Leave it as it is.* Simple and safe, and declined by the maintainer: remounting by hand after
 every wake is the friction the on-demand tier was not meant to add.
+
+### Amendment (2026-11-01, bs-hrg): a local obstacle keeps the record
+
+**Context.** Decision 3 said the record is dropped "if that first probe does not reach `Ready`",
+and the implementation went further: it spent the record at the first probe whatever happened
+next. Independent testing found two cases where that loses the user's drive for a reason that
+has nothing to do with the host. If `rclone rcd` is restarting across the sleep, mounting is
+unavailable (`MountingAvailability`) when the probe reaches `Ready`, the remount is refused, and
+nothing ever retries it. If rcd has not answered `core/version` at the resume re-derivation
+(ADR-017's gate), the remount went ahead anyway, failed against the dead rcd, and was never
+retried. The maintainer decided on 2026-11-01 that both keep the record.
+
+**Amendment.**
+
+1. If the first post-resume probe reaches `Ready` but the remount cannot go ahead because
+   mounting is unavailable, the record is **kept** and the host rests in `Ready`.
+2. The same applies if `rclone rcd` failed ADR-017's `core/version` gate at resume. The remount
+   is not attempted against an rcd that has just failed to answer.
+3. When mounting becomes available again, or rcd answers again, the host is probed once more.
+   If that probe leaves it `Ready`, it is mounted as a click would be (deep probe first, I1).
+   If not, the record is dropped.
+4. Unchanged: a failed first probe for a host-side reason drops the record (decision 3). The
+   clear conditions of decision 5 still apply, and a user unmount or a mode change clears a
+   waiting record exactly as it clears one that is not yet probed. Nothing mounts while the
+   system is suspended (rule 5, `bs-bv0`); a suspension with a record waiting keeps the record
+   and resume resolves it.
+
+**How it is detected, and what I chose.** The supervisor keeps no new state machine edge. The
+record stays on the host's runtime; one flag, `rcdAnswering`, remembers whether the last
+`core/version` call succeeded. The gate "has cleared" when any of these happens:
+
+- `SetMountingAvailabilityAsync` goes from unavailable to available. This is the existing
+  "mounting became available" hook, which until now swept persistent hosts only. The startup
+  orchestrator calls it when WinFsp or rcd health changes, so it covers an rcd that restarted.
+- `OnRcloneRestartedAsync` runs. The supervisor does not take the report on trust: if the flag
+  says rcd failed the gate, it asks `core/version` again first.
+- The 30-second reconciliation tick finds `core/version` answering, but only while a record is
+  waiting and the flag says rcd failed the gate. This third route exists because rcd can stall
+  across a resume without exiting. Nothing then calls `OnRcloneRestartedAsync` or changes the
+  availability, and without the tick the record would wait indefinitely.
+- A network change or a resume re-derivation that finds `core/version` answering.
+
+In each case the sweep does nothing while any gate (suspended, unavailable, `rcdAnswering`) is
+still closed, so a host is never probed for a decision that cannot be taken. The re-probe is the
+ordinary in-place probe of rule 10; a `Ready` or `Unreachable` host is not sent through `Probing`.
+The record is cleared as the host enters `Mounting`. A remount whose own deep probe or
+`mount/mount` fails while mounting is available is therefore not retried, as before, and so is
+a deferred one.
+
+**Reading I chose, for the maintainer to confirm.** The amendment says that when mounting
+becomes available "the host is probed once more; if Ready, mount; otherwise drop the record".
+I read "a remount that fails while mounting is available" in the brief as outside it, because
+the amendment concerns obstacles that stop the attempt from being made. If the maintainer wants
+a failed deferred attempt retried, that is a further amendment.
+
+**Consequences.**
+
+- A record can now outlive the resume. It is held in memory only, and a Bosun restart still
+  drops it. It has no timeout: if mounting never becomes available, the record waits until the
+  user unmounts or remounts the host, changes its mode, or restarts Bosun. When it finally
+  resolves it is guarded by a fresh probe, so it cannot mount a host that is not reachable
+  now, but it can mount on a network the user has since moved to. That follows from the rule as decided; an expiry would be a further amendment.
+- `ARCHITECTURE.md` §4 rule 9a is updated.
+- No new state, transition or rc call. Only `IMountSupervisor` still calls `mount/mount`.

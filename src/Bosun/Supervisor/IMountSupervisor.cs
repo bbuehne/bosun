@@ -78,8 +78,11 @@ public interface IMountSupervisor
     /// </remarks>
     Task RequestMountAsync(string hostKey, CancellationToken cancellationToken = default);
 
-    /// <summary>User-triggered unmount. No-op (logged) unless the host is currently
-    /// <see cref="MountState.Mounting"/> or <see cref="MountState.Mounted"/>.</summary>
+    /// <summary>User-triggered unmount. A host that is not currently <see cref="MountState.Mounting"/>
+    /// or <see cref="MountState.Mounted"/> is not unmounted (logged, no drain) -- but in EVERY state
+    /// the call clears the host's ADR-022 remount record (docs/ARCHITECTURE.md §4 rule 9a): the
+    /// user said "take it down", so neither a suspend drain that is still running nor a remount
+    /// that is waiting for mounting to become available may bring the drive back.</summary>
     Task RequestUnmountAsync(string hostKey, CancellationToken cancellationToken = default);
 
     /// <summary>Explicit "retry now" (Backoff section reset trigger): resets backoff and forces
@@ -103,7 +106,15 @@ public interface IMountSupervisor
     /// <summary>Every previously-enabled host re-probes immediately, bypassing backoff
     /// (docs/ARCHITECTURE.md §4 rule 5, Backoff section). Exception: an on-demand host sitting in
     /// <see cref="MountState.Unreachable"/> is left dark, exactly as it is for the recurring ladder
-    /// (ADR-014) -- resume is a passive system event, not the user acting on this host.</summary>
+    /// (ADR-014) -- resume is a passive system event, not the user acting on this host.
+    /// <para>ADR-022 (rule 9a): an on-demand host the user had mounted when <see cref="SuspendAsync"/>
+    /// drained it is mounted again if its first post-resume probe reaches
+    /// <see cref="MountState.Ready"/> (<c>Ready -&gt; Mounting</c>, deep probe first). If mounting is
+    /// unavailable or <c>rclone rcd</c> fails ADR-017's <c>core/version</c> gate at that moment, the
+    /// remount is held back and the record kept (the ADR's 2026-11-01 amendment): the host is probed
+    /// once more and mounted when <see cref="SetMountingAvailabilityAsync"/> reopens the gate or
+    /// <see cref="OnRcloneRestartedAsync"/> / the reconciliation tick sees rcd answer. A first probe
+    /// that fails drops the record.</para></summary>
     Task ResumeAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Backoff resets and an immediate re-probe for every idle <see cref="MountState.Ready"/>
@@ -138,7 +149,10 @@ public interface IMountSupervisor
     /// <c>RcloneProcessStatus.Healthy</c> -- including the very first start. A restarted
     /// <c>rclone rcd</c> knows nothing about mounts this supervisor believes are up
     /// (<c>mount/listmounts</c> on the fresh process returns empty), so this reconciles every
-    /// host against reality immediately rather than waiting for the next tick.</summary>
+    /// host against reality immediately rather than waiting for the next tick. It is also the
+    /// "rcd answers again" signal for an ADR-022 remount record held back because rcd failed the
+    /// <c>core/version</c> gate at resume: the supervisor re-checks <c>core/version</c> itself and, if
+    /// rcd answers, re-probes and remounts the waiting hosts.</summary>
     Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -148,7 +162,9 @@ public interface IMountSupervisor
     /// this reports <see cref="MountingAvailability.IsAvailable"/> -- see the type's remarks. A
     /// transition from unavailable to available immediately attempts to mount every
     /// administratively-enabled, non-parked persistent host sitting in <see cref="MountState.Ready"/>,
-    /// so recovery (e.g. <c>rclone rcd</c> restarting) does not require an app restart.
+    /// so recovery (e.g. <c>rclone rcd</c> restarting) does not require an app restart. The same
+    /// transition also re-probes every on-demand host that holds an ADR-022 remount record
+    /// (docs/ARCHITECTURE.md §4 rule 9a) and mounts those that are still <c>Ready</c>.
     /// </summary>
     Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default);
 

@@ -141,13 +141,15 @@ public sealed class RemountAfterResumeTests
     }
 
     /// <summary>
-    /// <b>Protects:</b> decision 2 under the existing availability gate (bs-yvw.1). If mounting is
-    /// unavailable at wake the remount is refused like a click would be, and because the record is
-    /// spent, mounting becoming available later does not mount the host.
-    /// <b>Catches:</b> a record that outlives its one chance and mounts at some later, unrelated time.
+    /// <b>Protects:</b> decision 2 under the existing availability gate (bs-yvw.1), as amended on
+    /// 2026-11-01. If mounting is unavailable at wake the remount is refused like a click would be,
+    /// the record is KEPT, and when mounting becomes available the host is probed once more and
+    /// mounted.
+    /// <b>Catches:</b> a record spent by the refusal (an <c>rclone rcd</c> restart across a sleep
+    /// loses the user's drive), or a remount that is not made once the gate reopens.
     /// </summary>
     [Fact]
-    public async Task A_remount_refused_because_mounting_is_unavailable_is_not_made_later()
+    public async Task A_remount_refused_because_mounting_is_unavailable_is_made_when_it_returns()
     {
         var h = await UserMountedAsync();
         await h.SuspendAsync();
@@ -156,13 +158,15 @@ public sealed class RemountAfterResumeTests
 
         await h.ResumeAsync();
         Assert.Equal(MountState.Ready, h.State(Key));
-        Assert.Equal(1, h.Rclone.MountCount(Drive));
+        Assert.Equal(1, h.Rclone.MountCount(Drive)); // refused: no second mount/mount, no deep probe
+        Assert.Equal(1, h.Probe.DeepCount(Key));
 
         await h.RunAsync(() => h.Supervisor.SetMountingAvailabilityAsync(MountingAvailability.Available));
-        await h.AdvanceAsync(TimeSpan.FromHours(1));
 
-        Assert.Equal(MountState.Ready, h.State(Key));
-        Assert.Equal(1, h.Rclone.MountCount(Drive));
+        Assert.Equal(MountState.Mounted, h.State(Key));
+        Assert.Equal(2, h.Rclone.MountCount(Drive));
+        Assert.Equal(2, h.Probe.DeepCount(Key)); // the deep probe of the remount
+        Assert.Contains("ADR-022", h.Transitions(Key).Last(t => t.To == MountState.Mounting).Trigger);
     }
 
     // ------------------------------------------------------------------------------------------

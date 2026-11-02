@@ -441,19 +441,15 @@ public sealed class RemountIntentLifecycleTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// <b>Protects:</b> rule 9a "the gates of rule 5 and of the availability check apply unchanged"
-    /// and "a refused ... remount is not retried either": with mounting unavailable at resume the
-    /// first probe reaches <c>Ready</c>, the remount is refused (no <c>mount/mount</c>), and when
-    /// mounting becomes available again the on-demand host is NOT mounted (the availability sweep
-    /// covers persistent hosts only).
-    /// <b>Catches:</b> the remount bypassing the availability gate, or an on-demand host being swept
-    /// up when availability returns.
+    /// <b>Protects:</b> the ADR-022 amendment (2026-11-01, bs-hrg) for the availability gate: with
+    /// mounting unavailable at resume the first probe reaches <c>Ready</c>, the remount is NOT
+    /// attempted (no <c>mount/mount</c>, no deep probe) and the record is KEPT; when mounting becomes
+    /// available again the host is probed once more and, being <c>Ready</c>, mounted, deep probe first.
+    /// <b>Catches:</b> the old reading (the record spent by the first probe, so an <c>rclone rcd</c>
+    /// restart across a sleep loses the user's drive), and a remount that skips the deep probe.
     /// </summary>
-    /// <remarks>Spec note: this follows rule 9a's text; ADR-022 itself is silent on it. See the
-    /// delivery report -- an <c>rclone rcd</c> restarting across a resume would lose the user's
-    /// mount this way.</remarks>
     [Fact]
-    public async Task With_mounting_unavailable_at_resume_the_remount_is_refused_and_not_retried_when_it_returns()
+    public async Task With_mounting_unavailable_at_resume_the_record_is_kept_and_the_host_is_mounted_when_it_returns()
     {
         var h = await UserMountedOnDemandAsync();
         await h.SuspendAsync();
@@ -464,25 +460,27 @@ public sealed class RemountIntentLifecycleTests(ITestOutputHelper output)
         var resumeMark = h.LastMarkIndex("MARK|resume");
         Assert.Equal(0, MountsAfter(h, OnDemandDrive, resumeMark));
         Assert.Equal(MountState.Ready, h.State(OnDemandKey));
+        var probesWhileWaiting = h.Probe.ShallowCount(OnDemandHostname);
 
         await h.RunAsync(() => h.Supervisor.SetMountingAvailabilityAsync(MountingAvailability.Available));
-        await h.AdvanceAsync(TimeSpan.FromMinutes(10));
 
-        Assert.Equal(0, MountsAfter(h, OnDemandDrive, resumeMark));
-        Assert.Equal(MountState.Ready, h.State(OnDemandKey));
+        Assert.Equal(MountState.Mounted, h.State(OnDemandKey));
+        Assert.Equal(1, MountsAfter(h, OnDemandDrive, resumeMark));
+        Assert.Equal(probesWhileWaiting + 1, h.Probe.ShallowCount(OnDemandHostname));
+        AssertEveryMountPrecededByPassingDeepProbe(h, OnDemandKey, OnDemandDrive, resumeMark);
     }
 
     /// <summary>
-    /// <b>Protects:</b> I1 when <c>rclone rcd</c> does not answer <c>core/version</c> at resume
-    /// (ADR-017's gate). The ADR text does not say whether the remount waits for rcd, so this test
-    /// asserts only the invariants -- every mount after resume is preceded by a passing deep probe,
-    /// and the supervisor's belief matches the mount table -- and writes what happened to the test
-    /// output for the delivery report.
-    /// <b>Catches:</b> a remount that skips the deep probe (or mounts blind) because the resume path
-    /// short-circuited on the failed version call.
+    /// <b>Protects:</b> the amendment for ADR-017's gate, and I1: <c>rclone rcd</c> does not answer
+    /// <c>core/version</c> at resume. The remount is not attempted against it (no deep probe, no
+    /// <c>mount/mount</c>) for as long as rcd stays silent, and once rcd answers the host is probed
+    /// again and mounted exactly once, deep probe first. The recovery here is the supervisor's own
+    /// reconciliation tick: nothing else tells it that an rcd which merely stalled has recovered.
+    /// <b>Catches:</b> a remount that goes ahead against a dead rcd (the old reading), a record
+    /// spent while waiting, and a record that waits forever because nothing re-checks rcd.
     /// </summary>
     [Fact]
-    public async Task With_rcd_not_answering_core_version_at_resume_any_remount_still_follows_I1()
+    public async Task With_rcd_not_answering_core_version_at_resume_the_remount_waits_for_rcd_and_follows_I1()
     {
         var h = await UserMountedOnDemandAsync();
         await h.SuspendAsync();
@@ -490,52 +488,54 @@ public sealed class RemountIntentLifecycleTests(ITestOutputHelper output)
 
         await h.ResumeAsync();
         var resumeMark = h.LastMarkIndex("MARK|resume");
-        output.WriteLine($"after resume (version failing): {h.State(OnDemandKey)}; mounts since resume {MountsAfter(h, OnDemandDrive, resumeMark)}; version calls {h.Rc.VersionCalls}");
-        Assert.Equal(h.State(OnDemandKey) == MountState.Mounted, h.Rclone.FsAt(OnDemandDrive) is not null);
+        Assert.Equal(MountState.Ready, h.State(OnDemandKey));
+        Assert.Equal(0, MountsAfter(h, OnDemandDrive, resumeMark));
+        Assert.DoesNotContain(h.LogAfter(resumeMark), e => e.StartsWith($"deep|{OnDemandKey}|", StringComparison.Ordinal));
 
         await h.AdvanceAsync(TimeSpan.FromMinutes(2));
-        output.WriteLine($"2 min later (still failing): {h.State(OnDemandKey)}; mounts since resume {MountsAfter(h, OnDemandDrive, resumeMark)}");
+        Assert.Equal(MountState.Ready, h.State(OnDemandKey));
+        Assert.Equal(0, MountsAfter(h, OnDemandDrive, resumeMark));
 
         h.Rc.VersionFails = false;
-        await h.AdvanceAsync(TimeSpan.FromMinutes(5));
-        output.WriteLine($"5 min after rcd answers: {h.State(OnDemandKey)}; mounts since resume {MountsAfter(h, OnDemandDrive, resumeMark)}");
-        output.WriteLine(string.Join(Environment.NewLine, h.LogAfter(resumeMark).Take(40)));
-        output.WriteLine(h.TransitionDump());
+        await h.AdvanceAsync(TimeSpan.FromSeconds(31));
 
+        output.WriteLine(h.TransitionDump());
+        Assert.Equal(MountState.Mounted, h.State(OnDemandKey));
+        Assert.Equal(1, MountsAfter(h, OnDemandDrive, resumeMark));
         AssertEveryMountPrecededByPassingDeepProbe(h, OnDemandKey, OnDemandDrive, resumeMark);
         Assert.Equal(h.State(OnDemandKey) == MountState.Mounted, h.Rclone.FsAt(OnDemandDrive) is not null);
-        Assert.True(MountsAfter(h, OnDemandDrive, resumeMark) <= 1, "the remount happened more than once");
     }
 
     /// <summary>
-    /// <b>Protects:</b> rule 9a's "a refused or failed remount is not retried either" in the case the
-    /// ADR-017 gate makes likely: <c>rclone rcd</c> is not answering at resume, so the remount's
-    /// <c>mount/mount</c> fails. Once rcd answers again, nothing retries the on-demand drive.
-    /// <b>Catches:</b> an unbounded retry of the remount on the mount-retry ladder (the record
-    /// surviving a failed <c>mount/mount</c>).
+    /// <b>Protects:</b> the amendment's "rcd answers again" signal from the process owner: the
+    /// supervisor is told <c>rclone rcd</c> restarted and healthy (<c>OnRcloneRestartedAsync</c>,
+    /// which the startup orchestrator calls on <c>Healthy</c>). The record held back by the failed
+    /// gate is resolved at once, not at the next tick; and while rcd still does not answer
+    /// <c>core/version</c> that call changes nothing.
+    /// <b>Catches:</b> trusting the report without confirming it with <c>core/version</c>, and a
+    /// restart notification that leaves the record waiting for the 30 s tick.
     /// </summary>
-    /// <remarks>Spec note: this asserts rule 9a's literal text. ADR-022 itself does not distinguish a
-    /// remount that failed because of the HOST from one that failed because Bosun's own <c>rclone
-    /// rcd</c> was still coming back after the sleep; under this reading the second case silently
-    /// loses the user's mount. Flagged in the delivery report as a decision for the maintainer.</remarks>
     [Fact]
-    public async Task With_rcd_down_at_resume_a_failed_remount_is_not_retried_once_rcd_answers()
+    public async Task With_rcd_down_at_resume_the_remount_is_made_when_rcd_is_reported_healthy_and_answers()
     {
         var h = await UserMountedOnDemandAsync();
         await h.SuspendAsync();
         h.Rc.VersionFails = true;
-        h.Rclone.FailMount(OnDemandDrive, new HttpRequestException("rclone rcd is not answering"), times: 1);
 
         await h.ResumeAsync();
         var resumeMark = h.LastMarkIndex("MARK|resume");
-        Assert.Equal(1, MountsAfter(h, OnDemandDrive, resumeMark));
-        Assert.NotEqual(MountState.Mounted, h.State(OnDemandKey));
+        Assert.Equal(0, MountsAfter(h, OnDemandDrive, resumeMark));
+
+        await h.RunAsync(() => h.Supervisor.OnRcloneRestartedAsync());
+        Assert.Equal(MountState.Ready, h.State(OnDemandKey));
+        Assert.Equal(0, MountsAfter(h, OnDemandDrive, resumeMark));
 
         h.Rc.VersionFails = false;
-        await h.AdvanceAsync(TimeSpan.FromMinutes(10));
+        await h.RunAsync(() => h.Supervisor.OnRcloneRestartedAsync());
 
+        Assert.Equal(MountState.Mounted, h.State(OnDemandKey));
         Assert.Equal(1, MountsAfter(h, OnDemandDrive, resumeMark));
-        Assert.Equal(MountState.Ready, h.State(OnDemandKey));
+        AssertEveryMountPrecededByPassingDeepProbe(h, OnDemandKey, OnDemandDrive, resumeMark);
     }
 
     // ------------------------------------------------------------------------------------------

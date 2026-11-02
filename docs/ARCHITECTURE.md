@@ -433,7 +433,8 @@ right before building any UI.
    auto-mount applies. (Re-mounting an on-demand host that suspend dropped is rule 9a.)
 6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount. The one
    exception is ADR-022: an on-demand host the user mounted before a suspend is
-   mounted again after resume if its first post-resume probe reaches `Ready`.
+   mounted again after resume if its first post-resume probe reaches `Ready` (rule 9a
+   covers what happens when mounting is unavailable at that moment).
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
    `Mounted → Draining` after that period without filesystem activity.
 
@@ -473,23 +474,42 @@ right before building any UI.
       idle timeout, a repair, a config change, a failed mount, a deep probe after a
       network change) never sets the record. A `persistent` host is not noted; it
       comes back by its own tier rule (rule 6).
-    - **Spent by the first post-resume probe.** The record belongs to the host's
+    - **Resolved by the first post-resume probe.** The record belongs to the host's
       first probe after the suspend drain: the `Disabled → Probing` that resume
       runs, or, if the unmount had not yet confirmed at resume, the ordinary
-      re-enable that follows the drain. If that probe reaches `Ready`, the host
-      enters `Mounting` exactly as a user click would (rule 1; the deep probe of
-      rule 2 comes first, and the gates of rule 5 and of the availability check
-      apply unchanged). If it does not, the host is `Unreachable`, stays unmounted
-      and is not polled (rule 8's click still works); nothing mounts it later, on
-      whatever network the machine has moved to. The record is cleared when the
-      probe starts, so a refused or failed remount is not retried either.
+      re-enable that follows the drain. If that probe reaches `Ready` and nothing
+      local is in the way, the host enters `Mounting` exactly as a user click would
+      (rule 1; the deep probe of rule 2 comes first). If it does not reach `Ready`,
+      the host is `Unreachable`, stays unmounted and is not polled (rule 8's click
+      still works), and the record is dropped; nothing mounts it later, on whatever
+      network the machine has moved to.
+    - **Kept while something local is in the way** (ADR-022's amendment of
+      2026-11-01). If the probe reaches `Ready` but mounting is unavailable
+      (`MountingAvailability`: `rclone rcd` restarting, WinFsp missing), or `rclone
+      rcd` failed ADR-017's `core/version` gate at the resume re-derivation, or the
+      system is suspended again (rule 5), the remount is not attempted and the record
+      is **kept**. These are facts about this machine, not about the host, and say
+      nothing about whether the user still wants the drive. The host rests in
+      `Ready`. When the gate clears, the supervisor probes the host **once more**,
+      in place (rule 10: a `Ready` or `Unreachable` host does not go through
+      `Probing`): if that probe leaves it `Ready`, it enters `Mounting` as above, and
+      if not the record is dropped. The gate clears when `SetMountingAvailabilityAsync`
+      reports available, when `OnRcloneRestartedAsync` finds `core/version` answering,
+      or when a reconciliation tick finds it answering; and a resume after a second
+      sleep resolves it with its own re-probe. A closed gate never causes a probe, and
+      nothing mounts while suspended (rule 5).
+    - **A remount attempt spends the record.** It is cleared as the host enters
+      `Mounting`, so a remount whose own deep probe or `mount/mount` fails while
+      mounting is available is not retried, and a user click that mounts the host
+      first supersedes the record.
     - **The idle timer starts fresh.** The remount is a new mount (rule 7), so
       `idle_unmount_seconds` counts from it, not from the time already idle before
       the sleep.
-    - **Cleared by** the remount, a user unmount (including a click while the
-      suspend drain is still running), the host's mode changing, the host being
-      removed from the config, or Bosun restarting. It is never persisted, and a
-      network change neither spends nor sets it.
+    - **Cleared by** the remount attempt, a failed first probe, a user unmount
+      (including a click while the suspend drain is still running, and a click while
+      the record waits), the host's mode changing, the host being removed from the
+      config, or Bosun restarting. It is never persisted, and a network change
+      neither spends nor sets it.
 
     No new transition: the path is `Disabled → Probing → Ready → Mounting`, which
     rules 1, 2 and 10 already describe.

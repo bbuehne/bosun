@@ -122,6 +122,16 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// does (docs/ARCHITECTURE.md §5: "UI reads a snapshot").</summary>
     private MountingAvailability mountingAvailability = MountingAvailability.Available;
 
+    /// <summary>ADR-022 amendment (bs-hrg): whether <c>rclone rcd</c> last answered
+    /// <c>core/version</c>. False only after ADR-017's re-derivation gate failed
+    /// (<see cref="ReDeriveAfterTransitionAsync"/>); set true again by the next successful gate, by
+    /// <see cref="OnRcloneRestartedAsync"/> and by the reconciliation tick
+    /// (<see cref="ReconcileTickAsync"/>). It gates ONLY the deferred remount
+    /// (<see cref="ResolveRemountRecordAsync"/>): a remount is not attempted against an rcd that
+    /// has just failed to answer, because the attempt could only fail and the record would be lost.
+    /// Starts true so everything that never fails the gate is unaffected.</summary>
+    private bool rcdAnswering = true;
+
     /// <summary>
     /// Bounded transition history backing <see cref="GetTransitionHistory"/> (bs-ww9.2). Every
     /// entry is written by <see cref="RecordTransition"/>, called only from
@@ -218,18 +228,28 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         /// <summary>ADR-022 (bs-hrg): set by <see cref="SuspendAsync"/> on an ON-DEMAND host that was
         /// <see cref="MountState.Mounted"/> or <see cref="MountState.Mounting"/> when suspend arrived,
-        /// i.e. a drive the user mounted that the suspend drain is about to take down. Consumed by
-        /// the FIRST <see cref="EnableHostAsync"/> after resume: if that probe reaches
-        /// <see cref="MountState.Ready"/> the host is mounted again through <c>Ready -&gt; Mounting</c>
-        /// exactly as a click would (<see cref="OnEnteredReadyAsync"/>); if it does not, the record is
-        /// simply gone and the host stays unmounted. Deliberately in memory only, and deliberately not
-        /// part of <see cref="HostMountSnapshot"/> (nothing in the UI needs it). Scope is suspend only:
-        /// no other drain cause sets it. Cleared by that consumption, a user unmount
-        /// (<see cref="RequestUnmountAsync"/>), the host being removed or changing mode
-        /// (<see cref="ApplyHostConfigChangeAsync"/>), and the app restarting (a new process starts
-        /// with every record false). A host removed from config needs no clearing of its own: its
-        /// runtime is evicted (<see cref="RemoveFromSupervision"/>), record and all, and a host later
-        /// added under the same key gets a fresh one.</summary>
+        /// i.e. a drive the user mounted that the suspend drain is about to take down. Resolved by the
+        /// FIRST <see cref="EnableHostAsync"/> after resume: if that probe reaches
+        /// <see cref="MountState.Ready"/> and nothing LOCAL is in the way, the host is mounted again
+        /// through <c>Ready -&gt; Mounting</c> exactly as a click would
+        /// (<see cref="ResolveRemountRecordAsync"/>); if the probe fails, the record is dropped and the
+        /// host stays unmounted.
+        /// <para>The amendment (2026-11-01, bs-hrg): when something process-wide and local is in the way
+        /// -- mounting unavailable (<see cref="MountingAvailability"/>), <c>rclone rcd</c> not answering
+        /// <c>core/version</c> at the resume re-derivation (<see cref="rcdAnswering"/>), or the system
+        /// suspended again -- the record is KEPT and the host rests in <c>Ready</c>.
+        /// <see cref="SweepDeferredRemountsAsync"/> re-probes it once those clear; Ready then mounts
+        /// (<c>TryBeginMountAsync</c>, deep probe first) and anything else drops the record.</para>
+        /// <para>Deliberately in memory only, and deliberately not part of
+        /// <see cref="HostMountSnapshot"/> (nothing in the UI needs it). Scope is suspend only: no
+        /// other drain cause sets it. Cleared by: the remount attempt (it is cleared as the host enters
+        /// <c>Mounting</c>, so a remount whose own deep probe or <c>mount/mount</c> fails is not
+        /// retried, and neither is a user click that mounts the host first), a failed or
+        /// unreachable resolving probe, a user unmount (<see cref="RequestUnmountAsync"/>), the host
+        /// being removed or changing mode (<see cref="ApplyHostConfigChangeAsync"/>), and the app
+        /// restarting (a new process starts with every record false). A host removed from config needs
+        /// no clearing of its own: its runtime is evicted (<see cref="RemoveFromSupervision"/>),
+        /// record and all, and a host later added under the same key gets a fresh one.</para></summary>
         public bool RemountAfterResume;
 
         public int ConsecutiveMountedFailures;
@@ -582,6 +602,11 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                     host.Backoff = BackoffState.Initial;
                     await ForceImmediateIdleProbeAsync(host, "resume: bypass backoff", ct).ConfigureAwait(false);
 
+                    // ADR-022 amendment: a remount record kept across an earlier gate (a second sleep
+                    // while mounting was unavailable) is resolved by this fresh probe.
+                    await ResolveRemountRecordAsync(host, "resume: kept remount record (ADR-022)", ct)
+                        .ConfigureAwait(false);
+
                     // bs-bv0: a persistent host can be sitting in Ready un-mounted because the suspend
                     // gate in TryBeginMountAsync held its auto-mount back (it came up while suspended).
                     // A Ready host's probe success is an in-place probe -- it does not re-run
@@ -610,6 +635,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
                     host.Backoff = BackoffState.Initial;
                     await ForceImmediateIdleProbeAsync(host, "resume: bypass backoff", ct).ConfigureAwait(false);
+                    await ResolveRemountRecordAsync(host, "resume: kept remount record (ADR-022)", ct)
+                        .ConfigureAwait(false);
                     break;
                 default:
                     // Mounted was already handled above by ReDeriveAfterTransitionAsync (ADR-017),
@@ -643,6 +670,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             host.Backoff = BackoffState.Initial;
             await ForceImmediateIdleProbeAsync(host, "network change: bypass backoff", ct).ConfigureAwait(false);
         }
+
+        // ADR-022 amendment: the re-derivation above may have been the first time rcd answered since
+        // it failed the gate at resume. A no-op unless a record is waiting and every gate is open.
+        await SweepDeferredRemountsAsync("network change", ct).ConfigureAwait(false);
     }, cancellationToken);
 
     public Task RepairAllAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
@@ -703,7 +734,20 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     }, cancellationToken);
 
     public Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default) =>
-        EnqueueAndWait(ct => ReconcileAsync(ct), cancellationToken);
+        EnqueueAndWait(async ct =>
+        {
+            await ReconcileAsync(ct).ConfigureAwait(false);
+
+            // ADR-022 amendment: the caller reports rcd healthy again, which is the "rcd answers
+            // again" signal for a remount record held back by a failed core/version gate. Confirm it
+            // with the same call the gate uses rather than taking the report on trust.
+            if (!rcdAnswering)
+            {
+                await TryVerifyRcdAsync(ct).ConfigureAwait(false);
+            }
+
+            await SweepDeferredRemountsAsync("rclone restarted", ct).ConfigureAwait(false);
+        }, cancellationToken);
 
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>
         EnqueueAndWait(async ct =>
@@ -729,6 +773,11 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 {
                     await TryBeginMountAsync(host, "mounting became available", ct).ConfigureAwait(false);
                 }
+
+                // ADR-022 amendment: an on-demand host holding a remount record (the user's drive,
+                // which a suspend took down while mounting was unavailable) is re-probed and mounted
+                // here. On-demand hosts without a record still need no sweep (see above).
+                await SweepDeferredRemountsAsync("mounting became available", ct).ConfigureAwait(false);
             }
             else if (!availability.IsAvailable && wasAvailable)
             {
@@ -1128,12 +1177,12 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
 
         // ADR-022 decisions 2 and 3: the remount record belongs to THIS probe, the first one after the
-        // suspend drain, and is spent whichever way it goes. Taken before the probe so nothing later
-        // (a failed probe, a refused mount, a failed mount) can leave it behind to fire on some
-        // later, unrelated arrival at Ready. Only an on-demand host honours it: a mode change clears
-        // it already, so the mode test is belt and braces for a persistent host, which mounts itself.
-        var remountAfterResume = host.RemountAfterResume && host.Config.Mount.Mode == MountMode.OnDemand;
-        host.RemountAfterResume = false;
+        // suspend drain. A failed probe drops it (below). A successful one hands it to
+        // OnEnteredReadyAsync -> ResolveRemountRecordAsync, which mounts, or, under the 2026-11-01
+        // amendment, KEEPS it while something local is in the way (mounting unavailable, rcd not
+        // answering core/version). Only an on-demand host honours it: a mode change clears it
+        // already, so the mode test is belt and braces for a persistent host, which mounts itself.
+        var hadRemountRecord = host.RemountAfterResume && host.Config.Mount.Mode == MountMode.OnDemand;
 
         SetState(host, MountState.Probing, trigger);
 
@@ -1144,7 +1193,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         {
             host.Backoff = BackoffState.Initial;
             SetState(host, MountState.Ready, $"initial probe succeeded ({trigger})");
-            await OnEnteredReadyAsync(host, remountAfterResume, ct).ConfigureAwait(false);
+            await OnEnteredReadyAsync(host, ct).ConfigureAwait(false);
         }
         else
         {
@@ -1152,8 +1201,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             SetState(host, MountState.Unreachable, $"initial probe failed: {result.Outcome} ({trigger})");
             ArmIdleProbeTimer(host);
 
-            if (remountAfterResume)
+            if (hadRemountRecord)
             {
+                // A host-side reason (the host did not answer): the amendment does not touch this.
+                host.RemountAfterResume = false;
                 logger.LogInformation(
                     "Not remounting {HostKey} after resume: its first post-resume probe failed ({Outcome}); the " +
                     "record is dropped and the host stays unmounted until the user mounts it (ADR-022)",
@@ -1175,7 +1226,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// a network change), exactly as rule 6 intends; it only skips the one arrival immediately
     /// following the user's own "take it down" instruction.
     /// </remarks>
-    private async Task OnEnteredReadyAsync(HostRuntime host, bool remountAfterResume, CancellationToken ct)
+    private async Task OnEnteredReadyAsync(HostRuntime host, CancellationToken ct)
     {
         if (host.Config.Mount.Mode == MountMode.Persistent && !host.UserParked)
         {
@@ -1186,14 +1237,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 return;
             }
         }
-        else if (remountAfterResume)
+        else if (host.RemountAfterResume)
         {
             // ADR-022 decision 2: an on-demand drive the user had up before the suspend. The probe that
             // just put the host in Ready is the fresh evidence I1 asks for, and TryBeginMountAsync
-            // still deep-probes before mount/mount, exactly as for a click. Its gates apply unchanged:
-            // if mounting is unavailable it refuses and the host rests in Ready (the record is already
-            // spent, so nothing retries it later).
-            await TryBeginMountAsync(host, "remount after resume: user-mounted before suspend (ADR-022)", ct)
+            // still deep-probes before mount/mount, exactly as for a click. Under the amendment, a
+            // local gate that is closed (mounting unavailable, rcd not answering, suspended) keeps
+            // the record and the host rests in Ready until SweepDeferredRemountsAsync re-probes it.
+            await ResolveRemountRecordAsync(host, "remount after resume: user-mounted before suspend (ADR-022)", ct)
                 .ConfigureAwait(false);
             if (host.State != MountState.Ready)
             {
@@ -1202,6 +1253,117 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
 
         ArmIdleProbeTimer(host);
+    }
+
+    /// <summary>
+    /// ADR-022 and its 2026-11-01 amendment (bs-hrg): decides what becomes of a remount record for a
+    /// host that has JUST had a fresh shallow probe. The caller supplies the probe; this method never
+    /// probes (so a Ready host is re-probed in place, rule 10, never through <c>Probing</c>).
+    /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item>A local gate is closed -- the system is suspended, mounting is unavailable
+    /// (<see cref="mountingAvailability"/>), or <c>rclone rcd</c> did not answer <c>core/version</c>
+    /// (<see cref="rcdAnswering"/>): the record is KEPT and nothing else happens. These are
+    /// properties of this machine, not of the host, so they say nothing about whether the user still
+    /// wants the drive. <see cref="SweepDeferredRemountsAsync"/> picks the record up when they clear.</item>
+    /// <item>Gates open and the host is <see cref="MountState.Unreachable"/>: the record is dropped.
+    /// The host is the problem, and ADR-022 decision 3 stands: nothing mounts it later, on whatever
+    /// network the machine has moved to.</item>
+    /// <item>Gates open and the host is <see cref="MountState.Ready"/>: the record is spent and the
+    /// host mounts exactly as a click would, through <see cref="TryBeginMountAsync"/> (Ready only, deep
+    /// probe first, I1). That attempt is not retried if it fails while mounting is available.</item>
+    /// </list>
+    /// </remarks>
+    private async Task ResolveRemountRecordAsync(HostRuntime host, string trigger, CancellationToken ct)
+    {
+        if (!host.RemountAfterResume)
+        {
+            return;
+        }
+
+        if (host.Config.Mount.Mode != MountMode.OnDemand)
+        {
+            host.RemountAfterResume = false;
+            return;
+        }
+
+        if (suspended || !mountingAvailability.IsAvailable || !rcdAnswering)
+        {
+            logger.LogInformation(
+                "Keeping the remount record for {HostKey} ({Trigger}): {Gate}; the host will be re-probed once " +
+                "that clears and mounted if it is still reachable (ADR-022 amendment)",
+                host.Key,
+                trigger,
+                suspended ? "the system is suspended"
+                    : !mountingAvailability.IsAvailable ? $"mounting is unavailable ({mountingAvailability.Reason})"
+                    : "rclone rcd did not answer core/version");
+            return;
+        }
+
+        if (host.State == MountState.Unreachable)
+        {
+            host.RemountAfterResume = false;
+            logger.LogInformation(
+                "Dropping the remount record for {HostKey} ({Trigger}): the host did not answer its probe, so it " +
+                "stays unmounted until the user mounts it (ADR-022)",
+                host.Key, trigger);
+            return;
+        }
+
+        if (host.State == MountState.Ready)
+        {
+            await TryBeginMountAsync(host, trigger, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// ADR-022 amendment (bs-hrg): a gate that kept a remount record has cleared, so every on-demand
+    /// host still holding one is probed once more, in place, and then resolved
+    /// (<see cref="ResolveRemountRecordAsync"/>): <c>Ready</c> mounts, anything else drops the record.
+    /// A no-op while any gate is still closed, so a host is never probed for a decision that cannot
+    /// be taken. Called from every place a gate can open: <see cref="SetMountingAvailabilityAsync"/>,
+    /// <see cref="OnRcloneRestartedAsync"/>, <see cref="ReconcileTickAsync"/>, and
+    /// <see cref="NetworkChangedAsync"/>.
+    /// </summary>
+    private async Task SweepDeferredRemountsAsync(string trigger, CancellationToken ct)
+    {
+        if (suspended || !mountingAvailability.IsAvailable || !rcdAnswering)
+        {
+            return;
+        }
+
+        foreach (var host in hosts.Values
+            .Where(h => h.RemountAfterResume
+                && h.AdministrativelyEnabled
+                && h.Config.Mount.Mode == MountMode.OnDemand
+                && h.State is MountState.Ready or MountState.Unreachable)
+            .ToList())
+        {
+            host.Backoff = BackoffState.Initial;
+            await ForceImmediateIdleProbeAsync(host, $"{trigger}: re-probe before the deferred remount (ADR-022)", ct)
+                .ConfigureAwait(false);
+            await ResolveRemountRecordAsync(host, $"deferred remount after {trigger} (ADR-022)", ct)
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Asks <c>rclone rcd</c> for <c>core/version</c> and records the answer in
+    /// <see cref="rcdAnswering"/>. Only for the paths that wait on a failed ADR-017 gate.</summary>
+    private async Task<bool> TryVerifyRcdAsync(CancellationToken ct)
+    {
+        try
+        {
+            await rcloneClient.GetVersionAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "rclone rcd still does not answer core/version");
+            return false;
+        }
+
+        rcdAnswering = true;
+        return true;
     }
 
     /// <summary>The recurring shallow-probe check while idle (docs/ARCHITECTURE.md §3: "the
@@ -1227,7 +1389,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             if (wasUnreachable)
             {
                 SetState(host, MountState.Ready, $"probe succeeded ({trigger})");
-                await OnEnteredReadyAsync(host, remountAfterResume: false, ct).ConfigureAwait(false);
+                await OnEnteredReadyAsync(host, ct).ConfigureAwait(false);
                 return;
             }
         }
@@ -1345,6 +1507,11 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 host.Key, mountingAvailability.Reason);
             return;
         }
+
+        // ADR-022: the remount record is spent by the mount attempt itself, however it ends. A
+        // remount whose own deep probe or mount/mount fails while mounting IS available is not
+        // retried, and a click that mounts the host while a record waits supersedes the record.
+        host.RemountAfterResume = false;
 
         SetState(host, MountState.Mounting, trigger);
         host.ProbeTimer?.Dispose();
@@ -2093,7 +2260,26 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     {
         reconciliationTimer?.Dispose();
         reconciliationTimer = timeProvider.CreateTimer(
-            _ => Enqueue(ReconcileAsync), null, ReconciliationInterval, ReconciliationInterval);
+            _ => Enqueue(ReconcileTickAsync), null, ReconciliationInterval, ReconciliationInterval);
+    }
+
+    /// <summary>The periodic reconciliation, plus (ADR-022 amendment) the one place the supervisor
+    /// notices on its own that <c>rclone rcd</c> is answering again after failing ADR-017's gate:
+    /// only while a remount record is waiting and <see cref="rcdAnswering"/> is false does it spend
+    /// a <c>core/version</c> call per tick, and a successful one sweeps the waiting records.
+    /// Needed because nothing tells the supervisor an rcd that merely stalled across a resume has
+    /// recovered: neither <see cref="OnRcloneRestartedAsync"/> nor an availability change fires
+    /// for a process that never exited.</summary>
+    private async Task ReconcileTickAsync(CancellationToken ct)
+    {
+        await ReconcileAsync(ct).ConfigureAwait(false);
+
+        if (!rcdAnswering
+            && hosts.Values.Any(h => h.RemountAfterResume)
+            && await TryVerifyRcdAsync(ct).ConfigureAwait(false))
+        {
+            await SweepDeferredRemountsAsync("reconciliation tick: rclone rcd answers again", ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -2199,9 +2385,12 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         try
         {
             await rcloneClient.GetVersionAsync(ct).ConfigureAwait(false);
+            rcdAnswering = true;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // ADR-022 amendment: remembered, so a remount record is not spent against a dead rcd.
+            rcdAnswering = false;
             logger.LogWarning(
                 ex,
                 "Re-derivation after {Trigger} skipped: rclone rcd did not answer core/version. Cannot " +
