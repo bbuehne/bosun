@@ -15,8 +15,8 @@ namespace Bosun.SystemEventIntegration;
 /// <c>NetworkChange.NetworkAddressChanged</c> fires several times for one physical transition --
 /// adapter down, DHCP release/renew, adapter up -- because Windows raises one notification per
 /// intermediate link-layer state, not one per "the network changed" from a user's point of view.
-/// Docking a laptop can produce a burst of four or five raw events within well under a second. That
-/// burst is a property of <c>NetworkChange</c> itself, not of anything the consumer of this
+/// A link flap or an adapter reset can produce a burst of four or five raw events within well
+/// under a second. That burst is a property of <c>NetworkChange</c> itself, not of anything the consumer of this
 /// interface does with the result -- every current and future subscriber of
 /// <see cref="ISystemEventSource.NetworkAddressChanged"/> would otherwise have to reimplement the
 /// same debounce independently. So the debounce is applied once, here, and everything downstream

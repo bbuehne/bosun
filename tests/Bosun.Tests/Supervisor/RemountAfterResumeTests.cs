@@ -464,7 +464,7 @@ public sealed class RemountAfterResumeTests
     /// <summary>
     /// <b>Protects:</b> decision 6. A drive drained because its host failed a deep probe after a
     /// network change comes back to <c>Ready</c> only (rule 6), and a later sleep does not make it a
-    /// remount candidate because it was not mounted when the lid closed.
+    /// remount candidate because it was not mounted when the machine suspended.
     /// <b>Catches:</b> a record set by every drain rather than by the suspend sweep.
     /// </summary>
     [Fact]
@@ -565,7 +565,7 @@ public sealed class RemountAfterResumeTests
 
     /// <summary>
     /// <b>Protects:</b> a second suspend before the first remount completed (resume while draining,
-    /// then the lid closes again before the drain confirms). The record neither doubles nor is lost:
+    /// then the machine suspends again before the drain confirms). The record neither doubles nor is lost:
     /// after the next resume the host is remounted exactly once.
     /// <b>Catches:</b> a second suspend that clears the record, or a remount while still suspended.
     /// </summary>

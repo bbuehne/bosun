@@ -84,9 +84,9 @@ public sealed class SuspendResumeNetworkTests
     /// <summary>
     /// ADR-014 splits the RECURRING ladder by tier -- it does NOT split resume. Resume force-probes
     /// every enabled host, on-demand included: it is one bounded probe per host, not the continuous
-    /// traffic ADR-014's cost argument is about, and OPERATIONS.md T2 turns on exactly this. Bug
+    /// traffic ADR-014's cost argument is about, and OPERATIONS.md T1 and T2 turn on exactly this. Bug
     /// this catches: over-applying the tier split to resume, which leaves an on-demand row showing
-    /// a stale Unreachable after the machine has moved networks -- confidently wrong, which is worse
+    /// a stale Unreachable after the machine has woken or its network has returned -- confidently wrong, which is worse
     /// than ADR-008's "unknown until acted on".
     /// </summary>
     [Fact]
@@ -124,7 +124,7 @@ public sealed class SuspendResumeNetworkTests
     }
 
     /// <summary>Same reasoning as <see cref="Resume_force_probes_an_Unreachable_on_demand_host_too"/>,
-    /// for the network-change trigger -- the event a dock or an undock actually raises.</summary>
+    /// for the network-change trigger -- the event a link loss and recovery actually raises (T2).</summary>
     [Fact]
     public async Task NetworkChanged_force_probes_an_Unreachable_on_demand_host_too()
     {

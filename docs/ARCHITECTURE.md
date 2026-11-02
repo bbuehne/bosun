@@ -617,15 +617,16 @@ An `Unreachable` host's next probe, which runs in place (rule 10), is paced by t
 configured backoff ladder, default
 `[5, 15, 30, 60, 300]` seconds, holding at the last value. Backoff is **reset to
 zero** by a network address change, a power resume, or an explicit user "retry
-now". This is what makes the dock/undock experience feel immediate rather than
-sluggish.
+now". This is what makes recovery after a resume or a network interruption feel
+immediate rather than sluggish.
 
 **The ladder runs for `persistent` hosts only.** An **on-demand** host in
 `Unreachable` is not polled at all; it stays dark until the user acts, and rule 8
 is what makes that safe. This is what makes ADR-008's and ADR-011's promise —
 "on-demand hosts generate no traffic until the user mounts one" — literally true
 rather than approximately true. Persistent hosts must keep polling: that is the
-mechanism by which a drive returns on its own, which is `docs/OPERATIONS.md` T2.
+mechanism by which a drive returns on its own, which `docs/OPERATIONS.md` T1 (the
+wake where the network is not up yet) and T2 (the link coming back) both exercise.
 See ADR-014.
 
 **Resume and network change do NOT inherit the tier split.** They reset backoff and
@@ -634,15 +635,15 @@ force an immediate probe for **every enabled host**, on-demand included. Only th
 
 The distinction is scale, not principle. ADR-014's stated cost is that polling
 hosts the user is not using "makes the UI slow and the auth logs noisy" — an
-argument about *continuous* traffic, every rung, forever. A resume or a dock is a
-rare, bounded event producing exactly one probe per host. That cost is not the
+argument about *continuous* traffic, every rung, forever. A resume or a network
+change is a rare, bounded event producing exactly one probe per host. That cost is not the
 cost ADR-014 was avoiding.
 
 And suppressing it would defeat the thing the reset exists for. `docs/OPERATIONS.md`
-T2 — close the lid on one network, open it on another — is the acceptance test that
-matters, and an on-demand host still displaying a stale `Unreachable` after the
-machine has moved networks is precisely the sluggishness this section says the
-reset eliminates. ADR-008 says on-demand rows "render as unknown until acted on";
+T1 (overnight sleep) and T2 (network interruption) are the acceptance tests that
+matter, and an on-demand host still displaying a stale `Unreachable` after the
+machine has woken, or its network has come back, is precisely the sluggishness this
+section says the reset eliminates. ADR-008 says on-demand rows "render as unknown until acted on";
 a host that is *known-stale* is a worse answer than one that is unknown.
 
 `mode = "none"` hosts remain untouched: they are not enabled, and are never probed.

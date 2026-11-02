@@ -14,8 +14,7 @@ namespace Bosun.Tests.SystemEventIntegration.Independent;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Why this matters more than the laptop-docking story the code comments tell: on a desktop the
-/// event that fires is a <b>network interruption</b> -- the switch reboots, the ISP blips, the NIC
+/// Why this matters on a desktop: the event that fires is a <b>network interruption</b> -- the switch reboots, the ISP blips, the NIC
 /// renegotiates -- and each of those raises a burst of raw notifications too. Downstream, one
 /// coalesced event costs a forced probe of every idle host <i>and</i> every mounted host
 /// (<c>MountSupervisor.NetworkChangedAsync</c>), so over-firing during a flap is a probe storm

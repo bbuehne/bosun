@@ -715,6 +715,14 @@ to avoid, and on-demand hosts are frequently the ones that are off.
   server is off. That is intended: it is what makes the drive come back without
   the user doing anything.
 
+**Note (2026-11-02, `bs-brb`): the test this ADR cites was rewritten.** Decision 1 above
+says persistent polling is "`docs/OPERATIONS.md` T2". When this ADR was accepted, T2 was the
+laptop test "close the lid on one network, open it on another". `bs-aya` replaced it (see
+ADR-001's amendment): T1 is now an overnight sleep and T2 a network interruption. The decision
+is unchanged. The behaviour it names, a persistent host returning on its own once its server is
+reachable again, is now exercised by T1 (a wake before the network is up) and by T2 (the link
+coming back).
+
 
 ---
 
@@ -2017,3 +2025,7 @@ record that is not waiting (the first probe resolved it) never meets the limit.
   sooner by any clear condition.
 - One more in-memory field per host (the deadline). Not persisted, not in `HostMountSnapshot`.
 - `ARCHITECTURE.md` §4 rule 9a is updated. No new state, transition or rc call.
+
+**Note (2026-11-02, `bs-brb`):** the Context's "closing the lid" is the laptop-era phrasing
+ADR-001's amendment retracted. On the desktop this runs on, the event is the machine going to
+sleep; the Decision is unchanged.
