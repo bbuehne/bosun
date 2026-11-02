@@ -104,9 +104,12 @@ public interface IMountSupervisor
     Task SuspendAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Every previously-enabled host re-probes immediately, bypassing backoff
-    /// (docs/ARCHITECTURE.md §4 rule 5, Backoff section). Exception: an on-demand host sitting in
-    /// <see cref="MountState.Unreachable"/> is left dark, exactly as it is for the recurring ladder
-    /// (ADR-014) -- resume is a passive system event, not the user acting on this host.
+    /// (docs/ARCHITECTURE.md §4 rule 5, Backoff section). That includes an on-demand host sitting in
+    /// <see cref="MountState.Unreachable"/>: ADR-014's "stays dark" applies to the RECURRING backoff
+    /// ladder only. Resume is one bounded probe per host, and leaving an on-demand row showing a stale
+    /// <c>Unreachable</c> after the machine has changed networks is the sluggishness the reset exists
+    /// to remove (docs/ARCHITECTURE.md §4 "Resume and network change do NOT inherit the tier split";
+    /// pinned by <c>Resume_force_probes_an_Unreachable_on_demand_host_too</c>).
     /// <para>ADR-022 (rule 9a): an on-demand host the user had mounted when <see cref="SuspendAsync"/>
     /// drained it is mounted again if its first post-resume probe reaches
     /// <see cref="MountState.Ready"/> (<c>Ready -&gt; Mounting</c>, deep probe first). If mounting is
@@ -118,12 +121,13 @@ public interface IMountSupervisor
     Task ResumeAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Backoff resets and an immediate re-probe for every idle <see cref="MountState.Ready"/>
-    /// host, and for every idle <see cref="MountState.Unreachable"/> host whose mount mode is
-    /// <c>persistent</c>; an immediate forced probe for every <see cref="MountState.Mounted"/> host
-    /// too (E6 bullet: "force-probe mounted hosts"). Does NOT touch <see cref="MountState.Disabled"/>
-    /// hosts -- a network change should not reawaken a host the user or config explicitly disabled.
-    /// An on-demand host in <see cref="MountState.Unreachable"/> is left dark for the same reason as
-    /// <see cref="ResumeAsync"/> (ADR-014).</summary>
+    /// host, and for every idle <see cref="MountState.Unreachable"/> host of either tier; an
+    /// immediate forced probe for every <see cref="MountState.Mounted"/> host too (E6 bullet:
+    /// "force-probe mounted hosts"). Does NOT touch <see cref="MountState.Disabled"/> hosts -- a
+    /// network change should not reawaken a host the user or config explicitly disabled. An on-demand
+    /// host in <see cref="MountState.Unreachable"/> IS re-probed, for the same reason as
+    /// <see cref="ResumeAsync"/>: ADR-014 tier-splits only the recurring ladder (pinned by
+    /// <c>NetworkChanged_force_probes_an_Unreachable_on_demand_host_too</c>).</summary>
     Task NetworkChangedAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
