@@ -293,9 +293,18 @@ A healthy Bosun mount reads `Network` (`P:\ Network`). `Fixed` is a bug (Invaria
 `P: is mounted`, `P: unmounting...`, `P: is not mounted -- host unreachable after 3
 consecutive failed probes`, or `P: is not mounted -- on-demand; mount it from the
 tray when you need it`. The tray icon is green when healthy, amber when degraded,
-red when something is faulted. After a drive is taken down for a reason that is not
-a user unmount and not a sleep, the tray shows a notification that starts
+red when something is faulted. After a mounted drive is lost without anyone asking for
+it (the host failed its shallow or deep probe, or reconciliation found the mount gone
+and you did not cause that), the tray shows a notification that starts
 `<display name> was unmounted` and ends with the reason (the transition's trigger text).
+Unmounts you or the configuration asked for -- your own unmount, a sleep, an idle
+timeout, a host edit or removal in the editor, **Repair > Unmount all & re-probe**, or a
+mount attempt that failed before the drive appeared -- raise no notification; they are
+still in the log and the window. Separately, when Bosun itself enters a faulted state (the
+tray icon turns red: rclone not found, WinFsp missing, supervision stopped, ...), one
+notification titled `Bosun` names the problem in the same words as the window banner. It
+appears once per fault, not once per retry, and not during the first moments after Bosun
+starts while rclone is still coming up.
 
 **Bundle. Copy diagnostics.** Tray menu > *Copy diagnostics*, or the button in the window.
 Explorer opens on `%LOCALAPPDATA%\Bosun\diagnostics\bosun-diagnostics-<yyyyMMdd-HHmmss>.zip`.
@@ -534,8 +543,8 @@ for the test host (or a second host), restart Bosun. Then `T = 120` below.
    `transitioned Mounted -> Draining (trigger: idle timeout (120s without activity))`,
    then `Unmount confirmed ...`, `Draining -> Disabled (trigger: drain completed: idle timeout ...)`,
    `Disabled -> Probing (trigger: auto re-enable after drain)`, `Probing -> Ready`.
-   The tray shows a `<display name> was unmounted — idle timeout ...` notification
-   (an idle unmount counts as unexpected for notification purposes). The window row
+   The tray shows **no** notification: an idle unmount is what the configuration asked
+   for (bs-p97), so only the log and the window record it. The window row
    reads `P: is not mounted -- on-demand; mount it from the tray when you need it`.
 3. Check the letter is gone (drive-type listing in the drive check) and that **Mount** is offered again.
 

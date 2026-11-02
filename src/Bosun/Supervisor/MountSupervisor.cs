@@ -1933,7 +1933,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
 
         return BeginDrainAsync(
-            host, $"idle timeout ({host.Config.Mount.IdleUnmountSeconds}s without activity)", DrainCause.Automatic, ct);
+            host, $"idle timeout ({host.Config.Mount.IdleUnmountSeconds}s without activity)", DrainCause.IdleTimeout, ct);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -2673,7 +2673,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                     // PendingConfig, not an immediate Config swap -- see its remarks: the drain
                     // (and any retry) must keep targeting the mount point that is ACTUALLY live.
                     host.PendingConfig = newHostConfig;
-                    await BeginDrainAsync(host, "config change: mount-affecting field changed", DrainCause.Automatic, ct)
+                    await BeginDrainAsync(host, "config change: mount-affecting field changed", DrainCause.ConfigChanged, ct)
                         .ConfigureAwait(false);
                     return;
                 case MountState.Draining:
@@ -2788,7 +2788,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             case MountState.Mounting:
             case MountState.Mounted:
                 host.PendingConfig = newHostConfig;
-                await BeginDrainAsync(host, "config change: mount.mode set to none", DrainCause.Automatic, ct)
+                await BeginDrainAsync(host, "config change: mount.mode set to none", DrainCause.ConfigChanged, ct)
                     .ConfigureAwait(false);
                 return;
             case MountState.Draining:

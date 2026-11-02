@@ -18,9 +18,12 @@ namespace Bosun.Supervisor;
 /// </remarks>
 public enum DrainCause
 {
-    /// <summary>Reconciliation drift, a mounted-probe-failure threshold, a config change, or an
-    /// idle-unmount timeout -- the host should come back exactly as it did before bs-fix-e5:
-    /// re-enabled immediately once the drain completes.</summary>
+    /// <summary>Reconciliation drift, a mounted shallow-probe-failure threshold, or a deep-probe
+    /// failure -- a drive lost without anyone having asked for it. The host should come back
+    /// exactly as it did before bs-fix-e5: re-enabled immediately once the drain completes. This
+    /// is the one cause that raises the "unexpectedly unmounted" toast (bs-p97): an idle timeout
+    /// and a config change used to be <see cref="Automatic"/> too and now have their own values
+    /// because the maintainer decided those are not unexpected.</summary>
     Automatic,
 
     /// <summary>System suspend (Invariant I8). Escalates on the suspend budget, not the
@@ -55,4 +58,15 @@ public enum DrainCause
     /// own cause (rather than reusing <see cref="Automatic"/>) so the log says why, and so a
     /// future change to <see cref="Automatic"/> cannot silently change a repair.</summary>
     Repair,
+
+    /// <summary>An on-demand host's idle-unmount timeout (<c>mount.idle_unmount_seconds</c>). Drains
+    /// and re-enables exactly like <see cref="Automatic"/>; separate only so the tray does not
+    /// toast an unmount the configuration asked for (bs-p97).</summary>
+    IdleTimeout,
+
+    /// <summary>A mount-affecting edit of a host that stays in config (changed hostname, drive,
+    /// remote path, mode set to <c>none</c>, ...). Drains and re-enables exactly like
+    /// <see cref="Automatic"/>; separate only so the tray does not toast an unmount the user's own
+    /// edit caused (bs-p97). A host REMOVED from config is <see cref="ConfigRemoved"/>.</summary>
+    ConfigChanged,
 }

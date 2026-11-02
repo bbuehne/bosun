@@ -15,7 +15,8 @@ namespace Bosun.UI.Tray;
 /// <summary>
 /// Owns the <c>H.NotifyIcon</c> tray icon (bs-ww9.5, E9b): renders <see cref="AggregateHealth"/>
 /// at a glance (ADR-012 Decision 3), builds the per-host context menu, shows/hides the main window,
-/// and raises a balloon on an unexpected unmount (ADR-005). Pure UI wiring -- the logic it calls
+/// and raises a balloon on an unexpected unmount (ADR-005) and when Bosun enters a Faulted state
+/// (ADR-012, <see cref="DegradedStateNotifier"/>). Pure UI wiring -- the logic it calls
 /// into (<see cref="TrayIconAppearanceSelector"/>, <see cref="HostContextMenuBuilder"/>,
 /// <see cref="HostActionDispatcher"/>, <see cref="UnexpectedUnmountDetector"/>) is what carries the
 /// unit tests; this class itself is not unit-tested, matching CLAUDE.md's carve-out for XAML and
@@ -51,6 +52,7 @@ public sealed class TrayIconController : IDisposable
     private readonly IAutostartRegistration _autostart;
     private readonly ILogger<TrayIconController>? _logger;
     private readonly DispatcherTimer _refreshTimer;
+    private readonly DegradedStateNotifier _degradedStateNotifier;
 
     private TrayStatus? _lastRenderedStatus;
     private DateTimeOffset _lastProcessedTransitionUtc = DateTimeOffset.MinValue;
@@ -107,6 +109,12 @@ public sealed class TrayIconController : IDisposable
                 "The tray icon was not created. Bosun is running but has no tray presence, so closing " +
                 "the window leaves no way to reach it short of restarting.");
         }
+
+        // bs-ww9.1.1: one toast when Bosun enters a Faulted state. IAppHealth.Changed can fire on a
+        // timer or worker thread, so the balloon is shown from the dispatcher.
+        _degradedStateNotifier = new DegradedStateNotifier(
+            _appHealth,
+            (title, text) => _taskbarIcon.Dispatcher.InvokeAsync(() => ShowBalloon(title, text, NotificationIcon.Error)));
 
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -310,16 +318,25 @@ public sealed class TrayIconController : IDisposable
         foreach (var entry in newUnexpected)
         {
             var displayName = rows.FirstOrDefault(r => r.HostKey == entry.HostKey)?.DisplayName ?? entry.HostKey;
-            _taskbarIcon.ShowNotification(
-                "Bosun",
-                $"{displayName} was unmounted — {entry.Trigger}",
-                NotificationIcon.Warning);
+            ShowBalloon("Bosun", $"{displayName} was unmounted — {entry.Trigger}", NotificationIcon.Warning);
         }
 
         if (history.Count > 0)
         {
             _lastProcessedTransitionUtc = history[0].TimestampUtc;
         }
+    }
+
+    /// <summary>The one place a balloon is shown, for both the unexpected-unmount toast and the
+    /// faulted-state toast. UI thread only.</summary>
+    private void ShowBalloon(string title, string text, NotificationIcon icon)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _taskbarIcon.ShowNotification(title, text, icon);
     }
 
     public void Dispose()
@@ -330,6 +347,7 @@ public sealed class TrayIconController : IDisposable
         }
 
         _disposed = true;
+        _degradedStateNotifier.Dispose();
         _refreshTimer.Stop();
         _taskbarIcon.Dispose();
     }
