@@ -86,6 +86,23 @@ public sealed class StartupReadinessTests
         Assert.False(readiness.RcloneHealthy);
         Assert.False(readiness.SupervisorRunning);
         Assert.False(readiness.MountingAvailable);
+
+        // bs-4js: "not started yet" is not "failed to start".
+        Assert.Null(readiness.SupervisorFaultMessage);
+        Assert.False(readiness.SupervisorStartFailed);
+    }
+
+    [Fact]
+    public void SupervisorStartFailed_IsTrueOnlyWhenTheStartWasAttemptedAndFailed()
+    {
+        // Running: not failed.
+        Assert.False(Loaded().SupervisorStartFailed);
+
+        // Not running, nothing recorded: not started yet (or never attempted) -- not failed.
+        Assert.False((Loaded() with { SupervisorRunning = false }).SupervisorStartFailed);
+
+        // Not running, with a recorded reason: failed.
+        Assert.True((Loaded() with { SupervisorRunning = false, SupervisorFaultMessage = "boom" }).SupervisorStartFailed);
     }
 
     private static StartupReadiness Loaded() => new()

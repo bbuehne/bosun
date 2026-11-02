@@ -13,6 +13,8 @@ using Bosun.Tests.Rclone.Fakes;
 using Bosun.Tests.Rclone.Process.Fakes;
 using Bosun.Tests.Supervisor.Fakes;
 using Bosun.Tests.Terminal.Fakes;
+using Bosun.UI.Banner;
+using Bosun.UI.Tray;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -495,6 +497,103 @@ public sealed class StartupOrchestratorTests
     }
 
     [Fact]
+    public async Task SupervisorFailsToStart_IsPublishedAsState_AndTheTrayAndWindowRenderItAsAnErrorWithTheRealReason()
+    {
+        // bs-4js, defect 1: this used to be a log line and nothing else, so Bosun looked healthy while
+        // supervising nothing. The failure must be state, and the real derivation code (health model,
+        // tray status, banner) must turn it into Error plus the causal text.
+        const string reason = "Unable to resolve service for type 'System.TimeProvider' while attempting to activate 'HostProbe'.";
+        var host = HostBlock("nas", MountMode.Persistent, drive: "P:");
+        await using var harness = new Harness(
+            initialConfigContent: ValidConfig(host),
+            withHealth: true,
+            failSupervisorResolutionWith: new InvalidOperationException(reason));
+        harness.Launcher.EnqueueSuccess(new FakeRcloneProcessHandle());
+
+        await harness.StartAsync();
+
+        // 1. The queryable state.
+        var readiness = harness.Orchestrator.Current;
+        Assert.False(readiness.SupervisorRunning);
+        Assert.True(readiness.SupervisorStartFailed);
+        Assert.Equal(reason, readiness.SupervisorFaultMessage);
+
+        // 2. Nothing was probed or mounted -- the failure really did void supervision.
+        Assert.Empty(harness.Probe.ShallowProbeCalls);
+        Assert.Empty(harness.RcloneClient.MountCalls);
+
+        // 3. The health model: Faulted, one issue, the maintainer's wording with the real reason.
+        var health = harness.Health.Current;
+        Assert.Equal(HealthLevel.Faulted, health.Level);
+        var issue = Assert.Single(health.Issues);
+        Assert.Equal(HealthIssueCodes.StartupSupervisorFailed, issue.Code);
+        Assert.Equal($"The mount supervisor failed to start: {reason}", issue.Title);
+
+        // 4. The tray: red icon (AggregateHealth.Error), tooltip names the cause -- even though the
+        //    host roll-up is Healthy because there are no rows (the supervisor never existed).
+        var tray = TrayStatus.Compose(AggregateHealth.Healthy, health);
+        Assert.Equal(AggregateHealth.Error, tray.IconHealth);
+        Assert.StartsWith("Bosun — Faulted: The mount supervisor failed to start: ", tray.Tooltip, StringComparison.Ordinal);
+
+        // 5. The status window: banner visible and red with the full text; header says Faulted.
+        var banner = new HealthBannerViewModel(TimeZoneInfo.Utc);
+        banner.Update(health, AggregateHealth.Healthy);
+        Assert.True(banner.IsVisible);
+        Assert.Equal(HealthLevel.Faulted, banner.Level);
+        Assert.Equal($"The mount supervisor failed to start: {reason}", banner.Title);
+        Assert.Equal("Bosun — Faulted", banner.HeaderText);
+    }
+
+    [Fact]
+    public async Task SupervisorFailsToStart_DoesNotStopTheRestOfStartup_FailSoft()
+    {
+        // The maintainer's decision (bs-4js): fail-soft. Bosun keeps running -- the fragment is still
+        // written, rclone still starts, and StartAsync still returns instead of throwing or exiting.
+        var host = HostBlock("nas", MountMode.Persistent, drive: "P:");
+        await using var harness = new Harness(
+            initialConfigContent: ValidConfig(host),
+            withHealth: true,
+            failSupervisorResolutionWith: new InvalidOperationException("boom"));
+        harness.Launcher.EnqueueSuccess(new FakeRcloneProcessHandle());
+
+        await harness.StartAsync();
+
+        var readiness = harness.Orchestrator.Current;
+        Assert.True(readiness.TerminalFragmentWritten);
+        Assert.True(readiness.RcloneHealthy);
+        Assert.True(readiness.SupervisorStartFailed);
+    }
+
+    [Fact]
+    public async Task SupervisorStartedNormally_PublishesNoFaultAndNoSupervisorIssue()
+    {
+        var host = HostBlock("nas", MountMode.None);
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]), withHealth: true);
+
+        await harness.StartAsync();
+
+        var readiness = harness.Orchestrator.Current;
+        Assert.True(readiness.SupervisorRunning);
+        Assert.Null(readiness.SupervisorFaultMessage);
+        Assert.False(readiness.SupervisorStartFailed);
+        Assert.DoesNotContain(harness.Health.Current.Issues, i => i.Code == HealthIssueCodes.StartupSupervisorFailed);
+    }
+
+    [Fact]
+    public async Task InvalidConfig_NeverAttemptsTheSupervisor_SoItIsNotReportedAsASupervisorFailure()
+    {
+        // "Not started" because the config is invalid is the config's fault, reported as such -- not a
+        // second, misleading "the supervisor failed to start".
+        await using var harness = new Harness(initialConfigContent: "this is not valid toml [[[", withHealth: true);
+
+        await harness.StartAsync();
+
+        Assert.False(harness.Orchestrator.Current.SupervisorStartFailed);
+        Assert.DoesNotContain(harness.Health.Current.Issues, i => i.Code == HealthIssueCodes.StartupSupervisorFailed);
+        Assert.Contains(harness.Health.Current.Issues, i => i.Code == HealthIssueCodes.StartupConfigInvalid);
+    }
+
+    [Fact]
     public async Task Health_HealthyStartup_IsOkAndNotStarting()
     {
         var host = HostBlock("nas", MountMode.None);
@@ -755,7 +854,8 @@ public sealed class StartupOrchestratorTests
             TimeSpan? restartDelay = null,
             Exception? failFragmentWriteWith = null,
             FakeFragmentFileSystem? fragmentFileSystem = null,
-            bool withHealth = false)
+            bool withHealth = false,
+            Exception? failSupervisorResolutionWith = null)
         {
             Root = Path.Combine(Path.GetTempPath(), "bosun-tests", "orchestrator", Guid.NewGuid().ToString("N"));
             ConfigPath = Path.Combine(Root, "hosts.toml");
@@ -813,12 +913,22 @@ public sealed class StartupOrchestratorTests
 
             services.AddSingleton<IRcloneRemoteProvisioner>(Provisioner);
             services.AddSingleton<IProbe>(new RecordingProbe(Probe, Order));
-            services.AddSingleton(sp => new MountSupervisor(
-                sp.GetRequiredService<IHostConfigStore>(),
-                sp.GetRequiredService<IRcloneClient>(),
-                sp.GetRequiredService<IProbe>(),
-                SupervisorTime,
-                sp.GetRequiredService<ILogger<MountSupervisor>>()));
+            if (failSupervisorResolutionWith is not null)
+            {
+                // bs-4js: the container cannot build the supervisor -- what an unregistered
+                // TimeProvider (which makes IProbe unbuildable) did on the maintainer's machine.
+                services.AddSingleton<MountSupervisor>(_ => throw failSupervisorResolutionWith);
+            }
+            else
+            {
+                services.AddSingleton(sp => new MountSupervisor(
+                    sp.GetRequiredService<IHostConfigStore>(),
+                    sp.GetRequiredService<IRcloneClient>(),
+                    sp.GetRequiredService<IProbe>(),
+                    SupervisorTime,
+                    sp.GetRequiredService<ILogger<MountSupervisor>>()));
+            }
+
             services.AddSingleton<IMountSupervisor>(sp => sp.GetRequiredService<MountSupervisor>());
 
             services.AddSingleton<IFirstRunConfigBootstrapper, FirstRunConfigBootstrapper>();

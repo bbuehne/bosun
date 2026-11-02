@@ -110,6 +110,24 @@ public sealed record StartupReadiness
     public required bool SupervisorRunning { get; init; }
 
     /// <summary>
+    /// Why the mount supervisor could not be started (bs-4js): the real exception message from
+    /// resolving or starting it. Populated only when the start was ATTEMPTED and FAILED -- it is
+    /// <see langword="null"/> both before the attempt ("not started yet", which is not a fault:
+    /// <see cref="Initial"/> and every snapshot published earlier in the sequence) and when the
+    /// supervisor was deliberately never attempted (<see cref="ConfigReadinessState.Invalid"/>: the
+    /// config problem is the cause, and it is reported as such). The distinction matters because
+    /// <see cref="SupervisorRunning"/> alone cannot make it: <see langword="false"/> means all three.
+    /// </summary>
+    public string? SupervisorFaultMessage { get; init; }
+
+    /// <summary>
+    /// True only when the supervisor start was attempted and failed (bs-4js) -- see
+    /// <see cref="SupervisorFaultMessage"/>. This is the one state that means every mount guarantee
+    /// is void for the session: no host is probed, none is mounted, and nothing will retry.
+    /// </summary>
+    public bool SupervisorStartFailed => !SupervisorRunning && SupervisorFaultMessage is not null;
+
+    /// <summary>
     /// True only when mounting is possible in principle: a config is in service (including the
     /// empty first-run template) and WinFsp and rclone are both healthy. Does not account for a
     /// PARTICULAR host's own provisioning failure -- see <see cref="MountBlockedReason"/> for the

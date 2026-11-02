@@ -38,7 +38,9 @@ public sealed class AppHealthServiceTests
         bool fragmentWritten = true,
         string? fragmentFault = null,
         bool rcloneHealthy = true,
-        string? rcloneFault = null) => new()
+        string? rcloneFault = null,
+        bool supervisorRunning = true,
+        string? supervisorFault = null) => new()
     {
         ConfigState = config,
         ConfigErrors = configErrors ?? [],
@@ -48,8 +50,86 @@ public sealed class AppHealthServiceTests
         TerminalFragmentFaultMessage = fragmentFault,
         RcloneHealthy = rcloneHealthy,
         RcloneFaultMessage = rcloneFault,
-        SupervisorRunning = true,
+        SupervisorRunning = supervisorRunning,
+        SupervisorFaultMessage = supervisorFault,
     };
+
+    // ------------------------------------------------------------------------------------------
+    // bs-4js: a supervisor that failed to start is a Faulted, causal issue -- and "not started yet" is not
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void A_supervisor_that_failed_to_start_is_a_Faulted_issue_whose_title_carries_the_real_reason()
+    {
+        using var h = new Harness();
+
+        h.Health.ObserveStartup(Readiness(
+            supervisorRunning: false,
+            supervisorFault: "Unable to resolve service for type 'System.TimeProvider' while attempting to activate 'HostProbe'."));
+
+        Assert.Equal(HealthLevel.Faulted, h.Now.Level);
+        var issue = Assert.Single(h.Now.Issues);
+        Assert.Equal(HealthIssueCodes.StartupSupervisorFailed, issue.Code);
+        Assert.Equal(
+            "The mount supervisor failed to start: Unable to resolve service for type 'System.TimeProvider' while attempting to activate 'HostProbe'.",
+            issue.Title);
+        Assert.Contains("restart Bosun", issue.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_multi_line_reason_is_collapsed_to_one_line_for_the_tooltip_and_headline()
+    {
+        using var h = new Harness();
+
+        h.Health.ObserveStartup(Readiness(supervisorRunning: false, supervisorFault: "first line\r\n   second line\n\tthird"));
+
+        Assert.Equal("The mount supervisor failed to start: first line second line third", Assert.Single(h.Now.Issues).Title);
+    }
+
+    [Fact]
+    public void A_supervisor_that_has_not_started_yet_is_not_a_failure()
+    {
+        using var h = new Harness();
+
+        // Mid-sequence snapshot: published after WinFsp detection, before the supervisor step has run.
+        h.Health.ObserveStartup(Readiness(rcloneHealthy: false, supervisorRunning: false, supervisorFault: null));
+        h.Health.ObserveRclone(RcloneProcessStatus.Starting, RcloneProcessFaultKind.None, null);
+
+        Assert.DoesNotContain(h.Now.Issues, i => i.Code == HealthIssueCodes.StartupSupervisorFailed);
+        Assert.True(h.Now.IsOk);
+    }
+
+    [Fact]
+    public void The_initial_placeholder_readiness_is_not_a_supervisor_failure()
+    {
+        using var h = new Harness();
+
+        h.Health.ObserveStartup(StartupReadiness.Initial);
+
+        Assert.True(h.Now.IsOk);
+    }
+
+    [Fact]
+    public void A_supervisor_never_attempted_because_the_config_is_invalid_reports_the_config_not_a_supervisor_failure()
+    {
+        using var h = new Harness();
+
+        h.Health.ObserveStartup(Readiness(
+            config: ConfigReadinessState.Invalid, configErrors: ["line 1: bad"], supervisorRunning: false, supervisorFault: null));
+
+        var issue = Assert.Single(h.Now.Issues);
+        Assert.Equal(HealthIssueCodes.StartupConfigInvalid, issue.Code);
+    }
+
+    [Fact]
+    public void A_supervisor_that_started_clears_nothing_and_raises_nothing()
+    {
+        using var h = new Harness();
+
+        h.Health.ObserveStartup(Readiness(supervisorRunning: true, supervisorFault: null));
+
+        Assert.True(h.Now.IsOk);
+    }
 
     // ------------------------------------------------------------------------------------------
     // Startup grace period
