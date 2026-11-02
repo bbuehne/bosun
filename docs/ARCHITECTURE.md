@@ -236,6 +236,21 @@ stops waiting. Issue unmounts with that short timeout and accept that a forced
 unmount may be needed on resume — that is what re-derivation is for, and it is
 now implemented rather than aspirational.
 
+**A suspend does not wait for routine checks** (ADR-023, `bs-4in`). The supervisor's
+channel runs one action at a time, so a suspend queued behind a hung probe or
+`vfs/stats` call would miss that budget. `SuspendAsync` therefore does three things
+on the *caller's* thread, which in production is this same `SystemEvents` thread,
+before it queues itself, and in this order: it records its arrival time, it counts
+itself as pending (which closes the mount gate of rule 5 at once), and it cancels the
+recurring tick that is running. It does only that — it increments a counter and
+cancels a token (`CancelAsync`, so no callback runs on this thread) — and it never
+throws or blocks. Only the five recurring timer callbacks can be cancelled this way
+(idle probe, mounted shallow probe with its VFS sample, mounted deep probe, idle-unmount
+fire, reconciliation tick); a drain, a `mount/mount` already sent, a command and the
+probe of an enable run to completion, and the race against the budget above remains the
+backstop for them. A cancelled tick's result is thrown away, never counted as a failure
+(§4 rule 5).
+
 **When the supervisor faults during suspend** (`bs-3al`; `bs-u4a` item 5). The
 suspend handler runs on `Microsoft.Win32.SystemEvents`' single notification
 thread, which has no `catch` above it: an exception that escaped the handler
@@ -416,7 +431,8 @@ right before building any UI.
    keeps its drain cause — a user unmount still parks it — but its forced-unmount
    escalation deadline becomes the **suspend budget**
    (`global.suspend_unmount_timeout_seconds`, counted from the moment suspend
-   arrives) instead of the ordinary 10 s `DrainConfirmTimeout`, which could fall
+   arrives — the instant `SuspendAsync` is *called*, not when the channel gets
+   round to it; `bs-7d7`) instead of the ordinary 10 s `DrainConfirmTimeout`, which could fall
    after the machine has gone to sleep. The supervisor re-issues the unmount at
    once and aims the next check at the new deadline. The change only ever
    **shortens** a deadline: a drain whose ordinary deadline is already sooner than
@@ -433,9 +449,15 @@ right before building any UI.
    host in place (rule 10).
    A network address change takes the identical path. See ADR-017.
 
-   **No mount happens while the supervisor is suspended** (Invariant I8,
-   `bs-bv0`). The suspend handler runs once; a mount created after it, in the
-   seconds before the machine sleeps, survives the sleep. So the suspended flag is
+   **No mount happens while the supervisor is suspended — or while a suspend is
+   pending** (Invariant I8, `bs-bv0`; ADR-023, `bs-4in`). The suspend handler runs
+   once; a mount created after it, in the seconds before the machine sleeps,
+   survives the sleep. "Suspended" for this purpose means the flag the suspend
+   action sets **or** a suspend that has been called but not yet begun: the
+   channel is serial, so work queued ahead of the suspend would otherwise still
+   mount while the suspend waits its turn. The pending half is a counter that
+   `SuspendAsync` increments on the caller's thread, before it queues itself,
+   and the suspend action decrements as its first statement. The combined gate is
    checked at the one place a host enters `Mounting` — the entry guard of
    `TryBeginMountAsync`, the only caller of `mount/mount` — which covers every
    route in at once: the persistent auto-mount on arriving at `Ready` (by the idle
@@ -444,7 +466,36 @@ right before building any UI.
    added later. The mount-retry timer (a failed mount's paced re-enable) is also
    skipped while suspended, so it does not probe in those seconds either: the host
    stays `Disabled`, and resume re-enables it. A host held back this way simply
-   stays `Ready` (no new transition, no `Mounting`, no rc call).
+   stays `Ready` (no new transition, no `Mounting`, no rc call). The same gate
+   covers the edges around the mount (ADR-023): a user's mount request and
+   "Unmount all & re-probe" are refused with "the system is suspended"; a drain that
+   completes while a suspend is pending is not re-enabled, and `EnableHostAsync`
+   returns before `Probing` (the host stays `Disabled`; resume enables it). An idle
+   probe *tick* that fires while the system is suspended does nothing and re-arms
+   itself; the forced probes of resume, a network change and "retry now" are
+   commands and still probe.
+
+   **A mount already under way when the suspend arrives** (ADR-023, D1). The deep
+   probe of rule 2 is not cancelled, so a suspend can arrive while it runs. If the
+   probe passes and a suspend is pending, `mount/mount` is not sent: the mount is
+   abandoned on the existing `Mounting → Draining` edge with the suspend drain cause.
+   It is not a mount failure (nothing counted, no paced retry), an on-demand host
+   keeps or gets the ADR-022 record (rule 9a), and a persistent host mounts on
+   resume by its tier. A deep-probe *failure* still routes as in rule 2. A
+   `mount/mount` already sent is never cancelled; the mount completes and the
+   suspend drains it as above, and the post-mount VFS baseline sample (rule 7) is
+   skipped.
+
+   **A suspend preempts the routine checks that are running** (ADR-023, `bs-4in`).
+   Five recurring timer callbacks are cancellable by a suspend: the idle probe, the
+   mounted shallow probe (and its VFS sample), the mounted deep probe, the idle-unmount
+   fire, and the reconciliation tick. Whether a tick was preempted is decided by its
+   cancellation token alone, never by what the probe returned or threw. A preempted
+   tick discards its result — a `Success` too — and changes no counter, state, VFS
+   bookkeeping or flag: it is not a failed probe, so it cannot drain a host as
+   `Automatic`. It re-arms its own timer and logs one Information line. A tick that
+   starts while a suspend is pending skips its I/O the same way. Drains, `mount/mount`
+   once sent, commands, and the probe an enable is already running are not preempted.
 
    At resume the flag is cleared and the held-back hosts are picked up through the
    re-probe above, not around it. A persistent, non-parked host found `Ready` is
@@ -631,7 +682,10 @@ right before building any UI.
     paced re-enable (including the repair and mount-retry paths above), and when a
     host is added to the config or changed from `mode = "none"`. The probe's
     outcome leaves `Probing` for `Ready` or `Unreachable`, and it is not entered
-    again from either.
+    again from either. (ADR-023: an enable that finds a suspend pending returns
+    before `Probing` and leaves the host `Disabled`; one already in `Probing` runs
+    to its outcome — there is no `Probing → Disabled` edge, and a suspend does not
+    add one.)
 
     **Recurring probes run in place and log no transition.** The idle probe on a
     `Ready` or `Unreachable` host (the backoff ladder, an immediate re-probe on
@@ -737,6 +791,18 @@ The supervisor loop is single-threaded and `async`. Per-host state transitions
 are serialised through one channel so that a slow unmount cannot interleave with
 a probe result for the same host. UI reads a snapshot; the UI never mutates
 state directly, it posts commands to the same channel.
+
+There is one exception, and it is deliberately tiny: the **prologue of
+`SuspendAsync`** (ADR-023). It runs on the caller's thread — `SystemEvents`'
+notification thread in production — before the suspend is queued, because a suspend
+that waited for the channel could miss its three-second budget. The prologue only
+increments a counter (`pendingSuspends`, which closes the mount gate of §4 rule 5) and
+calls `CancelAsync` on the cancellation source of the recurring tick that is
+running. It reads and writes no host state, arms and disposes no timer, and never
+throws or blocks. `CancelAsync`, not `Cancel`: the registered callbacks (which
+release a hung probe or rc call) run on the thread pool, not on that thread. Every
+state change a cancelled tick would have made is made by nobody; the tick sees its
+token cancelled on the channel and discards its result there.
 
 ## 6. Failure modes to design against
 

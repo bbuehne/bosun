@@ -440,6 +440,12 @@ public sealed class SuspendWhileDrainingSpecTests
     /// than suspend arrival + budget.
     /// <b>Catches:</b> a mount that completes after the suspend was queued and is then drained with
     /// an ordinary cause (10 s deadline), or a drain timed from some later point than suspend arrival.
+    /// <para>Changed for ADR-023 (bs-4in, decision D1). The suspend used to arrive while the DEEP PROBE
+    /// was held, and the mount then completed and was drained on the budget. Now a suspend pending when
+    /// the deep probe passes abandons the mount before <c>mount/mount</c>, so there is no drive to
+    /// escalate (that case has its own tests in <c>SuspendPreemptionTests</c>). The budget still
+    /// applies to a host caught <c>Mounting</c> whose <c>mount/mount</c> is already on the wire, which
+    /// is what this test now holds open. The assertion is unchanged.</para>
     /// </summary>
     [Fact]
     public async Task A_host_caught_Mounting_by_suspend_escalates_by_arrival_plus_budget()
@@ -449,7 +455,17 @@ public sealed class SuspendWhileDrainingSpecTests
         h.Rclone.ConfirmUnmountAtCall("Q:", int.MaxValue);
         var arrival = h.Now;
 
-        await SuspendWhileMountingAsync(h, "archive", () => h.Supervisor.RequestMountAsync("archive"), DeepProbeOutcome.Success);
+        h.TimedRclone.HoldNextMount();
+        var mountTask = h.Supervisor.RequestMountAsync("archive");
+        var pump = h.Supervisor.DrainAsync();
+        Assert.True(h.TimedRclone.IsHoldingMount, "setup: mount/mount should be in flight");
+        Assert.Equal(MountState.Mounting, h.State("archive"));
+        var suspendTask = h.Supervisor.SuspendAsync();
+        h.TimedRclone.ReleaseMount();
+        await pump;
+        await h.Supervisor.DrainAsync();
+        await mountTask;
+        await suspendTask;
         await h.AdvanceSecondsAsync(15);
 
         var escalations = h.EscalationTimes("archive");

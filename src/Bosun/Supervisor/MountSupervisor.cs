@@ -48,6 +48,16 @@ namespace Bosun.Supervisor;
 /// the <see cref="FakeTimeProvider"/>-driven synchronous-continuation style already used by
 /// <c>HostProbe</c>/<c>RcloneProcessService</c> tests.
 /// </para>
+/// <para>
+/// <b>The one thing that is NOT on the channel: the prologue of <see cref="SuspendAsync"/></b>
+/// (ADR-023, bs-4in). A suspend queued behind a hung routine check would miss its three-second
+/// budget (Invariant I8), so before queuing itself it runs on the caller's thread: it increments
+/// <c>pendingSuspends</c> (the I8 gate, <see cref="MountingSuspended"/>, closes at once) and calls
+/// <see cref="CancellationTokenSource.CancelAsync"/> on the recurring tick in flight. That is ALL it
+/// does -- it touches no host, no timer, no counter and no state, so the single-writer discipline
+/// above still holds. Only the five recurring timer callbacks are preemptible (see
+/// <see cref="RunTickAsync"/>); commands, drains and the probe of an enable are not.
+/// </para>
 /// </remarks>
 public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAsyncDisposable
 {
@@ -109,7 +119,39 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
     private GlobalConfig global = new();
     private bool started;
+
+    /// <summary>True from the moment the suspend ACTION runs until <see cref="ResumeAsync"/>. Channel
+    /// thread only. Every I8 gate reads <see cref="MountingSuspended"/> instead, never this field
+    /// alone: it is set when the suspend is DEQUEUED, and work queued ahead of the suspend would
+    /// otherwise still mount in the meantime (ADR-023).</summary>
     private bool suspended;
+
+    /// <summary>Suspends that have been called (<see cref="SuspendAsync"/>, on the CALLER's thread)
+    /// but whose action has not yet started. Incremented before the suspend is queued and
+    /// decremented as the first statement of the action, so the I8 gate closes the instant a suspend
+    /// arrives rather than when the channel gets round to it (ADR-023). A counter, not a flag: two
+    /// suspends can be pending at once (suspend, resume, suspend).</summary>
+    private int pendingSuspends;
+
+    /// <summary>True while a suspend has been called and not yet begun. Safe from any thread.</summary>
+    private bool SuspendPending => Volatile.Read(ref pendingSuspends) > 0;
+
+    /// <summary>The Invariant I8 gate: no host may enter <see cref="MountState.Mounting"/> and no
+    /// host may be probed towards a mount while the system is suspended OR a suspend is pending
+    /// (ADR-023). Read by <see cref="TryBeginMountAsync"/>, <see cref="RequestMountAsync"/>,
+    /// <see cref="RepairAllAsync"/>, <see cref="OnMountRetryElapsedAsync"/>,
+    /// <see cref="CompleteDrainAsync"/> and the remount-record resolution. <b>Do not read
+    /// <see cref="suspended"/> directly as a gate.</b></summary>
+    private bool MountingSuspended => suspended || SuspendPending;
+
+    /// <summary>The cancellation source of the recurring tick that is running right now, or null
+    /// between ticks (ADR-023). Published by <see cref="RunTickAsync"/> on the channel thread, read
+    /// by <see cref="PreemptRunningTick"/> on whichever thread called <see cref="SuspendAsync"/>.
+    /// Accessed only through <see cref="Interlocked"/>/<see cref="Volatile"/>: the full barrier on
+    /// both sides is what guarantees that, of a tick starting and a suspend arriving at the same
+    /// moment, at least one of them sees the other.</summary>
+    private CancellationTokenSource? runningTick;
+
     private bool loggedFailuresBeforeUnmountClamp;
 
     /// <summary>bs-qcs: rc failures that recur on a timer (reconciliation every 30 s, a stuck drain
@@ -449,7 +491,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             // must not clear UserParked (the user did not get the remount they asked for, so their
             // earlier "take it down" still stands) and must not issue a probe. It precedes the
             // mounting-availability check because suspend is the more specific, self-clearing cause.
-            if (suspended)
+            // MountingSuspended, not the flag alone (ADR-023): a click that was queued BEFORE a suspend
+            // reaches this line while the suspend is still waiting its turn, and mounting then would be
+            // the very thing the pending suspend is about to undo.
+            if (MountingSuspended)
             {
                 throw new MountRequestRefusedException(hostKey, "the system is suspended");
             }
@@ -557,8 +602,77 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return Task.CompletedTask;
         }, cancellationToken);
 
-    public Task SuspendAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
+    /// <summary>
+    /// ADR-023 (bs-4in, bs-7d7): the PROLOGUE runs on the caller's thread -- in production
+    /// <c>Microsoft.Win32.SystemEvents</c>' single notification thread -- and does exactly three
+    /// things, in this order: it captures the arrival time, it closes the I8 gate
+    /// (<see cref="pendingSuspends"/>), and it cancels the recurring tick that is running
+    /// (<see cref="PreemptRunningTick"/>). Only then is the suspend queued. It never throws and
+    /// never blocks: a fault in it is logged, because an exception on that thread kills the process.
+    /// </summary>
+    /// <remarks>
+    /// The order is load-bearing. Count before cancel, so a tick that starts after the cancel finds
+    /// the counter and cancels itself; cancel before queue, so the tick is already stopping while the
+    /// suspend waits for the channel. The arrival time is taken first so the suspend budget counts
+    /// from the moment suspend ARRIVES (rule 5), not from when the channel dequeues it.
+    /// <para>If the supervisor loop is dead the counter is never decremented. That is harmless:
+    /// nothing mounts without the loop, and a closed gate on a dead loop is the right answer.</para>
+    /// </remarks>
+    public Task SuspendAsync(CancellationToken cancellationToken = default)
     {
+        var arrivalUtc = timeProvider.GetUtcNow();
+        Interlocked.Increment(ref pendingSuspends);
+        PreemptRunningTick();
+        return EnqueueAndWait(ct => RunSuspendAsync(arrivalUtc, ct), cancellationToken);
+    }
+
+    /// <summary>
+    /// Cancels the recurring tick that is in flight, if any (ADR-023). Runs on the caller's thread
+    /// of <see cref="SuspendAsync"/>, so it must not throw and must not run callbacks inline:
+    /// <see cref="CancellationTokenSource.CancelAsync"/>, never <c>Cancel</c> (which executes the
+    /// registered callbacks -- here, the linked sources that release a hung probe or rc call -- on
+    /// the calling thread, i.e. on <c>SystemEvents</c>' thread). <c>CancelAsync</c> flips
+    /// <c>IsCancellationRequested</c> synchronously and queues the callbacks to the thread pool.
+    /// The returned task is observed, not awaited: a throwing callback faults it, and that is logged.
+    /// </summary>
+    private void PreemptRunningTick()
+    {
+        try
+        {
+            var tick = Volatile.Read(ref runningTick);
+            if (tick is null)
+            {
+                return;
+            }
+
+            var cancellation = tick.CancelAsync();
+            _ = cancellation.ContinueWith(
+                faulted => logger.LogWarning(
+                    faulted.Exception?.GetBaseException(),
+                    "Cancelling the running tick for a pending suspend faulted in a cancellation callback; " +
+                    "the suspend proceeds regardless (ADR-023)"),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The tick finished and disposed its source between the read and the cancel: it is
+            // already over, which is what the cancel was for.
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex, "Preempting the running tick for a pending suspend failed; the suspend proceeds regardless (ADR-023)");
+        }
+    }
+
+    private async Task RunSuspendAsync(DateTimeOffset arrivalUtc, CancellationToken ct)
+    {
+        // First thing, before anything can yield: from here on `suspended` carries the gate
+        // (set a few lines below, with no await in between), so the gate never opens in the gap.
+        Interlocked.Decrement(ref pendingSuspends);
+
         // ADR-022's second amendment (bs-ane): a record whose time was already up is dropped now, not
         // carried across the sleep; the rest have their deadline cleared, because the wait limit
         // counts from a resume (ResumeAsync sets it again) and nothing may expire while asleep.
@@ -590,7 +704,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 host.RemountDeadlineUtc = null;
             }
 
-            await BeginDrainAsync(host, "system suspend", DrainCause.Suspend, ct).ConfigureAwait(false);
+            await BeginDrainAsync(host, "system suspend", DrainCause.Suspend, ct, startedUtc: arrivalUtc).ConfigureAwait(false);
         }
 
         // bs-u4a item 4: a host already Draining for an ordinary reason keeps its drain cause (so a
@@ -599,14 +713,17 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         // the suspend budget instead -- shortened only, never lengthened.
         foreach (var host in alreadyDraining)
         {
-            await ApplySuspendBudgetToDrainingHostAsync(host, ct).ConfigureAwait(false);
+            await ApplySuspendBudgetToDrainingHostAsync(host, arrivalUtc, ct).ConfigureAwait(false);
         }
-    }, cancellationToken);
+    }
 
-    private async Task ApplySuspendBudgetToDrainingHostAsync(HostRuntime host, CancellationToken ct)
+    private async Task ApplySuspendBudgetToDrainingHostAsync(HostRuntime host, DateTimeOffset arrivalUtc, CancellationToken ct)
     {
         var before = EffectiveDrainTimeout(host);
-        var suspendDeadline = timeProvider.GetUtcNow() + TimeSpan.FromSeconds(global.SuspendUnmountTimeoutSeconds);
+
+        // Counted from the suspend's ARRIVAL (rule 5, bs-7d7), not from now: the suspend may have
+        // waited in the channel behind another action, and the machine does not wait for the channel.
+        var suspendDeadline = arrivalUtc + TimeSpan.FromSeconds(global.SuspendUnmountTimeoutSeconds);
         if (host.SuspendEscalationDeadlineUtc is not { } existing || suspendDeadline < existing)
         {
             host.SuspendEscalationDeadlineUtc = suspendDeadline;
@@ -744,7 +861,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
     public Task RepairAllAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
     {
-        if (suspended)
+        if (MountingSuspended)
         {
             logger.LogWarning("Repair (unmount all and re-probe) refused: the system is suspended");
             throw new RepairRefusedException("the system is suspended");
@@ -1077,6 +1194,75 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// through this class's own timers.</summary>
     internal void Enqueue(Func<CancellationToken, Task> action) => channel.Writer.TryWrite(action);
 
+    // ------------------------------------------------------------------------------------------
+    // Recurring ticks and their preemption by a suspend (ADR-023, bs-4in)
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Posts one of the five recurring timer callbacks -- the idle probe, the mounted shallow probe
+    /// (with its VFS sample), the mounted deep probe, the idle-unmount fire and the reconciliation
+    /// tick -- so that it runs under <see cref="RunTickAsync"/>. Nothing else is a tick: commands,
+    /// drains and the mount-retry re-enable go through <see cref="Enqueue"/> and are never preempted.
+    /// </summary>
+    /// <param name="tick">Receives the supervisor's own token (shutdown) and the PREEMPTION token.
+    /// They mean different things and must never be conflated: the first ending means the process is
+    /// stopping; the second ending means a suspend arrived and this tick's result no longer matters.</param>
+    private void EnqueueTick(Func<CancellationToken, CancellationToken, Task> tick) =>
+        Enqueue(ct => RunTickAsync(tick, ct));
+
+    /// <summary>
+    /// Runs one recurring tick with a cancellation source that <see cref="SuspendAsync"/> can reach
+    /// (ADR-023). The source is published before the tick starts and withdrawn when it ends, and a
+    /// tick that starts while a suspend is already pending cancels itself first: so a suspend that
+    /// arrives at any moment finds the tick cancelled, or the tick finds the suspend, never neither.
+    /// </summary>
+    private async Task RunTickAsync(Func<CancellationToken, CancellationToken, Task> tick, CancellationToken ct)
+    {
+        var preemption = new CancellationTokenSource();
+
+        // Exchange, not a plain write: the full barrier pairs with the Increment in SuspendAsync
+        // (publish, then read the counter; there, bump the counter, then read the published source).
+        Interlocked.Exchange(ref runningTick, preemption);
+        try
+        {
+            if (SuspendPending)
+            {
+                await preemption.CancelAsync().ConfigureAwait(false);
+            }
+
+            await tick(ct, preemption.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref runningTick, null, preemption);
+            preemption.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Whether a recurring tick has been preempted by a suspend -- decided by the PREEMPTION TOKEN
+    /// and nothing else (ADR-023). Never by the probe's outcome and never by an exception's type:
+    /// <c>HostProbe</c> reports a cancelled probe as an outcome (<c>Cancelled</c>), not as an
+    /// exception, and the handlers count every outcome other than <c>Success</c> as a failure, so
+    /// reading the outcome would turn every suspend into an <see cref="DrainCause.Automatic"/> drain
+    /// (and a toast). When this returns true the caller discards the result of the I/O it just did
+    /// (a Success as well), changes no counter, state, VFS bookkeeping or flag, and re-arms its own
+    /// timer. One Information line is logged here.
+    /// </summary>
+    private bool TickPreempted(CancellationToken preemption, string tick, string scope)
+    {
+        if (!preemption.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        logger.LogInformation(
+            "The {Tick} tick for {Scope} was preempted by a pending suspend (Invariant I8, ADR-023): its result is " +
+            "discarded, no counter or state changed, and its timer is re-armed",
+            tick, scope);
+        return true;
+    }
+
     private Task EnqueueAndWait(Func<CancellationToken, Task> action, CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1271,6 +1457,19 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
+        if (SuspendPending)
+        {
+            // ADR-023 / Invariant I8: an enable is a probe towards a mount, and a suspend is already on
+            // its way. Before SetState(Probing), so no transition is logged and no probe is spent; the
+            // host stays Disabled and ResumeAsync enables every enabled Disabled host. Probing is not
+            // preempted once it has started (no Probing -> Disabled edge exists, and none is added).
+            logger.LogInformation(
+                "Not enabling {HostKey} ({Trigger}): a suspend is pending (Invariant I8); staying Disabled -- resume " +
+                "enables it",
+                host.Key, trigger);
+            return;
+        }
+
         // ADR-022 decisions 2 and 3: the remount record belongs to THIS probe, the first one after the
         // suspend drain. A failed probe drops it (below). A successful one hands it to
         // OnEnteredReadyAsync -> ResolveRemountRecordAsync, which mounts, or, under the 2026-11-01
@@ -1390,14 +1589,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
-        if (suspended || !mountingAvailability.IsAvailable || !rcdAnswering)
+        if (MountingSuspended || !mountingAvailability.IsAvailable || !rcdAnswering)
         {
             logger.LogInformation(
                 "Keeping the remount record for {HostKey} ({Trigger}): {Gate}; the host will be re-probed once " +
                 "that clears and mounted if it is still reachable (ADR-022 amendment)",
                 host.Key,
                 trigger,
-                suspended ? "the system is suspended"
+                MountingSuspended ? "the system is suspended"
                     : !mountingAvailability.IsAvailable ? $"mounting is unavailable ({mountingAvailability.Reason})"
                     : "rclone rcd did not answer core/version");
             return;
@@ -1434,7 +1633,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         // and even when a gate is still closed (bs-ane).
         DropExpiredRemountRecords(trigger);
 
-        if (suspended || !mountingAvailability.IsAvailable || !rcdAnswering)
+        if (MountingSuspended || !mountingAvailability.IsAvailable || !rcdAnswering)
         {
             return;
         }
@@ -1496,15 +1695,22 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
     /// <summary>Asks <c>rclone rcd</c> for <c>core/version</c> and records the answer in
     /// <see cref="rcdAnswering"/>. Only for the paths that wait on a failed ADR-017 gate.</summary>
-    private async Task<bool> TryVerifyRcdAsync(CancellationToken ct)
+    private async Task<bool> TryVerifyRcdAsync(CancellationToken ct, CancellationToken preemption = default)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, preemption);
         try
         {
-            await rcloneClient.GetVersionAsync(ct).ConfigureAwait(false);
+            await rcloneClient.GetVersionAsync(linked.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "rclone rcd still does not answer core/version");
+            return false;
+        }
+
+        // A reply that a suspend has overtaken is discarded (ADR-023): rcdAnswering is not touched.
+        if (TickPreempted(preemption, "reconciliation", "all hosts"))
+        {
             return false;
         }
 
@@ -1517,7 +1723,34 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// NOT revisit <see cref="MountState.Probing"/> -- that state is reserved for the one-shot
     /// initial check on "enable" (see <see cref="EnableHostAsync"/> and the delivery report's note
     /// on this reading of docs/ARCHITECTURE.md §4).</summary>
-    private async Task HandleIdleProbeDueAsync(HostRuntime host, string trigger, CancellationToken ct)
+    /// <summary>The idle probe's TIMER callback (ADR-023): the tick wrapper around
+    /// <see cref="HandleIdleProbeDueAsync"/>. Adds the one rule that is specific to a tick and not to
+    /// the forced probes of resume, network change and "retry now", which share the handler: a
+    /// tick that fires while the system is suspended does nothing (D5, matching
+    /// <see cref="OnMountRetryElapsedAsync"/>). Its timer is still re-armed, so a host never ends
+    /// up with nothing left to probe it (ADR-011, Invariant I2); resume probes every such host at
+    /// once anyway.</summary>
+    private async Task HandleIdleProbeTickAsync(HostRuntime host, CancellationToken ct, CancellationToken preemption)
+    {
+        if (host.State is not (MountState.Ready or MountState.Unreachable))
+        {
+            return;
+        }
+
+        if (suspended)
+        {
+            logger.LogInformation(
+                "Idle probe tick for {HostKey} skipped: the system is suspended; the host is probed again on resume " +
+                "(ADR-023, Invariant I8)", host.Key);
+            ArmIdleProbeTimer(host);
+            return;
+        }
+
+        await HandleIdleProbeDueAsync(host, "periodic idle probe", ct, preemption).ConfigureAwait(false);
+    }
+
+    private async Task HandleIdleProbeDueAsync(
+        HostRuntime host, string trigger, CancellationToken ct, CancellationToken preemption = default)
     {
         if (host.State is not (MountState.Ready or MountState.Unreachable))
         {
@@ -1525,8 +1758,22 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
+        if (TickPreempted(preemption, "idle probe", host.Key))
+        {
+            ArmIdleProbeTimer(host);
+            return;
+        }
+
         var result = await ProbeShallowSafelyAsync(
-            host.Config.Hostname, host.Config.Port, ProbeTimeout(), ct).ConfigureAwait(false);
+            host.Config.Hostname, host.Config.Port, ProbeTimeout(), ct, preemption).ConfigureAwait(false);
+
+        if (TickPreempted(preemption, "idle probe", host.Key))
+        {
+            // Whatever the probe said, Success included, is discarded: no Backoff change, no Ready or
+            // Unreachable transition, no auto-mount. The suspend is about to drain everything anyway.
+            ArmIdleProbeTimer(host);
+            return;
+        }
 
         if (result.Outcome == ShallowProbeOutcome.Success)
         {
@@ -1602,7 +1849,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         host.ProbeTimer = CreateOneShotTimer(
             TimeSpan.FromSeconds(Math.Max(delaySeconds, 0)),
-            () => Enqueue(ct => HandleIdleProbeDueAsync(host, "periodic idle probe", ct)));
+            () => EnqueueTick((ct, preemption) => HandleIdleProbeTickAsync(host, ct, preemption)));
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1617,7 +1864,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
-        if (suspended)
+        if (MountingSuspended)
         {
             // bs-bv0 / Invariant I8: the suspend gate. This is the ONLY method that moves a host into
             // Mounting and the only caller of mount/mount, so refusing here covers every route in --
@@ -1628,12 +1875,17 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             // has run survives the sleep (or appears before ResumeAsync has re-derived anything),
             // which is the exact thing I8 exists to prevent.
             //
+            // "Suspended" here is MountingSuspended: the flag the suspend ACTION sets, OR a suspend
+            // that has been called and not yet begun (ADR-023). Without the second half, anything
+            // queued ahead of the suspend -- a click, a tick that auto-mounts, a resume's sweep --
+            // would still mount in the time the suspend spends waiting its turn.
+            //
             // The host stays Ready and nothing is lost: ResumeAsync clears the flag, force-probes
             // every Ready host afresh (ADR-017), and mounts the persistent, non-parked ones that come
             // back still Ready. No new transition; no deep probe, no rc call, no SetState.
             logger.LogInformation(
-                "Not mounting {HostKey} ({Trigger}): the system is suspended (Invariant I8); staying {State} -- a " +
-                "persistent host is mounted by resume once a fresh probe passes",
+                "Not mounting {HostKey} ({Trigger}): the system is suspended or a suspend is pending (Invariant I8); " +
+                "staying {State} -- a persistent host is mounted by resume once a fresh probe passes",
                 host.Key, trigger, host.State);
             return;
         }
@@ -1683,6 +1935,38 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             host.ConsecutiveMountFailures++;
             host.LastMountFailureReason = deepProbeFailureReason;
             await BeginDrainAsync(host, deepProbeFailureReason, DrainCause.MountFailure, ct)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (MountingSuspended)
+        {
+            // ADR-023 decision D1 / Invariant I8: the deep probe is not preempted, so a suspend can
+            // arrive while it runs. The mount is the one thing that must not follow it -- a drive
+            // created now would be torn down at once by the suspend, or would survive the sleep if
+            // that teardown runs out of budget. Checked AFTER the deep probe's failure branch, so a
+            // genuine deep-probe failure still wins and is still a mount failure; checked BEFORE
+            // mount/mount, which once sent is never cancelled.
+            //
+            // The mount is abandoned on the existing Mounting -> Draining edge with the suspend's own
+            // cause. It is not a mount failure: nothing is counted, MountRetryBackoff and
+            // LastMountFailureReason are untouched, and the window does not report a failed mount.
+            // An on-demand host is a drive the user asked for (a click, or an ADR-022 remount that
+            // this attempt just spent), so it keeps or gets the ADR-022 record; the suspend action
+            // that follows cannot set it, because by then this host is no longer Mounting/Mounted.
+            // A persistent host needs no record: resume enables it and its tier mounts it.
+            if (host.Config.Mount.Mode == MountMode.OnDemand)
+            {
+                host.RemountAfterResume = true;
+                host.RemountDeadlineUtc = null;
+            }
+
+            logger.LogInformation(
+                "Abandoning the mount of {HostKey} ({Trigger}): its deep probe passed but a suspend is pending " +
+                "(Invariant I8); mount/mount is not sent. Draining as a suspend, not a mount failure (ADR-023)",
+                host.Key, trigger);
+            await BeginDrainAsync(
+                host, "system suspend pending: mount abandoned before mount/mount", DrainCause.Suspend, ct)
                 .ConfigureAwait(false);
             return;
         }
@@ -1742,7 +2026,15 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         // bs-obf: the baseline for activity detection is the VFS as it stands at mount, so even an
         // idle period shorter than the probe interval compares against something real.
-        await SampleVfsActivityAsync(host, ct).ConfigureAwait(false);
+        //
+        // Skipped while a suspend is pending (ADR-023 D1): this mount raced it and is about to be
+        // drained, so the baseline would be thrown away, and a hung rcd would hold the channel for a
+        // probe timeout that the suspend budget cannot afford. The poll is not preemptible here (this
+        // is the tail of a mount command, not a tick), so not starting it is the only protection.
+        if (!SuspendPending)
+        {
+            await SampleVfsActivityAsync(host, ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -1789,15 +2081,34 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     // Mounted: always probed (ADR-011)
     // ------------------------------------------------------------------------------------------
 
-    private async Task HandleMountedProbeDueAsync(HostRuntime host, string trigger, CancellationToken ct)
+    /// <param name="preemption">The recurring tick's preemption token (ADR-023); <c>default</c> for the
+    /// forced probe of <see cref="ReDeriveAfterTransitionAsync"/>, which is a command and is never
+    /// preempted.</param>
+    private async Task HandleMountedProbeDueAsync(
+        HostRuntime host, string trigger, CancellationToken ct, CancellationToken preemption = default)
     {
         if (host.State != MountState.Mounted)
         {
             return;
         }
 
+        if (TickPreempted(preemption, "mounted shallow probe", host.Key))
+        {
+            ArmMountedProbeTimer(host);
+            return;
+        }
+
         var result = await ProbeShallowSafelyAsync(
-            host.Config.Hostname, host.Config.Port, ProbeTimeout(), ct).ConfigureAwait(false);
+            host.Config.Hostname, host.Config.Port, ProbeTimeout(), ct, preemption).ConfigureAwait(false);
+
+        if (TickPreempted(preemption, "mounted shallow probe", host.Key))
+        {
+            // The probe came back Cancelled -- or Success, or Timeout, or anything: it does not matter
+            // and is not looked at. A preempted probe is not a failed probe (ADR-023): counting it would
+            // drain a host one failure from its threshold as Automatic, with a toast, on every suspend.
+            ArmMountedProbeTimer(host);
+            return;
+        }
 
         if (result.Outcome == ShallowProbeOutcome.Success)
         {
@@ -1827,7 +2138,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             // bs-obf: the activity sample rides the mounted probe's own cadence and timer, so no
             // extra timer exists per host. Only after a PASSING shallow probe: a host that is
             // failing probes is heading for a drain and its idle timer no longer matters.
-            await SampleVfsActivityAsync(host, ct).ConfigureAwait(false);
+            // The sample is part of this tick: a suspend that lands during it preempts it too.
+            await SampleVfsActivityAsync(host, ct, preemption).ConfigureAwait(false);
         }
 
         ArmMountedProbeTimer(host);
@@ -1839,7 +2151,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         var seconds = EffectiveMountedProbeIntervalSeconds(host.Config, global);
         host.ProbeTimer = CreateOneShotTimer(
             TimeSpan.FromSeconds(seconds),
-            () => Enqueue(ct => HandleMountedProbeDueAsync(host, "periodic mounted probe", ct)));
+            () => EnqueueTick((ct, preemption) =>
+                HandleMountedProbeDueAsync(host, "periodic mounted probe", ct, preemption)));
     }
 
     /// <summary>Hardcoded, not config-driven (docs/CONFIG-SCHEMA.md's validation-audit principle
@@ -1887,7 +2200,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// <c>rclone rcd</c> does not, by itself, drain a genuinely healthy mount.
     /// </para>
     /// </remarks>
-    private async Task HandleMountedDeepProbeDueAsync(HostRuntime host, string trigger, CancellationToken ct)
+    private async Task HandleMountedDeepProbeDueAsync(
+        HostRuntime host, string trigger, CancellationToken ct, CancellationToken preemption)
     {
         if (host.State != MountState.Mounted)
         {
@@ -1895,7 +2209,21 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
-        var result = await ProbeDeepSafelyAsync(host.Key, ProbeTimeout(), ct).ConfigureAwait(false);
+        if (TickPreempted(preemption, "mounted deep probe", host.Key))
+        {
+            ArmMountedDeepProbeTimer(host);
+            return;
+        }
+
+        var result = await ProbeDeepSafelyAsync(host.Key, ProbeTimeout(), ct, preemption).ConfigureAwait(false);
+
+        if (TickPreempted(preemption, "mounted deep probe", host.Key))
+        {
+            // Not a failed deep probe (ADR-023): ConsecutiveDeepProbeFailures is left exactly as it
+            // was, so a host one failure from ADR-016's threshold is not drained as Automatic.
+            ArmMountedDeepProbeTimer(host);
+            return;
+        }
 
         if (result.Outcome == DeepProbeOutcome.Success)
         {
@@ -1930,7 +2258,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.DeepProbeTimer?.Dispose();
         host.DeepProbeTimer = CreateOneShotTimer(
             TimeSpan.FromSeconds(global.MountedDeepProbeIntervalSeconds),
-            () => Enqueue(ct => HandleMountedDeepProbeDueAsync(host, "periodic mounted deep probe", ct)));
+            () => EnqueueTick((ct, preemption) =>
+                HandleMountedDeepProbeDueAsync(host, "periodic mounted deep probe", ct, preemption)));
     }
 
     /// <summary>ADR-011's formula, exactly. <c>interval_seconds == 0</c> -- the documented
@@ -1999,7 +2328,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         host.IdleUnmountTimer = CreateOneShotTimer(
             TimeSpan.FromSeconds(idleSeconds),
-            () => Enqueue(ct => HandleIdleUnmountDueAsync(host, generation, ct)));
+            () => EnqueueTick((ct, preemption) => HandleIdleUnmountDueAsync(host, generation, ct, preemption)));
     }
 
     // ------------------------------------------------------------------------------------------
@@ -2046,12 +2375,17 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// unmounts it. A missing <c>diskCache</c> (cache mode off) or <c>metadataCache</c> is a failure
     /// for the same reason.
     /// </remarks>
-    private async Task<VfsPoll> PollVfsAsync(HostRuntime host, bool includeQueue, CancellationToken ct)
+    private async Task<VfsPoll> PollVfsAsync(
+        HostRuntime host, bool includeQueue, CancellationToken ct, CancellationToken preemption = default)
     {
         var fs = RcloneRemoteNaming.RemoteFsPath(host.Key, host.Config.Mount.RemotePath!);
 
+        // The preemption token is linked in so a suspend releases a hung rcd call at once (ADR-023),
+        // but it is deliberately NOT part of the catch filter below: that filter asks "is this
+        // shutdown?" of the supervisor's own token alone. A preempted poll comes back as an ordinary
+        // failed poll and the CALLER decides, by the preemption token, to discard it.
         using var budget = new CancellationTokenSource(ProbeTimeout(), timeProvider);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, budget.Token);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, budget.Token, preemption);
 
         try
         {
@@ -2101,14 +2435,26 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// nothing, so it can only ever let the idle timer run on -- and the fire-time check
     /// (<see cref="HandleIdleUnmountDueAsync"/>) refuses to unmount on a failed poll.
     /// </summary>
-    private async Task SampleVfsActivityAsync(HostRuntime host, CancellationToken ct)
+    private async Task SampleVfsActivityAsync(HostRuntime host, CancellationToken ct, CancellationToken preemption = default)
     {
         if (host.State != MountState.Mounted || !UsesIdleUnmount(host))
         {
             return;
         }
 
-        var poll = await PollVfsAsync(host, includeQueue: false, ct).ConfigureAwait(false);
+        if (TickPreempted(preemption, "mounted VFS sample", host.Key))
+        {
+            return;
+        }
+
+        var poll = await PollVfsAsync(host, includeQueue: false, ct, preemption).ConfigureAwait(false);
+        if (TickPreempted(preemption, "mounted VFS sample", host.Key))
+        {
+            // Before any bookkeeping: no baseline, no UploadFailureCount, no fault-logged flag, no
+            // idle-clock restart. A hung sample that a suspend released is not a failed sample.
+            return;
+        }
+
         if (poll.Reading is not { } reading)
         {
             if (!host.VfsPollFaultLogged)
@@ -2141,14 +2487,29 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// if the VFS can be read, has nothing uploading, queued or failed, and shows no change since the
     /// last sample. Anything else skips the unmount and re-arms the clock for a full period.
     /// </summary>
-    private async Task HandleIdleUnmountDueAsync(HostRuntime host, int generation, CancellationToken ct)
+    private async Task HandleIdleUnmountDueAsync(
+        HostRuntime host, int generation, CancellationToken ct, CancellationToken preemption)
     {
         if (host.State != MountState.Mounted || generation != host.IdleTimerGeneration)
         {
             return;
         }
 
-        var poll = await PollVfsAsync(host, includeQueue: true, ct).ConfigureAwait(false);
+        if (TickPreempted(preemption, "idle-unmount", host.Key))
+        {
+            ArmIdleUnmountTimer(host);
+            return;
+        }
+
+        var poll = await PollVfsAsync(host, includeQueue: true, ct, preemption).ConfigureAwait(false);
+
+        if (TickPreempted(preemption, "idle-unmount", host.Key))
+        {
+            // Not an idle verdict either way: no VFS bookkeeping, no skip reason, and above all no
+            // unmount for IdleTimeout. The suspend that preempted this drains the host as Suspend.
+            ArmIdleUnmountTimer(host);
+            return;
+        }
 
         string? skipReason = null;
         var worthAWarning = false;
@@ -2211,7 +2572,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     // Draining, with forced-unmount escalation verified against listmounts
     // ------------------------------------------------------------------------------------------
 
-    private async Task BeginDrainAsync(HostRuntime host, string reason, DrainCause cause, CancellationToken ct)
+    private async Task BeginDrainAsync(
+        HostRuntime host, string reason, DrainCause cause, CancellationToken ct, DateTimeOffset? startedUtc = null)
     {
         if (host.State is not (MountState.Mounting or MountState.Mounted))
         {
@@ -2223,7 +2585,9 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         SetState(host, MountState.Draining, reason, cause);
         host.DrainReason = reason;
-        host.DrainStartedUtc = timeProvider.GetUtcNow();
+        // A suspend passes its ARRIVAL time (bs-7d7): the budget counts from when suspend arrived, not
+        // from when the channel got round to it.
+        host.DrainStartedUtc = startedUtc ?? timeProvider.GetUtcNow();
         host.DrainEscalated = false;
         host.SuspendEscalationDeadlineUtc = null;
         host.DrainCause = cause;
@@ -2433,7 +2797,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return Task.CompletedTask;
         }
 
-        if (host.AdministrativelyEnabled && !suspended)
+        // MountingSuspended (ADR-023): a drain that completes while a suspend is merely PENDING is not
+        // re-enabled either. The re-enable would probe the host and, for a persistent one, mount it,
+        // in the seconds before the machine sleeps; the host stays Disabled and resume enables it.
+        if (host.AdministrativelyEnabled && !MountingSuspended)
         {
             if (host.DrainCause == DrainCause.MountFailure)
             {
@@ -2485,7 +2852,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// still refuse to mount; skipping here just avoids probe traffic in the seconds before sleep.)</summary>
     private Task OnMountRetryElapsedAsync(HostRuntime host, CancellationToken ct)
     {
-        if (suspended)
+        if (MountingSuspended)
         {
             logger.LogInformation(
                 "Mount-retry backoff elapsed for {HostKey} while the system is suspended; leaving it {State} for " +
@@ -2619,7 +2986,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     {
         reconciliationTimer?.Dispose();
         reconciliationTimer = timeProvider.CreateTimer(
-            _ => Enqueue(ReconcileTickAsync), null, ReconciliationInterval, ReconciliationInterval);
+            _ => EnqueueTick(ReconcileTickAsync), null, ReconciliationInterval, ReconciliationInterval);
     }
 
     /// <summary>The periodic reconciliation, plus (ADR-022 amendment) the one place the supervisor
@@ -2629,16 +2996,31 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// Needed because nothing tells the supervisor an rcd that merely stalled across a resume has
     /// recovered: neither <see cref="OnRcloneRestartedAsync"/> nor an availability change fires
     /// for a process that never exited.</summary>
-    private async Task ReconcileTickAsync(CancellationToken ct)
+    private async Task ReconcileTickAsync(CancellationToken ct, CancellationToken preemption)
     {
         // Before the core/version check below: an expired record must not cost a call, nor mount.
         DropExpiredRemountRecords("reconciliation tick");
 
-        await ReconcileAsync(ct).ConfigureAwait(false);
+        // ADR-023: a tick that starts after a suspend arrived does no I/O at all, and one a suspend
+        // interrupts discards what it was told. The timer is periodic, so there is nothing to re-arm.
+        if (TickPreempted(preemption, "reconciliation", "all hosts"))
+        {
+            return;
+        }
+
+        var reconciled = await ReconcileAsync(ct, preemption).ConfigureAwait(false);
+
+        // The core/version call below must not start once a suspend has been called. When the
+        // reconciliation itself was cut short it has already logged that; when it finished just
+        // before the suspend, this is the first the tick hears of it.
+        if (reconciled ? TickPreempted(preemption, "reconciliation", "all hosts") : preemption.IsCancellationRequested)
+        {
+            return;
+        }
 
         if (!rcdAnswering
             && hosts.Values.Any(h => h.RemountAfterResume)
-            && await TryVerifyRcdAsync(ct).ConfigureAwait(false))
+            && await TryVerifyRcdAsync(ct, preemption).ConfigureAwait(false))
         {
             await SweepDeferredRemountsAsync("reconciliation tick: rclone rcd answers again", ct).ConfigureAwait(false);
         }
@@ -2656,18 +3038,32 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// </summary>
     private const string ReconcileFaultSource = "reconcile-listmounts";
 
-    private async Task<bool> ReconcileAsync(CancellationToken ct)
+    private async Task<bool> ReconcileAsync(CancellationToken ct, CancellationToken preemption = default)
     {
         IReadOnlyList<RcloneMountInfo> mounts;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, preemption);
         try
         {
-            mounts = await rcloneClient.ListMountsAsync(ct).ConfigureAwait(false);
+            mounts = await rcloneClient.ListMountsAsync(linked.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            LogRepeatedRcFault(
-                ReconcileFaultSource, ex, "Reconciliation: mount/listmounts failed; skipping this tick",
-                "Reconciliation: mount/listmounts");
+            // A listmounts that a suspend cut short is not an rc fault: nothing to log as one, and
+            // nothing to count towards the repeating-fault reminder.
+            if (!TickPreempted(preemption, "reconciliation", "all hosts"))
+            {
+                LogRepeatedRcFault(
+                    ReconcileFaultSource, ex, "Reconciliation: mount/listmounts failed; skipping this tick",
+                    "Reconciliation: mount/listmounts");
+            }
+
+            return false;
+        }
+
+        if (TickPreempted(preemption, "reconciliation", "all hosts"))
+        {
+            // The answer arrived but a suspend has since been called: it is not acted on. No drain for
+            // a mount "missing" from a list that is already stale, no orphan unmount.
             return false;
         }
 
@@ -3182,16 +3578,44 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// is not shutdown is therefore folded into a failed probe result, which every caller already
     /// handles. A throw while <paramref name="ct"/> is cancelled is shutdown and propagates.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Two tokens, never one</b> (ADR-023). <paramref name="ct"/> is the supervisor's own token:
+    /// its cancellation is SHUTDOWN, and it alone decides the catch filter and the check after the
+    /// call. <paramref name="preemption"/> is a recurring tick's preemption token: it is linked into
+    /// the token handed to the probe, so a suspend releases a hung probe at once, and it is NOT
+    /// consulted here. The caller reads it to decide whether to discard the result. Handing the probe
+    /// the linked token and filtering on the same token would make every suspend look like shutdown
+    /// (or, with <c>HostProbe</c>, which returns <c>Cancelled</c> instead of throwing, like a failed probe).
+    /// </para>
+    /// <para>
+    /// A probe that comes back while <paramref name="ct"/> is cancelled is shutdown whatever it
+    /// returned (bs-4ca): <c>HostProbe</c> reports a cancelled probe as an outcome, and the handlers
+    /// count every outcome but Success as a failure, so without this check a host one failure short of
+    /// its threshold is drained as <see cref="DrainCause.Automatic"/> (with a toast) during shutdown.
+    /// </para>
+    /// </remarks>
     private async Task<ShallowProbeResult> ProbeShallowSafelyAsync(
-        string hostname, int port, TimeSpan timeout, CancellationToken ct)
+        string hostname, int port, TimeSpan timeout, CancellationToken ct, CancellationToken preemption = default)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, preemption);
         try
         {
-            return await probe.ProbeShallowAsync(hostname, port, timeout, ct).ConfigureAwait(false);
+            var result = await probe.ProbeShallowAsync(hostname, port, timeout, linked.Token).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            return result;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "Shallow probe of {Hostname}:{Port} threw instead of returning a result; treating as failed", hostname, port);
+            if (preemption.IsCancellationRequested)
+            {
+                logger.LogDebug(ex, "Shallow probe of {Hostname}:{Port} threw after being preempted by a suspend", hostname, port);
+            }
+            else
+            {
+                logger.LogWarning(ex, "Shallow probe of {Hostname}:{Port} threw instead of returning a result; treating as failed", hostname, port);
+            }
+
             return new ShallowProbeResult
             {
                 Outcome = ShallowProbeOutcome.OtherFailure,
@@ -3209,15 +3633,28 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// <summary>Deep-probe counterpart of <see cref="ProbeShallowSafelyAsync"/>. Matters most in
     /// <see cref="TryBeginMountAsync"/>, where the host is already in <c>Mounting</c> when the
     /// probe runs: a throw there would leave it in <c>Mounting</c> forever instead of draining.</summary>
-    private async Task<DeepProbeResult> ProbeDeepSafelyAsync(string hostKey, TimeSpan timeout, CancellationToken ct)
+    private async Task<DeepProbeResult> ProbeDeepSafelyAsync(
+        string hostKey, TimeSpan timeout, CancellationToken ct, CancellationToken preemption = default)
     {
+        // Two tokens, never one: see ProbeShallowSafelyAsync's remarks (ADR-023, bs-4ca).
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, preemption);
         try
         {
-            return await probe.ProbeDeepAsync(hostKey, timeout, ct).ConfigureAwait(false);
+            var result = await probe.ProbeDeepAsync(hostKey, timeout, linked.Token).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            return result;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "Deep probe of {HostKey} threw instead of returning a result; treating as failed", hostKey);
+            if (preemption.IsCancellationRequested)
+            {
+                logger.LogDebug(ex, "Deep probe of {HostKey} threw after being preempted by a suspend", hostKey);
+            }
+            else
+            {
+                logger.LogWarning(ex, "Deep probe of {HostKey} threw instead of returning a result; treating as failed", hostKey);
+            }
+
             return new DeepProbeResult
             {
                 Outcome = DeepProbeOutcome.Failed,

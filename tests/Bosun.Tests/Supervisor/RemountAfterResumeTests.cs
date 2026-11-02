@@ -609,10 +609,16 @@ public sealed class RemountAfterResumeTests
 
     /// <summary>
     /// <b>Protects:</b> a suspend that arrives while the user's mount is in flight (the host is
-    /// <c>Mounting</c> with its deep probe outstanding). The mount completes, the suspend drains the
-    /// now-mounted drive, and it is recorded and remounted at wake.
-    /// <b>Catches:</b> a suspend sweep that records only hosts already <c>Mounted</c> at the moment it
-    /// is queued.
+    /// <c>Mounting</c> with its deep probe outstanding). The user's drive is still brought back at wake.
+    /// <b>Catches:</b> a suspend that loses the user's intent because the host was not yet <c>Mounted</c>
+    /// when the suspend was queued.
+    /// <para>Changed for ADR-023 (bs-4in, decision D1). The test used to say "the mount completes, the
+    /// suspend drains the now-mounted drive". Now the deep probe passes with a suspend pending, so
+    /// <c>mount/mount</c> is never sent: the mount is abandoned on the <c>Mounting -&gt; Draining</c>
+    /// edge as a suspend drain, and the host gets the ADR-022 record itself, because the suspend action
+    /// that follows no longer finds it <c>Mounting</c>. The counts change accordingly (one mount at
+    /// wake, not two; the unmount is the abandonment's drain). The older interleaving, where
+    /// <c>mount/mount</c> is already in flight, is the next test.</para>
     /// </summary>
     [Fact]
     public async Task A_suspend_that_arrives_while_the_user_mount_is_in_flight_is_remounted_at_wake()
@@ -621,6 +627,47 @@ public sealed class RemountAfterResumeTests
         await h.StartAsync();
 
         await SuspendWhileMountingAsync(h, DeepProbeOutcome.Success);
+        Assert.Equal(MountState.Disabled, h.State(Key));
+        Assert.Equal(0, h.Rclone.MountCount(Drive)); // D1: abandoned before mount/mount
+        Assert.Equal(1, h.Rclone.UnmountCount(Drive));
+        Assert.Equal(
+            DrainCause.Suspend,
+            h.Supervisor.GetTransitionHistory().First(t => t.To == MountState.Draining).DrainCause);
+
+        await h.ResumeAsync();
+
+        Assert.Equal(MountState.Mounted, h.State(Key));
+        Assert.Equal(1, h.Rclone.MountCount(Drive));
+    }
+
+    /// <summary>
+    /// <b>Protects:</b> the interleaving D1 cannot catch: the suspend arrives after <c>mount/mount</c>
+    /// has been sent. That call is never cancelled; the mount completes, the suspend drains the
+    /// now-mounted drive, and it is recorded and remounted at wake.
+    /// <b>Catches:</b> a suspend sweep that records only hosts already <c>Mounted</c> at the moment it
+    /// is queued, and a suspend that cancels or abandons a <c>mount/mount</c> already on the wire.
+    /// </summary>
+    [Fact]
+    public async Task A_suspend_that_arrives_after_mount_mount_was_sent_lets_it_finish_and_is_remounted_at_wake()
+    {
+        var h = new SuspendBudgetHarness(Config(OnDemand()));
+        await h.StartAsync();
+
+        h.TimedRclone.HoldNextMount();
+        var mountTask = h.Supervisor.RequestMountAsync(Key);
+        var pump = h.Supervisor.DrainAsync();
+        Assert.True(h.TimedRclone.IsHoldingMount, "setup: mount/mount should be in flight");
+        Assert.Equal(MountState.Mounting, h.State(Key));
+
+        var suspendTask = h.Supervisor.SuspendAsync();
+        Assert.False(h.TimedRclone.MountToken.IsCancellationRequested, "a suspend must not cancel mount/mount");
+        h.TimedRclone.ReleaseMount();
+
+        await pump;
+        await h.Supervisor.DrainAsync();
+        await mountTask;
+        await suspendTask;
+
         Assert.Equal(MountState.Disabled, h.State(Key));
         Assert.Equal(1, h.Rclone.MountCount(Drive));
         Assert.Equal(1, h.Rclone.UnmountCount(Drive));

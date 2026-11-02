@@ -112,7 +112,15 @@ public interface IMountSupervisor
     /// drains, then parks in <see cref="MountState.Disabled"/> until <see cref="ResumeAsync"/>
     /// (docs/ARCHITECTURE.md §4 rule 5). Returns promptly -- ISystemEventSource's suspend handler
     /// must complete quickly (docs/ARCHITECTURE.md §3); a drain that does not confirm immediately
-    /// keeps retrying on its own schedule rather than blocking this call.</summary>
+    /// keeps retrying on its own schedule rather than blocking this call.
+    /// <para>ADR-023 (bs-4in): the call does two things on the CALLER's thread before it queues
+    /// anything -- it closes the Invariant I8 gate (no host mounts, and no host is enabled, from this
+    /// moment, whatever is already queued ahead of the suspend), and it cancels the recurring tick that
+    /// is running, so a hung probe or rc call in a routine check cannot make the suspend wait. It never
+    /// throws and never blocks on the caller's thread (that thread is
+    /// <c>Microsoft.Win32.SystemEvents</c>' notification thread in production). The budget counts from the
+    /// moment this method is called (docs/ARCHITECTURE.md §4 rule 5), not from when the suspend is
+    /// dequeued.</para></summary>
     Task SuspendAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Every previously-enabled host re-probes immediately, bypassing backoff
