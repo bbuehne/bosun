@@ -498,6 +498,17 @@ right before building any UI.
       or when a reconciliation tick finds it answering; and a resume after a second
       sleep resolves it with its own re-probe. A closed gate never causes a probe, and
       nothing mounts while suspended (rule 5).
+    - **A waiting record expires ten minutes after the resume** (ADR-022's second
+      amendment of 2026-11-01, `bs-ane`). If the record is still waiting when
+      `RemountRecordWaitLimit` (10 minutes, a constant, not config) has passed since the
+      resume, it is dropped with an Info log line and the host is not remounted
+      automatically; it rests as an on-demand host normally does, and a click mounts it
+      as usual. A second suspend and resume restarts the ten minutes from the latest
+      resume (time spent asleep does not count). The deadline is stored with the record
+      and checked where the record would be resolved (the sweep, before its gates; the
+      resume and first-probe resolution; suspend) and on the 30-second reconciliation
+      tick, which drops an expired record so it does not linger or keep polling
+      `core/version`. There is no timer.
     - **A remount attempt spends the record.** It is cleared as the host enters
       `Mounting`, so a remount whose own deep probe or `mount/mount` fails while
       mounting is available is not retried, and a user click that mounts the host
@@ -508,7 +519,7 @@ right before building any UI.
     - **Cleared by** the remount attempt, a failed first probe, a user unmount
       (including a click while the suspend drain is still running, and a click while
       the record waits), the host's mode changing, the host being removed from the
-      config, or Bosun restarting. It is never persisted, and a network change
+      config, its wait limit passing, or Bosun restarting. It is never persisted, and a network change
       neither spends nor sets it.
 
     No new transition: the path is `Disabled → Probing → Ready → Mounting`, which

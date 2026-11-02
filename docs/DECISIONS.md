@@ -1957,3 +1957,46 @@ a failed deferred attempt retried, that is a further amendment.
   now, but it can mount on a network the user has since moved to. That follows from the rule as decided; an expiry would be a further amendment.
 - `ARCHITECTURE.md` §4 rule 9a is updated.
 - No new state, transition or rc call. Only `IMountSupervisor` still calls `mount/mount`.
+
+### Second amendment (2026-11-01, bs-ane): a waiting record expires ten minutes after the resume
+
+**Context.** The first amendment above lets a record outlive the resume, and its Consequences
+say it has no timeout and that "an expiry would be a further amendment". This is that
+amendment. Without it a record kept because mounting stayed unavailable could mount a drive
+hours later, on a network the user had since moved to, which is the late surprise mount that
+decision 3 exists to prevent.
+
+**Amendment.** The maintainer decided on 2026-11-01 that a record which is **waiting** (kept
+because mounting was unavailable, or because `rclone rcd` failed ADR-017's `core/version`
+gate) expires **10 minutes after the resume**. When it expires:
+
+- the record is dropped, with an Info log line;
+- the host is not remounted automatically, and rests in whatever state it was in (normally
+  `Ready`, as an on-demand host does);
+- a user click mounts it exactly as before.
+
+Decision text, the first amendment's rules and the other clear conditions are unchanged. A
+record that is not waiting (the first probe resolved it) never meets the limit.
+
+**Details I chose, for the maintainer to confirm.**
+
+- **A second suspend and resume restarts the ten minutes.** The record survives the sleep under
+  the first amendment, and each wake is a new "waking up", so the limit counts from the latest
+  resume. Time spent suspended does not count: the deadline is cleared at suspend and set again
+  at resume, and nothing expires while the system is asleep. A record that was already past its
+  limit when the next suspend arrived is dropped there, not revived by the wake.
+- **The limit is a named constant** (`MountSupervisor.RemountRecordWaitLimit`), not a config
+  option. The boundary is inclusive: at exactly ten minutes the record is expired.
+- **No timer.** The deadline is stored with the record and checked where a waiting record would
+  otherwise be resolved: the deferred sweep (before its gates are tested, so an expired record is
+  never probed for), the resume and first-probe resolution, suspend, and the 30-second
+  reconciliation tick, which drops it so it does not linger in memory and stops the tick's
+  `core/version` polling on its behalf. Dropping can therefore be up to one tick late with no
+  event to prompt it, but it can never mount in that gap: every route that mounts checks first.
+
+**Consequences.**
+
+- The first amendment's "it has no timeout" no longer holds; the wait ends at the limit, or
+  sooner by any clear condition.
+- One more in-memory field per host (the deadline). Not persisted, not in `HostMountSnapshot`.
+- `ARCHITECTURE.md` §4 rule 9a is updated. No new state, transition or rc call.

@@ -58,6 +58,12 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     private static readonly TimeSpan DrainConfirmTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ReconciliationInterval = TimeSpan.FromSeconds(30);
 
+    /// <summary>ADR-022's second amendment (2026-11-01, bs-ane): how long after a resume a remount
+    /// record may keep waiting on a local obstacle (mounting unavailable, rcd failing the core/version
+    /// gate) before it is dropped. A named constant, not a config option: it is the maintainer's
+    /// decision about what "waking up" means, not a tuning knob. Counts from the LATEST resume.</summary>
+    internal static readonly TimeSpan RemountRecordWaitLimit = TimeSpan.FromMinutes(10);
+
     /// <summary>
     /// Ring-buffer capacity for the bounded in-memory transition history (bs-ww9.2, ADR-018). Same
     /// category as <see cref="ReconciliationInterval"/> and
@@ -246,11 +252,20 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         /// <c>Mounting</c>, so a remount whose own deep probe or <c>mount/mount</c> fails is not
         /// retried, and neither is a user click that mounts the host first), a failed or
         /// unreachable resolving probe, a user unmount (<see cref="RequestUnmountAsync"/>), the host
-        /// being removed or changing mode (<see cref="ApplyHostConfigChangeAsync"/>), and the app
-        /// restarting (a new process starts with every record false). A host removed from config needs
+        /// being removed or changing mode (<see cref="ApplyHostConfigChangeAsync"/>), a WAITING record
+        /// passing <see cref="RemountRecordWaitLimit"/> after the latest resume (bs-ane,
+        /// <see cref="RemountDeadlineUtc"/>), and the app restarting (a new process starts with every record false). A host removed from config needs
         /// no clearing of its own: its runtime is evicted (<see cref="RemoveFromSupervision"/>),
         /// record and all, and a host later added under the same key gets a fresh one.</para></summary>
         public bool RemountAfterResume;
+
+        /// <summary>ADR-022's second amendment (2026-11-01, bs-ane): the instant at which a WAITING
+        /// <see cref="RemountAfterResume"/> record expires and is dropped
+        /// (<see cref="RemountRecordWaitLimit"/> after the latest resume). Null while the system is
+        /// suspended, and meaningless whenever <see cref="RemountAfterResume"/> is false, so none of
+        /// the places that clear the record clear this too: it is cleared by <see cref="SuspendAsync"/>
+        /// and set by <see cref="ResumeAsync"/>, the only two writers.</summary>
+        public DateTimeOffset? RemountDeadlineUtc;
 
         public int ConsecutiveMountedFailures;
 
@@ -514,6 +529,15 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
     public Task SuspendAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
     {
+        // ADR-022's second amendment (bs-ane): a record whose time was already up is dropped now, not
+        // carried across the sleep; the rest have their deadline cleared, because the wait limit
+        // counts from a resume (ResumeAsync sets it again) and nothing may expire while asleep.
+        DropExpiredRemountRecords("suspend");
+        foreach (var waiting in hosts.Values.Where(h => h.RemountAfterResume))
+        {
+            waiting.RemountDeadlineUtc = null;
+        }
+
         suspended = true;
 
         // Taken BEFORE the sweep below: a host that this very call moves into Draining already
@@ -533,6 +557,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             if (host.Config.Mount.Mode == MountMode.OnDemand)
             {
                 host.RemountAfterResume = true;
+                host.RemountDeadlineUtc = null;
             }
 
             await BeginDrainAsync(host, "system suspend", DrainCause.Suspend, ct).ConfigureAwait(false);
@@ -581,6 +606,15 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     public Task ResumeAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
     {
         suspended = false;
+
+        // ADR-022's second amendment (bs-ane): every record starts its wait from THIS resume, so a
+        // second sleep restarts the clock for a record that survived the first. Set before the
+        // re-derivation below so nothing on this resume's own path can see a record without one.
+        var remountDeadline = timeProvider.GetUtcNow() + RemountRecordWaitLimit;
+        foreach (var waiting in hosts.Values.Where(h => h.RemountAfterResume))
+        {
+            waiting.RemountDeadlineUtc = remountDeadline;
+        }
 
         // ADR-017: resume does not trust its own Mounted state -- it is at least as strong as a
         // network change, never weaker (an earlier asymmetry here is exactly what let bs-brv look
@@ -1288,6 +1322,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
+        // Before the gate test, and ahead of every other outcome: an expired record never mounts,
+        // whichever route brought it here (bs-ane).
+        if (DropRemountRecordIfExpired(host, trigger))
+        {
+            return;
+        }
+
         if (suspended || !mountingAvailability.IsAvailable || !rcdAnswering)
         {
             logger.LogInformation(
@@ -1328,6 +1369,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// </summary>
     private async Task SweepDeferredRemountsAsync(string trigger, CancellationToken ct)
     {
+        // First, and before the gates: an expired record is dropped without spending a probe on it,
+        // and even when a gate is still closed (bs-ane).
+        DropExpiredRemountRecords(trigger);
+
         if (suspended || !mountingAvailability.IsAvailable || !rcdAnswering)
         {
             return;
@@ -1345,6 +1390,46 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 .ConfigureAwait(false);
             await ResolveRemountRecordAsync(host, $"deferred remount after {trigger} (ADR-022)", ct)
                 .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>ADR-022's second amendment (2026-11-01, bs-ane): whether <paramref name="host"/>'s
+    /// remount record has waited out <see cref="RemountRecordWaitLimit"/> since the latest resume.
+    /// The boundary is inclusive: at exactly the deadline the record is expired. A record with no
+    /// deadline (the system is suspended) never is.</summary>
+    private bool RemountRecordExpired(HostRuntime host) =>
+        host.RemountAfterResume
+        && host.RemountDeadlineUtc is { } deadline
+        && timeProvider.GetUtcNow() >= deadline;
+
+    /// <summary>Drops <paramref name="host"/>'s remount record if it has expired, with an Info log
+    /// line. The host's state is left alone: it keeps resting as an on-demand host normally does, and
+    /// a user click mounts it as usual. Returns whether it dropped one.</summary>
+    private bool DropRemountRecordIfExpired(HostRuntime host, string trigger)
+    {
+        if (!RemountRecordExpired(host))
+        {
+            return false;
+        }
+
+        host.RemountAfterResume = false;
+        host.RemountDeadlineUtc = null;
+        logger.LogInformation(
+            "Dropping the remount record for {HostKey} ({Trigger}): it waited {Limit} after the resume " +
+            "without the obstacle clearing, so the host is not remounted automatically; a click still " +
+            "mounts it (ADR-022 second amendment)",
+            host.Key, trigger, RemountRecordWaitLimit);
+        return true;
+    }
+
+    /// <summary>No I/O and no timers: a walk over the hosts, called from the places a record can be
+    /// resolved or noticed (the sweep, the 30 s reconciliation tick, suspend) so an expired one does
+    /// not linger in memory or cost a <c>core/version</c> call.</summary>
+    private void DropExpiredRemountRecords(string trigger)
+    {
+        foreach (var host in hosts.Values.Where(RemountRecordExpired).ToList())
+        {
+            DropRemountRecordIfExpired(host, trigger);
         }
     }
 
@@ -2272,6 +2357,9 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// for a process that never exited.</summary>
     private async Task ReconcileTickAsync(CancellationToken ct)
     {
+        // Before the core/version check below: an expired record must not cost a call, nor mount.
+        DropExpiredRemountRecords("reconciliation tick");
+
         await ReconcileAsync(ct).ConfigureAwait(false);
 
         if (!rcdAnswering

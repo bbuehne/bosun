@@ -58,7 +58,9 @@ public sealed class RemountAmendmentTests(ITestOutputHelper output)
         var (h, resumeMark) = await WaitingForAvailabilityAsync();
         var deepBefore = h.Probe.DeepCount(OnDemandKey);
 
-        await h.AdvanceAsync(TimeSpan.FromHours(3));
+        // Inside the ten-minute wait limit (ADR-022's second amendment, bs-ane); RemountExpiryTests
+        // covers what happens past it.
+        await h.AdvanceAsync(TimeSpan.FromMinutes(9));
         Assert.Equal(MountState.Ready, h.State(OnDemandKey));
         Assert.Equal(deepBefore, h.Probe.DeepCount(OnDemandKey));
         var shallowBefore = h.Probe.ShallowCount(OnDemandHostname);
