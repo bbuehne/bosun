@@ -92,6 +92,11 @@ internal sealed class Hold
     /// report; for an rc call it is ignored and the call proceeds to the in-memory double.</summary>
     public void Release(object? value = null) => outcome.TrySetResult(value);
 
+    /// <summary>Completes the held call by throwing <paramref name="failure"/> from it, as
+    /// <c>RcloneClient</c> does when a call times out (<c>RcloneRcTimeoutException</c>). The call never
+    /// reaches the in-memory double, so the mount table is left as it was (bs-5o4).</summary>
+    public void Fail(Exception failure) => outcome.TrySetException(failure);
+
     internal Task<object?> Begin(string operation, string target, CancellationToken token, Func<object?> cancelledValue)
     {
         Operation = operation;
@@ -241,7 +246,7 @@ internal sealed record RcCall(DateTimeOffset At, string Operation, string? Targe
 internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IRcloneClient
 {
     private readonly object gate = new();
-    private readonly List<(string[] Operations, Hold Hold)> armed = [];
+    private readonly List<(string[] Operations, string? Target, Hold Hold)> armed = [];
     private readonly List<RcCall> calls = [];
 
     public RcloneDouble Inner => inner;
@@ -264,7 +269,22 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
         var hold = new Hold(onCancel);
         lock (gate)
         {
-            armed.Add((operations, hold));
+            armed.Add((operations, null, hold));
+        }
+
+        return hold;
+    }
+
+    /// <summary>Arms a hold on the next <paramref name="operation"/> call whose mount point or fs is
+    /// <paramref name="target"/>. Needed since bs-5o4: the suspend sweep has several
+    /// <c>mount/unmount</c> calls in flight at once, in an order the spec does not fix, so a test
+    /// that wants one particular host's call held must say which.</summary>
+    public Hold HoldNextAt(OnCancel onCancel, string operation, string target)
+    {
+        var hold = new Hold(onCancel);
+        lock (gate)
+        {
+            armed.Add(([operation], target, hold));
         }
 
         return hold;
@@ -330,7 +350,8 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
         lock (gate)
         {
             calls.Add(new RcCall(time.GetUtcNow(), operation, target));
-            var index = armed.FindIndex(a => a.Operations.Contains(operation));
+            var index = armed.FindIndex(a => a.Operations.Contains(operation)
+                                             && (a.Target is null || string.Equals(a.Target, target, StringComparison.OrdinalIgnoreCase)));
             hold = index < 0 ? null : armed[index].Hold;
             if (index >= 0)
             {
@@ -343,6 +364,17 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
             await hold.Begin(operation, target ?? string.Empty, token, () => null);
         }
 
-        return await proceed();
+        // The in-memory double is not thread-safe, and released holds resume on pool threads: since
+        // bs-5o4 the supervisor has several rc calls in flight at once, so two of them can be released
+        // together. The double's calls complete synchronously, so the lock covers all of their work.
+        Task<T> result;
+        lock (doubleGate)
+        {
+            result = proceed();
+        }
+
+        return await result;
     }
+
+    private readonly object doubleGate = new();
 }

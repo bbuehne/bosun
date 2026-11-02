@@ -2168,3 +2168,40 @@ early return in `EnableHostAsync` closes the part of the hole that matters, whic
   while a suspend is already pending covers the likelier case.
 - The counter is not decremented if the supervisor loop is already dead. Nothing can mount without the loop,
   so the closed gate costs nothing.
+
+### Amendment (2026-11-02, bs-5o4): the suspend sweep unmounts all hosts, then verifies
+
+**Amendment.** ADR-023 makes sure the suspend is not kept waiting behind routine checks. It left the
+suspend's own work serial: `RunSuspendAsync` drained each `Mounted` or `Mounting` host in turn, and one
+drain step is `mount/unmount`, `mount/listmounts`, and (past the budget) a forced `mount/unmount` and
+another `mount/listmounts`. Against a stuck `rclone rcd` a step takes up to about 80 s (30 + 10 + 30 + 10),
+so host N's unmount was not even requested until hosts 1 to N-1 had each finished one, and the later
+hosts were not unmounted before the machine slept (Invariant I8).
+
+The maintainer decided on 2026-11-02: **on suspend, send every `mount/unmount` first, then verify them;
+every drive gets its unmount request inside the budget.** Built as follows (`docs/ARCHITECTURE.md` §4
+rule 5 has the behaviour):
+
+- The suspend moves every host to `Draining` with no rc call, then sends all the `mount/unmount` requests
+  together (every call is started before any is awaited; each keeps its own 30 s `RcloneClient` timeout),
+  verifies with one `mount/listmounts`, and escalates what is still listed and past the budget the same
+  way (all forced requests together, one more `mount/listmounts`). Concurrent requests were chosen over
+  sequential-without-verification because a stuck call would still hold the next host's request for its
+  whole 30 s timeout; concurrent puts the last host's request on the wire at the instant of the first's.
+- The per-host `Draining` state, the escalation flag, the arrival-counted budget (`bs-7d7`) and the
+  per-host retry timer are unchanged; no state or transition was added. Only the rc calls run
+  concurrently; every state change and log line stays on the channel. Only `MountSupervisor` makes the
+  calls.
+- Scope: the suspend sweep only. Hosts that were already `Draining` when the suspend arrived keep the
+  behaviour of `bs-u4a` item 4 (each is re-driven one at a time after the sweep). The general drain path
+  is not changed for any other drain cause.
+- Not changed, and left open: a host that is still unconfirmed after the sweep retries on its own timer,
+  so when several reach the same deadline their re-issued requests run one host's step at a time. Each
+  of them has already had its first request issued.
+
+*Note (2026-11-02, independent review of `bs-5o4`).* The sweep awaits every request before
+verifying, on the channel, so one hung `mount/unmount` (up to its 30 s timeout) delays the other hosts'
+verification and forced unmount past arrival plus the budget. Accepted rather than adding per-host
+continuations: every host's first request still leaves at arrival, which is what I8 needs; a second
+identical request at 3 s or 30 s both land after Windows has slept (~2 s); resume reconciles
+(ADR-017). `docs/ARCHITECTURE.md` §4 rule 5 states this.
