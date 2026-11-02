@@ -296,7 +296,10 @@ Never mark a bd issue done on a subagent's claim alone.
 Bosun is v1 when, on the maintainer's machine:
 
 1. Configured hosts appear as Windows Terminal profiles with correct colours,
-   and `wt -w 0 new-tab -p "<host>"` opens a working session.
+   and `wt -w 0 new-tab -p "{guid}"` opens a working session, where `{guid}` is
+   the braced profile GUID in the generated fragment (derived from the host's
+   config key, ADR-013). Selecting by name is not the contract: the profile's
+   name is `display_name`, not the key.
 2. Persistent-tier hosts mount at login, appear as drive letters, and support
    drag-and-drop with Explorer in both directions.
 3. On-demand hosts mount and unmount from the tray menu, and auto-unmount after

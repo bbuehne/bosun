@@ -80,8 +80,8 @@ Dependency notation: `E3 ← E2` means E3 is blocked by E2.
 - tmux variant: `ssh -t <host> tmux new -A -s <session>`
 - Optional reconnect wrapper script generation
 - Rewrite on config change; never touch `settings.json`
-- Test: fragment is valid JSON, Terminal loads it, `wt -w 0 new-tab -p "<host>"`
-  opens a session
+- Test: fragment is valid JSON, Terminal loads it, `wt -w 0 new-tab -p "{guid}"`
+  (the braced profile GUID from the fragment, ADR-013) opens a session
 
 ## E8 — Session monitor ← E1
 

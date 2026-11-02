@@ -652,6 +652,17 @@ binary: a quoted key path containing spaces survives the reconnect wrapper as a
 single argv entry (no `/s` needed), and Windows OpenSSH expands a leading `~` in
 `-i` itself — so the generator passes the path through unexpanded and stays pure.
 
+**Amendment 2 (2026-11-02, `bs-4ic`, `bs-2s1`) — launch by GUID, not by name.**
+Decision 2 makes the GUID the stable identity, but launch sites and the docs still
+said `wt -p "<host>"`. That selects by profile **name**, and the name is
+`display_name`, not the config key, so it matched only when the two happened to be
+equal. Every Bosun launch of a profile (tray "Open terminal", autostart tabs) now
+passes the braced GUID — `wt -w 0 new-tab -p "{guid}"` — built in one place,
+`TerminalProfileArgument`. Windows Terminal documents `--profile` as accepting a
+name or a GUID; the maintainer confirmed on 2026-11-02 that the braced GUID form
+opens the right profile on their machine. CLAUDE.md §7 item 1 and
+`docs/WORK-BREAKDOWN.md` (E7) state the GUID form.
+
 ---
 
 ## ADR-014 — Unreachable hosts: poll by tier, and make the Mount click mean something
