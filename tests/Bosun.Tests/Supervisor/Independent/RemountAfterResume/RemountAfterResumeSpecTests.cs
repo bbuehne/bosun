@@ -146,7 +146,7 @@ public sealed class RemountAfterResumeSpecTests
     /// <summary>
     /// <b>Protects:</b> ADR-022 alongside rule 6: a persistent and an on-demand host suspended
     /// together both come back, and when both hosts' first probes fail, the persistent host returns
-    /// on its own ladder once its server is back (T2) while the on-demand host stays down and unpolled.
+    /// on its own ladder once its server is back (T1, T2) while the on-demand host stays down and unpolled.
     /// <b>Catches:</b> the on-demand remount hijacking or replacing the persistent path, or the
     /// on-demand host being put on the persistent backoff ladder after its failed first probe.
     /// </summary>
@@ -274,7 +274,7 @@ public sealed class RemountAfterResumeSpecTests
 
     /// <summary>
     /// <b>Protects:</b> rule 9a "A host already <c>Draining</c> ... when suspend arrives is not
-    /// noted" -- here an idle-timeout drain whose unmount has not confirmed when the lid closes.
+    /// noted" -- here an idle-timeout drain whose unmount has not confirmed when the machine suspends.
     /// <b>Catches:</b> recording every host the suspend touches, including one already on its way
     /// down for its own reason; the drive the idle timer was removing would reappear after wake.
     /// </summary>

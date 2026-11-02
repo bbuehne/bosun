@@ -440,7 +440,7 @@ public sealed class RepairAllSpecTests
 
     /// <summary>
     /// Invariant I8 in reverse: no probe and no mount in the moments around a suspend. Bug class:
-    /// a repair click (tray menu, during the lid-close) that re-enables hosts while suspended.
+    /// a repair click (tray menu, while the machine is going to sleep) that re-enables hosts while suspended.
     /// </summary>
     [Fact]
     public async Task A_repair_while_suspended_has_no_effect()

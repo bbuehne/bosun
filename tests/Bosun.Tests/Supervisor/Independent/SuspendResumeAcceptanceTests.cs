@@ -6,13 +6,16 @@ namespace Bosun.Tests.Supervisor.Independent;
 
 /// <summary>
 /// Invariant I8, docs/ARCHITECTURE.md §4 rule 5 and the Backoff section, and the manual protocol in
-/// docs/OPERATIONS.md T1/T2 -- T2 being, per CLAUDE.md §7, "the acceptance test that matters".
+/// docs/OPERATIONS.md T1 (overnight sleep) and T2 (network interruption), the tests behind
+/// CLAUDE.md §7 items 4 and 5, which it calls "the acceptance tests that matter".
 /// </summary>
 public sealed class SuspendResumeAcceptanceTests
 {
     /// <summary>
-    /// docs/OPERATIONS.md T2, automated end to end: a LAN host is mounted, the lid closes, the
-    /// machine wakes somewhere the host is unreachable, and later returns to the LAN.
+    /// Automated end to end, the T1 resume side where the network is not up at wake (docs/OPERATIONS.md
+    /// T1 step 6): a LAN host is mounted, the machine suspends, wakes with the host unreachable, and
+    /// the network later returns. The test name keeps the retired laptop framing (a different network
+    /// at wake); the behaviour pinned is the same.
     /// </summary>
     /// <remarks>
     /// Three separate ways to fail this, each a real bug: remounting on resume without re-probing
@@ -63,7 +66,7 @@ public sealed class SuspendResumeAcceptanceTests
 
     /// <summary>
     /// Bug this catches: a suspend handler that stops at the first host, or that only handles the
-    /// persistent tier. Any host left mounted through a suspend is the T2 failure mode.
+    /// persistent tier. Any host left mounted through a suspend is the T1 failure mode.
     /// </summary>
     [Fact]
     public async Task Suspend_drains_every_mounted_host_not_only_the_first()
@@ -183,7 +186,7 @@ public sealed class SuspendResumeAcceptanceTests
     /// docs/ARCHITECTURE.md §4 Backoff: "reset to zero by a network address change". The reset has
     /// to happen <b>before</b> the forced probe, otherwise the failure that probe records lands on
     /// the old rung. Bug this catches: resetting after the probe, or not at all -- which makes
-    /// docking and undocking feel sluggish (up to five minutes) instead of immediate, the exact
+    /// a resume or a network change feel sluggish (up to five minutes) instead of immediate, the exact
     /// property the Backoff section says the reset exists for.
     /// </summary>
     [Fact]

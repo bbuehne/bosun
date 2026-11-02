@@ -6,10 +6,10 @@ namespace Bosun.Tests.Supervisor.Independent;
 
 /// <summary>
 /// The resume side of Invariant I8, aimed at the failure mode that actually occurs on the
-/// maintainer's machine: a desktop that sleeps overnight and wakes the next morning. The docking /
-/// changed-network story in docs/OPERATIONS.md T2 is covered elsewhere and does not apply to this
-/// hardware -- what applies is a long sleep, and a network that may have been interrupted while the
-/// machine was down.
+/// maintainer's machine: a desktop that sleeps overnight and wakes the next morning. This is the
+/// automated counterpart of docs/OPERATIONS.md T1 (overnight sleep); the link-loss case, T2
+/// (network interruption), is covered elsewhere. What applies on this hardware is a long sleep, and
+/// a network that may have been interrupted while the machine was down.
 /// </summary>
 /// <remarks>
 /// <para>

@@ -310,8 +310,8 @@ public sealed class RcCallTimeoutTests
     /// <summary>
     /// Bug caught: a network change whose <c>core/version</c> gate times out stops the whole
     /// command, so the immediate re-probe of unreachable hosts (§4 Backoff: "reset by a network
-    /// address change") never happens. The host is left waiting out its backoff ladder after a
-    /// dock. This pins the control row's behaviour: the gate guards re-derivation only, not the
+    /// address change") never happens. The host is left waiting out its backoff ladder after the
+    /// link returns. This pins the control row's behaviour: the gate guards re-derivation only, not the
     /// backoff reset. See the report's ambiguity note.
     /// </summary>
     [Theory]

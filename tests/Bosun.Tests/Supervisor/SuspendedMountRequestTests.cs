@@ -116,7 +116,7 @@ public sealed class SuspendedMountRequestTests
     /// <summary>
     /// <b>Protects:</b> the second half of the decision. A refused request must NOT clear
     /// UserParked: the user's earlier explicit unmount still stands, so resume must not remount the
-    /// host just because someone clicked Mount while the lid was closing.
+    /// host just because someone clicked Mount while the machine was suspending.
     /// <b>Catches:</b> the old ordering, where <c>host.UserParked = false</c> ran before the
     /// refusal -- the host would then auto-mount at resume against the user's wish.
     /// </summary>

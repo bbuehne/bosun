@@ -36,7 +36,7 @@ public sealed class Adr014UnreachableTierSplitTests
 
     /// <summary>Decision 1: persistent hosts keep laddering while Unreachable, unchanged from
     /// pre-ADR-014 behaviour -- that is the mechanism by which a drive returns on its own
-    /// (docs/OPERATIONS.md T2).</summary>
+    /// (docs/OPERATIONS.md T1 and T2).</summary>
     [Fact]
     public async Task A_persistent_host_stuck_Unreachable_keeps_laddering()
     {

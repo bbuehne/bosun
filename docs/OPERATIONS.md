@@ -179,7 +179,7 @@ Two rules for using this section:
    | `N` | `global.failures_before_unmount` | 3 |
    | `U` | shallow worst case, `I × N` | 180 s |
    | `D` | `global.mounted_deep_probe_interval_seconds` | 300 s |
-   | `2D` | deep-probe worst case (ADR-016: two consecutive failures) | 600 s |
+   | `2D` | two deep-probe intervals (ADR-016: two consecutive failures); the worst case is `2D + 2P` | 600 s |
    | `P` | `global.probe_timeout_seconds` | 5 s |
    | `B` | `global.suspend_unmount_timeout_seconds`, the suspend budget | 3 s |
    | rc port | `global.rclone_rc_port` | 5572 |
@@ -605,8 +605,8 @@ the restart mounted the host exactly once. **FAIL** otherwise. (If an adoption l
 
 The TCP port stays reachable, so the shallow probe keeps passing, while the SSH
 channel underneath the mount is dead. The recurring deep probe is the only thing that
-can see this. Its worst case is `2D` (10 minutes with defaults): two consecutive deep
-failures, one per `D`.
+can see this. Its worst case is `2D + 2P` (610 s with defaults): two consecutive deep
+failures, one per `D`, each failing probe taking up to `P`.
 
 1. **Shorten the clock for the test.** Quit Bosun, set
    `mounted_deep_probe_interval_seconds = 60` in `[global]`, start Bosun. Now
@@ -661,10 +661,9 @@ failures, one per `D`.
    drive-type listing (see the Drive check shared step).
 7. Time it. **Expected:** the `Mounted -> Draining` line is between `D` and `2D` after
    `t0` (it cannot be sooner without a network-change or resume event, whose trigger
-   text would then say `immediately after`). The documented bound is `2D`. Because each
-   failing deep probe itself takes up to `P` seconds, accept `2D + 2P` before calling it a
-   failure; if you need the allowance, note it, because the ADR states the bound
-   without it.
+   text would then say `immediately after`). The documented bound is `2D + 2P` (ADR-016's
+   2026-11-02 amendment): each failing deep probe itself takes up to `P` seconds. A line
+   between `2D` and `2D + 2P` is inside the bound; note that you needed the allowance.
 8. Undo the cause (Method A: `Remove-NetFirewallRule -DisplayName 'Bosun protocol T7*'`,
    then check `Get-NetFirewallRule -DisplayName 'Bosun protocol T7*'` finds nothing; B and
    C need nothing). **Expected:** the host re-probes, `Mounting -> Mounted` returns, the drive check

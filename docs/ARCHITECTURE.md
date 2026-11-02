@@ -504,6 +504,40 @@ right before building any UI.
    The activity is seen at the granularity of the probe interval: the clock restarts up to one
    mounted-probe interval after the activity itself.
 
+   **A reload while the drive is mounted** (`bs-4hc`; this is what the code does, recorded
+   so that it is a decision and not an accident). A config reload re-evaluates the idle clock
+   only for a host whose own entry changed. A change to `[global]` or to another host leaves it
+   alone, and none of the changes below drains the mount.
+
+   - *`idle_unmount_seconds` changed* (N to M, both above zero). The clock restarts at the
+     reload and runs M seconds from then. It counts from the reload, not from the last
+     activity or from the deadline the old value had set. The activity baseline is kept. The
+     same restart happens when the host's `probe.interval_seconds` or `probe.deep_probe`
+     changes, because that reload re-arms the mounted-probe timer and the idle clock
+     together. Setting it to `0` disarms the clock for that mount.
+   - *`idle_unmount_seconds` changed from `0` to N.* A drive mounted while the value was `0`
+     was never sampled (only on-demand hosts with `idle_unmount_seconds > 0` are), so at the
+     reload it has **no baseline**. The reload also re-arms the mounted-probe timer, and the
+     first passing mounted probe after it takes the baseline, one mounted-probe interval later
+     at most. If N is longer than that interval the baseline exists when the clock fires, and
+     an idle drive unmounts at reload + N. If N is no longer than the interval, the clock can
+     fire first, find nothing to compare with, record a baseline and wait one more period (the
+     last case of "Safety when the clock fires"): the drive unmounts at reload + 2N.
+   - *`persistent` to `on-demand`.* The mount is kept, not drained, and the idle clock is armed
+     for the new tier at once, from the reload, when the new entry has `idle_unmount_seconds > 0`.
+     A drive the user thought of as always-on can therefore unmount itself N seconds after the
+     reload. A persistent mount was never sampled, so the same no-baseline reading applies:
+     the first passing mounted probe takes the baseline, and an idle drive unmounts at
+     reload + N, or reload + 2N when N is no longer than the mounted-probe interval. (The
+     reverse, `on-demand` to `persistent`, disarms the clock.)
+   - *An adopted mount.* A mount Bosun finds already running at startup is sampled and
+     idle-unmounted like one it made itself. Adoption only accepts a mount whose `fs` equals
+     `bosun-<key>:<remote_path>` for the current config, and the poll builds that same string
+     from the current config, so the two agree. A mount serving any other `fs` is not adopted;
+     it is unmounted at startup (§6). What remains is the lookup in "Which VFS": if `vfs/list`
+     does not return that exact name, the poll fails and the drive is never idle-unmounted.
+     That fails closed, on purpose.
+
 8. **`RequestMountAsync` on an `Unreachable` host triggers an immediate probe**
    and proceeds to mount if it passes. It is never a silent no-op — a tray menu
    item that does nothing, forever, with no error is not a defensible behaviour.
@@ -617,15 +651,16 @@ An `Unreachable` host's next probe, which runs in place (rule 10), is paced by t
 configured backoff ladder, default
 `[5, 15, 30, 60, 300]` seconds, holding at the last value. Backoff is **reset to
 zero** by a network address change, a power resume, or an explicit user "retry
-now". This is what makes the dock/undock experience feel immediate rather than
-sluggish.
+now". This is what makes recovery after a resume or a network interruption feel
+immediate rather than sluggish.
 
 **The ladder runs for `persistent` hosts only.** An **on-demand** host in
 `Unreachable` is not polled at all; it stays dark until the user acts, and rule 8
 is what makes that safe. This is what makes ADR-008's and ADR-011's promise —
 "on-demand hosts generate no traffic until the user mounts one" — literally true
 rather than approximately true. Persistent hosts must keep polling: that is the
-mechanism by which a drive returns on its own, which is `docs/OPERATIONS.md` T2.
+mechanism by which a drive returns on its own, which `docs/OPERATIONS.md` T1 (the
+wake where the network is not up yet) and T2 (the link coming back) both exercise.
 See ADR-014.
 
 **Resume and network change do NOT inherit the tier split.** They reset backoff and
@@ -634,15 +669,15 @@ force an immediate probe for **every enabled host**, on-demand included. Only th
 
 The distinction is scale, not principle. ADR-014's stated cost is that polling
 hosts the user is not using "makes the UI slow and the auth logs noisy" — an
-argument about *continuous* traffic, every rung, forever. A resume or a dock is a
-rare, bounded event producing exactly one probe per host. That cost is not the
+argument about *continuous* traffic, every rung, forever. A resume or a network
+change is a rare, bounded event producing exactly one probe per host. That cost is not the
 cost ADR-014 was avoiding.
 
 And suppressing it would defeat the thing the reset exists for. `docs/OPERATIONS.md`
-T2 — close the lid on one network, open it on another — is the acceptance test that
-matters, and an on-demand host still displaying a stale `Unreachable` after the
-machine has moved networks is precisely the sluggishness this section says the
-reset eliminates. ADR-008 says on-demand rows "render as unknown until acted on";
+T1 (overnight sleep) and T2 (network interruption) are the acceptance tests that
+matter, and an on-demand host still displaying a stale `Unreachable` after the
+machine has woken, or its network has come back, is precisely the sluggishness this
+section says the reset eliminates. ADR-008 says on-demand rows "render as unknown until acted on";
 a host that is *known-stale* is a worse answer than one that is unknown.
 
 `mode = "none"` hosts remain untouched: they are not enabled, and are never probed.
@@ -708,7 +743,7 @@ state directly, it posts commands to the same channel.
 | Failure | Required behaviour |
 |---|---|
 | Host unreachable while mounted | Unmount within `interval × failures_before_unmount`. Explorer must not hang. |
-| Host stays TCP-reachable but the mount's SSH channel dies (sleep/resume, a network blip too brief to trip the shallow threshold) | Detected by the recurring deep probe, not the shallow one — unmount within `2 × mounted_deep_probe_interval_seconds` (the fixed deep-probe failure threshold). See ADR-016. |
+| Host stays TCP-reachable but the mount's SSH channel dies (sleep/resume, a network blip too brief to trip the shallow threshold) | Detected by the recurring deep probe, not the shallow one — the drain begins within `2 × mounted_deep_probe_interval_seconds + 2 × probe_timeout_seconds` (two consecutive failures, the fixed deep-probe failure threshold, each failing probe taking up to the timeout); 610 s with the defaults 300 and 5. See ADR-016 and its 2026-11-02 amendment. |
 | `rclone rcd` dies | Detect via health check, restart it, reconcile mounts from scratch. |
 | `rclone rcd` orphaned by a dead Bosun, still holding the rc port | Prevented by the Job Object; if one survives anyway (the few ms before assignment), the next launch kills it when its command line is exactly Bosun's own and it runs as the current user. Otherwise the port holder is reported by PID and image path. The fault text names the real cause (HTTP 401, exit code, port holder), never a generic "did not respond". See ADR-020 §1-2. |
 | WinFsp not installed | Detect at startup, show an actionable message, disable all mount features, leave terminal features working. |

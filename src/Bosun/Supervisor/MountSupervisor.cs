@@ -693,9 +693,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                     // Its stated cost -- "makes the UI slow and the auth logs noisy" -- is an
                     // argument about continuous traffic, every rung, forever; a resume is a rare,
                     // bounded event producing one probe per host. Suppressing it would leave an
-                    // on-demand host displaying a stale Unreachable after the machine has moved
-                    // networks, which is exactly the sluggishness §4's Backoff section says the
-                    // reset exists to eliminate, and OPERATIONS.md T2 is the acceptance test for it.
+                    // on-demand host displaying a stale Unreachable after the machine has woken
+                    // into a changed network, which is exactly the sluggishness §4's Backoff
+                    // section says the reset exists to eliminate; OPERATIONS.md T1 (overnight
+                    // sleep) and T2 (network interruption) are the acceptance tests for it.
 
                     host.Backoff = BackoffState.Initial;
                     await ForceImmediateIdleProbeAsync(host, "resume: bypass backoff", ct).ConfigureAwait(false);
@@ -728,9 +729,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         foreach (var host in hosts.Values.Where(h => h.State is MountState.Ready or MountState.Unreachable).ToList())
         {
             // No tier split -- same reasoning as ResumeAsync above. ADR-014 splits the recurring
-            // ladder; a network change is one bounded probe per host, and it is the event T2 turns
-            // on. An on-demand row left showing a stale Unreachable after a dock is worse than
-            // ADR-008's "unknown until acted on", because it is confidently wrong rather than blank.
+            // ladder; a network change is one bounded probe per host, and it is the event T2 (network
+            // interruption) turns on. An on-demand row left showing a stale Unreachable after the
+            // link returns is worse than ADR-008's "unknown until acted on", because it is
+            // confidently wrong rather than blank.
             host.Backoff = BackoffState.Initial;
             await ForceImmediateIdleProbeAsync(host, "network change: bypass backoff", ct).ConfigureAwait(false);
         }

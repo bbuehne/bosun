@@ -16,7 +16,7 @@ namespace Bosun.Tests.Supervisor.Independent.SuspendBudget;
 /// <para>
 /// Why it matters (Invariant I8): the ordinary drain escalates after a fixed 10 s. The suspend handler
 /// gets roughly two seconds before Windows sleeps (PBT_APMSUSPEND). A drain that was already running
-/// when the lid closed could therefore still be on its 10 s clock when the machine sleeps, and the
+/// when the machine suspended could therefore still be on its 10 s clock when the machine sleeps, and the
 /// forced unmount would never be sent. The drive letter then survives the sleep.
 /// </para>
 /// <para>
@@ -149,7 +149,7 @@ public sealed class SuspendWhileDrainingSpecTests
     /// once shortened, stays short. That is the safe direction: escalating at t0+4 rather than t0+10
     /// only means the forced unmount comes sooner.
     /// <b>Catches:</b> a resume that clears the suspend deadline, so a suspend/resume/suspend sequence
-    /// (a lid bounce) puts the drain back on the 10 s clock and the next sleep misses it.
+    /// (a suspend, resume, suspend bounce) puts the drain back on the 10 s clock and the next sleep misses it.
     /// </summary>
     [Fact]
     public async Task A_resume_before_the_shortened_deadline_does_not_push_escalation_back_to_ten_seconds()
@@ -171,7 +171,7 @@ public sealed class SuspendWhileDrainingSpecTests
 
     /// <summary>
     /// <b>Protects:</b> "a second suspend never moves a deadline later", with a resume in between
-    /// (a lid closed, opened, and closed again within a few seconds).
+    /// (a suspend, a resume, and a second suspend within a few seconds).
     /// <b>Catches:</b> a resume that forgets the earlier deadline and lets the second suspend set a
     /// later one (t0+5 instead of t0+4).
     /// </summary>
@@ -313,7 +313,7 @@ public sealed class SuspendWhileDrainingSpecTests
     /// <b>Protects:</b> rule 5's shortened deadline for a drain caused by the mounted-probe failure
     /// threshold (rule 3).
     /// <b>Catches:</b> the same omission as above for the most common ordinary drain: the host went
-    /// unreachable, the drain started, and the lid closed a second later.
+    /// unreachable, the drain started, and the machine suspended a second later.
     /// </summary>
     [Fact]
     public async Task A_probe_failure_drain_escalates_by_suspend_arrival_plus_budget()
