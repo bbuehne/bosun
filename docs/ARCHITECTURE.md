@@ -342,6 +342,19 @@ right before building any UI.
 5. On suspend, every host in `Mounted` or `Mounting` goes to `Draining`, then
    `Disabled`.
 
+   A host that is **already `Draining`** for an ordinary reason when suspend
+   arrives (a probe-failure threshold, an idle timeout, a user unmount, a repair)
+   keeps its drain cause — a user unmount still parks it — but its forced-unmount
+   escalation deadline becomes the **suspend budget**
+   (`global.suspend_unmount_timeout_seconds`, counted from the moment suspend
+   arrives) instead of the ordinary 10 s `DrainConfirmTimeout`, which could fall
+   after the machine has gone to sleep. The supervisor re-issues the unmount at
+   once and aims the next check at the new deadline. The change only ever
+   **shortens** a deadline: a drain whose ordinary deadline is already sooner than
+   suspend arrival plus the budget keeps it, and a second suspend never moves a
+   deadline later. A host already escalated is left alone (it is already on the
+   forced path). `bs-u4a` item 4.
+
    On resume, the supervisor **does not assume suspend succeeded** — it is
    best-effort by design, bounded by a budget that can elapse. It reconciles
    against `mount/listmounts` first; any host still `Mounted` is force-probed
