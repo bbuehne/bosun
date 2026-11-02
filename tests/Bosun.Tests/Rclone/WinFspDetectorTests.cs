@@ -46,6 +46,41 @@ public sealed class WinFspDetectorTests
         Assert.Contains(@"C:\Program Files (x86)\WinFsp", result.Message);
     }
 
+    /// <summary>
+    /// bs-65r: presence is decided by <c>HKLM\SOFTWARE\WinFsp\InstallDir</c> (32-bit registry view)
+    /// and by NOTHING else. Do not "improve" the detector by scanning Add/Remove Programs.
+    /// </summary>
+    /// <remarks>
+    /// Real-world reason, found on the maintainer's own machine: Add/Remove Programs lists
+    /// "WinFsp installed by Bitvise SSH Client (remove only)" -- an orphaned uninstall stub left by
+    /// the Bitvise install -- while WinFsp is NOT actually present (no install directory, no
+    /// <c>HKLM\SOFTWARE\WinFsp</c> or <c>WOW6432Node\WinFsp</c> key, no driver service). An
+    /// uninstall-registry scan would report WinFsp present, and every mount would then fail with a
+    /// confusing rclone error instead of Bosun's actionable "WinFsp is not installed" message.
+    ///
+    /// The detector's only seam is the <c>InstallDir</c> reader (<c>Func&lt;string?&gt;</c>), so a
+    /// fake cannot present an uninstall entry for the detector to ignore. What this test pins is the
+    /// contract at that seam: the reader returning no <c>InstallDir</c> means absent, with exactly
+    /// one source consulted. If the detector ever gains a second input, its constructor must
+    /// change and this test is the prompt to reconsider why that is safe.
+    /// </remarks>
+    [Fact]
+    public void Detect_with_no_InstallDir_is_absent_regardless_of_any_orphaned_uninstall_entry()
+    {
+        var installDirReads = 0;
+        var detector = new WinFspDetector(() =>
+        {
+            installDirReads++;
+            return null; // InstallDir absent; the Bitvise "remove only" stub is invisible to the detector.
+        });
+
+        var result = detector.Detect();
+
+        Assert.False(result.IsInstalled);
+        Assert.Null(result.InstallDirectory);
+        Assert.Equal(1, installDirReads);
+    }
+
     [Fact]
     public void Detect_treats_an_empty_string_the_same_as_absent()
     {
