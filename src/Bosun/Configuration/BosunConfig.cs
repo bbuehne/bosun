@@ -44,7 +44,23 @@ public sealed record GlobalConfig
     public static readonly IReadOnlyList<int> DefaultBackoffSeconds = [5, 15, 30, 60, 300];
 
     public int RcloneRcPort { get; init; } = DefaultRcloneRcPort;
+    /// <summary>The path exactly as written in TOML (or the default), unexpanded: it may contain
+    /// <c>%VAR%</c> tokens such as <c>%APPDATA%</c>. Kept literal so a config rewrite
+    /// (<c>HostConfigTomlWriter</c>) round-trips what the user wrote instead of baking in this
+    /// machine's expansion. Consumers wanting a usable file path call
+    /// <see cref="ResolveRcloneConfigPath"/> -- the one place environment variables in this
+    /// field are expanded (bs-3ip).</summary>
     public string RcloneConfigPath { get; init; } = DefaultRcloneConfigPath;
+
+    /// <summary><see cref="RcloneConfigPath"/> with <c>%VAR%</c> environment-variable tokens
+    /// expanded, ready to hand to rclone's <c>--config</c>. The single point of environment
+    /// expansion for this field; do not call <see cref="Environment.ExpandEnvironmentVariables(string)"/>
+    /// on it elsewhere.</summary>
+    /// <param name="expandEnvironmentVariables">Injected expander; defaults to
+    /// <see cref="Environment.ExpandEnvironmentVariables(string)"/>. Tests pass a fake so no result
+    /// depends on the machine's real environment.</param>
+    public string ResolveRcloneConfigPath(Func<string, string>? expandEnvironmentVariables = null) =>
+        (expandEnvironmentVariables ?? Environment.ExpandEnvironmentVariables)(RcloneConfigPath);
     public int ProbeTimeoutSeconds { get; init; } = DefaultProbeTimeoutSeconds;
     public int FailuresBeforeUnmount { get; init; } = DefaultFailuresBeforeUnmount;
     public IReadOnlyList<int> BackoffSeconds { get; init; } = DefaultBackoffSeconds;

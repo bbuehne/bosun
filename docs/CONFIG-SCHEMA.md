@@ -18,6 +18,11 @@ suspend_unmount_timeout_seconds = 3   # Windows allows ~2 s for PBT_APMSUSPEND; 
 start_with_windows      = true
 ```
 
+`rclone_config_path` may contain `%VAR%` environment-variable tokens. They are kept
+literal in the bound config (so a config rewrite writes back what you wrote) and
+expanded at use by `GlobalConfig.ResolveRcloneConfigPath`, the single place that
+expansion happens (bs-3ip).
+
 ## Per host
 
 ```toml
@@ -155,6 +160,16 @@ Reject the whole config, keep the previous one, and surface the error if any of:
 - `global.rclone_rc_port` outside `1`–`65535`
 - `global.suspend_unmount_timeout_seconds` zero or negative — Invariant I8
   requires everything unmounted within this window before the machine sleeps.
+- a host key whose derived rclone remote name (`bosun-<key>`) rclone would reject
+  (rule `invalid-rclone-remote-name`, bs-3ip). The rule is rclone's own config-name
+  grammar, `configNameRe` in
+  [`fs/fspath/path.go`](https://github.com/rclone/rclone/blob/master/fs/fspath/path.go):
+  `[\w\p{L}\p{N}.+@]+(?:[ -]+[\w\p{L}\p{N}.+@-]+)*` — letters, digits, `_` `-` `.`
+  `+` `@` and space, not starting with `-` or space, not ending with space. Because
+  of the `bosun-` prefix, every TOML *bare* key (`[A-Za-z0-9_-]`) is always legal;
+  the rule bites on quoted keys such as `[hosts."a:b"]`, `[hosts."trailing "]` or
+  `[hosts.""]`. Applies to every host regardless of `mount.mode`, since a remote is
+  provisioned for each.
 - `session.tmux = true` with a null, absent or empty `session.tmux_session` — otherwise
   `FragmentProfileGenerator` silently falls back to a shared default session name
   (`"main"`), which is defence-in-depth, not something authors should rely on.
