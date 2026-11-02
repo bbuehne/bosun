@@ -37,6 +37,18 @@ public sealed class RowContributionTests
             StatusDerivation.ContributionOf(HostRowFactory.Row(StatusCategory.ProvisioningFailed, state: MountState.Ready)));
     }
 
+    [Theory]
+    [InlineData(MountMode.Persistent)]
+    [InlineData(MountMode.OnDemand)]
+    public void A_mounted_host_with_failed_uploads_is_Degraded_for_either_tier(MountMode mode)
+    {
+        // Maintainer decision 2026-11-02 (bs-t12).
+        Assert.Equal(
+            AggregateHealth.Degraded,
+            StatusDerivation.ContributionOf(
+                HostRowFactory.Row(StatusCategory.UploadsFailing, state: MountState.Mounted, mode: mode)));
+    }
+
     [Fact]
     public void The_roll_up_is_the_worst_row_contribution()
     {
