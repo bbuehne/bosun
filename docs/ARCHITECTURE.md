@@ -504,6 +504,40 @@ right before building any UI.
    The activity is seen at the granularity of the probe interval: the clock restarts up to one
    mounted-probe interval after the activity itself.
 
+   **A reload while the drive is mounted** (`bs-4hc`; this is what the code does, recorded
+   so that it is a decision and not an accident). A config reload re-evaluates the idle clock
+   only for a host whose own entry changed. A change to `[global]` or to another host leaves it
+   alone, and none of the changes below drains the mount.
+
+   - *`idle_unmount_seconds` changed* (N to M, both above zero). The clock restarts at the
+     reload and runs M seconds from then. It counts from the reload, not from the last
+     activity or from the deadline the old value had set. The activity baseline is kept. The
+     same restart happens when the host's `probe.interval_seconds` or `probe.deep_probe`
+     changes, because that reload re-arms the mounted-probe timer and the idle clock
+     together. Setting it to `0` disarms the clock for that mount.
+   - *`idle_unmount_seconds` changed from `0` to N.* A drive mounted while the value was `0`
+     was never sampled (only on-demand hosts with `idle_unmount_seconds > 0` are), so at the
+     reload it has **no baseline**. The reload also re-arms the mounted-probe timer, and the
+     first passing mounted probe after it takes the baseline, one mounted-probe interval later
+     at most. If N is longer than that interval the baseline exists when the clock fires, and
+     an idle drive unmounts at reload + N. If N is no longer than the interval, the clock can
+     fire first, find nothing to compare with, record a baseline and wait one more period (the
+     last case of "Safety when the clock fires"): the drive unmounts at reload + 2N.
+   - *`persistent` to `on-demand`.* The mount is kept, not drained, and the idle clock is armed
+     for the new tier at once, from the reload, when the new entry has `idle_unmount_seconds > 0`.
+     A drive the user thought of as always-on can therefore unmount itself N seconds after the
+     reload. A persistent mount was never sampled, so the same no-baseline reading applies:
+     the first passing mounted probe takes the baseline, and an idle drive unmounts at
+     reload + N, or reload + 2N when N is no longer than the mounted-probe interval. (The
+     reverse, `on-demand` to `persistent`, disarms the clock.)
+   - *An adopted mount.* A mount Bosun finds already running at startup is sampled and
+     idle-unmounted like one it made itself. Adoption only accepts a mount whose `fs` equals
+     `bosun-<key>:<remote_path>` for the current config, and the poll builds that same string
+     from the current config, so the two agree. A mount serving any other `fs` is not adopted;
+     it is unmounted at startup (§6). What remains is the lookup in "Which VFS": if `vfs/list`
+     does not return that exact name, the poll fails and the drive is never idle-unmounted.
+     That fails closed, on purpose.
+
 8. **`RequestMountAsync` on an `Unreachable` host triggers an immediate probe**
    and proceeds to mount if it passes. It is never a silent no-op — a tray menu
    item that does nothing, forever, with no error is not a defensible behaviour.
