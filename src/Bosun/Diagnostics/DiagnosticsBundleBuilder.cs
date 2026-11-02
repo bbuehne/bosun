@@ -6,6 +6,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Bosun.Health;
+using Bosun.Hosting;
 using Bosun.Rclone;
 using Bosun.Rclone.Process;
 using Bosun.Supervisor;
@@ -36,6 +37,22 @@ public sealed record DiagnosticsBundleOptions
     /// <summary>How long to wait for <c>core/version</c>. A wedged or foreign rcd must not make a
     /// diagnostics click hang.</summary>
     public TimeSpan RcloneVersionTimeout { get; init; } = TimeSpan.FromSeconds(3);
+
+    /// <summary>How long to wait for <c>mount/listmounts</c> once <c>core/version</c> has answered
+    /// (bs-egu). Same reasoning as <see cref="RcloneVersionTimeout"/>.</summary>
+    public TimeSpan RcloneListMountsTimeout { get; init; } = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// The fallback file <c>BootstrapDiagnosticSink</c> appends start-up failures to (bs-egu),
+    /// <c>%TEMP%\Bosun\bootstrap-failures.log</c> in production. Null means there is none to look for.
+    /// It is a path the caller supplies, never a default read here, so a test cannot reach the real
+    /// <c>%TEMP%\Bosun</c> by forgetting to set it.
+    /// </summary>
+    public string? BootstrapFailuresLogPath { get; init; }
+
+    /// <summary>How much of the end of the bootstrap failure log is copied. The file is append-only and
+    /// never rotated, and the newest failure is the one that matters.</summary>
+    public int BootstrapFailuresLogTailBytes { get; init; } = 64 * 1024;
 
     /// <summary>
     /// The diagnostics directory that sits beside the log directory: with the production
@@ -75,9 +92,10 @@ public interface IDiagnosticsBundleBuilder
 /// <remarks>
 /// <para>
 /// <b>Layout.</b> <c>summary.txt</c> (open this first: health issues, then everything else in
-/// brief, then any collection problems), <c>health.json</c>, <c>hosts.json</c>,
-/// <c>processes.json</c>, <c>drives.json</c>, <c>events.json</c>, <c>version.txt</c>,
-/// <c>config.redacted.toml</c> and <c>logs/</c>.
+/// brief, then any collection problems), <c>health.json</c>, <c>startup.json</c>, <c>hosts.json</c>,
+/// <c>processes.json</c>, <c>drives.json</c>, <c>rclone-mounts.json</c> (rclone's own list of mounts,
+/// to compare with <c>drives.json</c>), <c>events.json</c>, <c>version.txt</c>,
+/// <c>config.redacted.toml</c>, <c>logs/</c> and, only if one exists, <c>bootstrap-failures.log</c>.
 /// </para>
 /// <para>
 /// <b>Independence.</b> Every section is collected in its own try block. A failure is written into
@@ -93,9 +111,17 @@ public interface IDiagnosticsBundleBuilder
 /// ends at.
 /// </para>
 /// <para>
+/// <b>Without a supervisor (bs-1kt).</b> Nothing but <c>hosts.json</c> needs the mount supervisor,
+/// and nothing but the rclone version needs the rc client, so when either cannot be built the bundle
+/// still carries the log tail, config, health issues, <c>startup.json</c> (which holds the
+/// supervisor's own start failure), processes and drives. The two sections that did need them say
+/// "unavailable: &lt;reason&gt;" in place of their data.
+/// </para>
+/// <para>
 /// <b>Safety.</b> Read-only throughout: no mount, unmount or rc mutation, and no touching a drive
-/// letter (see <see cref="IDriveLister"/>). The one rc call is <c>core/version</c>, bounded by
-/// <see cref="DiagnosticsBundleOptions.RcloneVersionTimeout"/>.
+/// letter (see <see cref="IDriveLister"/>). The only rc calls are <c>core/version</c> and
+/// <c>mount/listmounts</c>, each bounded by a timeout in <see cref="DiagnosticsBundleOptions"/>, and the
+/// second is only made once the first has answered.
 /// </para>
 /// </remarks>
 public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
@@ -119,8 +145,8 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
 
     private readonly DiagnosticsBundleOptions _options;
     private readonly IAppHealth _health;
-    private readonly IMountSupervisor _supervisor;
-    private readonly IRcloneClient _rclone;
+    private readonly Func<IMountSupervisor> _supervisor;
+    private readonly Func<IRcloneClient> _rclone;
     private readonly IPortOwnerResolver _portOwnerResolver;
     private readonly IProcessInspector _processInspector;
     private readonly IProcessLister _processLister;
@@ -129,6 +155,7 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
     private readonly IEnvironmentInfoSource _environment;
     private readonly DiagnosticsRedactor _redactor;
     private readonly TimeProvider _time;
+    private readonly Func<StartupReadiness?>? _startup;
     private readonly ILogger<DiagnosticsBundleBuilder>? _logger;
 
     public DiagnosticsBundleBuilder(
@@ -145,7 +172,42 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         RcloneRcCredential? credential,
         TimeProvider time,
         ILogger<DiagnosticsBundleBuilder>? logger = null)
+        : this(
+            options, health, () => supervisor, () => rclone, portOwnerResolver, processInspector, processLister,
+            driveLister, eventSource, environment, credential, time, startup: null, logger)
     {
+    }
+
+    /// <summary>
+    /// The production shape (bs-1kt): the supervisor and the rclone client are resolved when a section
+    /// needs them, inside that section's own try block, never when the builder is constructed. Both are
+    /// exactly the services the container cannot build when Bosun is at its worst (an invalid config
+    /// makes the rc client unbuildable; any fault in the supervisor's own dependencies makes the
+    /// supervisor unbuildable), and a builder that required them at construction made the command, and
+    /// so the tray item, unresolvable at the moment diagnostics matter most.
+    /// </summary>
+    /// <param name="supervisor">May throw. The hosts section then reads "unavailable: &lt;reason&gt;".</param>
+    /// <param name="rclone">May throw. The rclone version and mounts then read "unavailable".</param>
+    /// <param name="startup">The startup readiness snapshot, or null when there is none to read.</param>
+    public DiagnosticsBundleBuilder(
+        DiagnosticsBundleOptions options,
+        IAppHealth health,
+        Func<IMountSupervisor> supervisor,
+        Func<IRcloneClient> rclone,
+        IPortOwnerResolver portOwnerResolver,
+        IProcessInspector processInspector,
+        IProcessLister processLister,
+        IDriveLister driveLister,
+        IWindowsEventSource eventSource,
+        IEnvironmentInfoSource environment,
+        RcloneRcCredential? credential,
+        TimeProvider time,
+        Func<StartupReadiness?>? startup,
+        ILogger<DiagnosticsBundleBuilder>? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(supervisor);
+        ArgumentNullException.ThrowIfNull(rclone);
+        _startup = startup;
         _options = options;
         _health = health;
         _supervisor = supervisor;
@@ -163,23 +225,38 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
 
     public async Task<DiagnosticsBundleResult> BuildAsync(CancellationToken cancellationToken = default)
     {
-        // The only async collector, run first; everything else is synchronous I/O (CIM, Event Log,
+        // The only async collectors, run first; everything else is synchronous I/O (CIM, Event Log,
         // files) and goes on the thread pool so the UI thread that clicked the button stays live.
-        var rcloneVersion = await GetRcloneVersionAsync(cancellationToken).ConfigureAwait(false);
+        var rclone = await ObserveRcloneAsync(cancellationToken).ConfigureAwait(false);
 
-        return await Task.Run(() => Write(rcloneVersion, cancellationToken), cancellationToken).ConfigureAwait(true);
+        return await Task.Run(() => Write(rclone, cancellationToken), cancellationToken).ConfigureAwait(true);
     }
 
-    private async Task<string> GetRcloneVersionAsync(CancellationToken cancellationToken)
+    /// <summary>What rclone's rc API said: its version, and (bs-egu) its own list of mounts.</summary>
+    /// <param name="Version">The version line, or "unavailable (...)".</param>
+    /// <param name="Mounts">Always set. Unavailable whenever rcd did not answer <c>core/version</c>.</param>
+    /// <param name="MountsProblem">Set only when rcd answered <c>core/version</c> and then failed
+    /// <c>mount/listmounts</c>: unlike an rcd that is down, that is unexpected, so it is a collection
+    /// problem.</param>
+    private sealed record RcloneObservation(string Version, RcloneMountsReport Mounts, string? MountsProblem);
+
+    /// <summary>rclone's <c>mount/listmounts</c>, to compare with <c>drives.json</c>. Exactly one of
+    /// <see cref="Unavailable"/> and <see cref="Mounts"/> is set.</summary>
+    private sealed record RcloneMountsReport(string? Unavailable, IReadOnlyList<RcloneMountInfo>? Mounts);
+
+    private async Task<RcloneObservation> ObserveRcloneAsync(CancellationToken cancellationToken)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_options.RcloneVersionTimeout);
+        IRcloneClient client;
+        string version;
         try
         {
-            var version = await _rclone.GetVersionAsync(timeout.Token).ConfigureAwait(false);
-            return string.Join(
+            client = _rclone();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(_options.RcloneVersionTimeout);
+            var info = await client.GetVersionAsync(timeout.Token).ConfigureAwait(false);
+            version = string.Join(
                 ' ',
-                new[] { version.Version, version.Os is null ? null : $"({version.Os}/{version.Arch})" }
+                new[] { info.Version, info.Os is null ? null : $"({info.Os}/{info.Arch})" }
                     .Where(s => !string.IsNullOrEmpty(s)));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -190,11 +267,37 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         {
             // Expected whenever rcd is down, wedged, or someone else's (the very failures this
             // bundle exists for), so it is information, not a collection problem.
-            return $"unavailable ({ex.GetType().Name}: {FirstLine(ex.Message)})";
+            var reason = $"{ex.GetType().Name}: {FirstLine(ex.Message)}";
+            return new RcloneObservation(
+                $"unavailable ({reason})",
+                new RcloneMountsReport($"unavailable: rclone rc is not answering ({reason})", null),
+                MountsProblem: null);
+        }
+
+        // Only asked once rcd has answered core/version, so a wedged or foreign rcd costs one bounded
+        // wait, not two. mount/listmounts is rcd's in-memory table (no remote I/O) and read-only.
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(_options.RcloneListMountsTimeout);
+            var mounts = await client.ListMountsAsync(timeout.Token).ConfigureAwait(false);
+            return new RcloneObservation(version, new RcloneMountsReport(null, mounts), MountsProblem: null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var reason = $"{ex.GetType().Name}: {FirstLine(ex.Message)}";
+            return new RcloneObservation(
+                version,
+                new RcloneMountsReport($"unavailable: mount/listmounts failed ({reason})", null),
+                MountsProblem: $"rclone-mounts.json: mount/listmounts failed: {reason}");
         }
     }
 
-    private DiagnosticsBundleResult Write(string rcloneVersion, CancellationToken cancellationToken)
+    private DiagnosticsBundleResult Write(RcloneObservation rclone, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(_options.OutputDirectory);
 
@@ -209,7 +312,7 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
             using (var zip = new ZipArchive(file, ZipArchiveMode.Create))
             {
                 var sink = new ZipSink(zip, _redactor, now);
-                Collect(sink, problems, now, rcloneVersion, cancellationToken);
+                Collect(sink, problems, now, rclone, cancellationToken);
             }
 
             File.Move(tempPath, finalPath);
@@ -239,28 +342,42 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
     }
 
     private void Collect(
-        ZipSink sink, List<string> problems, DateTimeOffset now, string rcloneVersion, CancellationToken ct)
+        ZipSink sink, List<string> problems, DateTimeOffset now, RcloneObservation rclone, CancellationToken ct)
     {
         var nowUtc = now.ToUniversalTime();
 
         // --- Each block below is independent: a failure records a problem and the rest still run.
         var environment = Section("version.txt", problems, () => _environment.Get());
         var health = Section("health.json", problems, () => _health.Current);
+        var startup = Section("startup.json", problems, CollectStartup);
         var hosts = Section("hosts.json", problems, () => CollectHosts(nowUtc, problems));
         ct.ThrowIfCancellationRequested();
         var processes = Section("processes.json", problems, () => CollectProcesses(problems));
         var drives = Section("drives.json", problems, () => _driveLister.GetDrives());
+        if (rclone.MountsProblem is not null)
+        {
+            problems.Add(rclone.MountsProblem);
+        }
+
         ct.ThrowIfCancellationRequested();
         var events = Section("events.json", problems, () => CollectEvents(nowUtc));
         var logs = Section("logs/", problems, () => CopyLogs(sink, nowUtc, problems, ct));
         var config = Section("config.redacted.toml", problems, () => CollectConfig());
+        var bootstrap = Section("bootstrap-failures.log", problems, CollectBootstrapFailures);
 
         sink.WriteJson("health.json", health.Value is { } h ? h : Failed(health.Error));
+        sink.WriteJson("startup.json", startup.Value is { } st ? st : Failed(startup.Error));
         sink.WriteJson("hosts.json", hosts.Value is { } hs ? hs : Failed(hosts.Error));
         sink.WriteJson("processes.json", processes.Value is { } p ? p : Failed(processes.Error));
         sink.WriteJson("drives.json", drives.Value is { } d ? d : Failed(drives.Error));
         sink.WriteJson("events.json", events.Value is { } e ? e : Failed(events.Error));
-        sink.WriteText("version.txt", VersionText(environment.Value, rcloneVersion, nowUtc, environment.Error));
+        sink.WriteJson("rclone-mounts.json", new RcloneMountsFile(nowUtc, rclone.Mounts.Unavailable, rclone.Mounts.Mounts));
+        if (bootstrap.Value is { Present: true } bootstrapLog)
+        {
+            sink.WriteText("bootstrap-failures.log", bootstrapLog.Text);
+        }
+
+        sink.WriteText("version.txt", VersionText(environment.Value, rclone.Version, nowUtc, environment.Error));
         sink.WriteText(
             "config.redacted.toml",
             config.Value is { } c ? c : $"# collection failed: {config.Error}{Environment.NewLine}");
@@ -269,8 +386,8 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         // person opening it, and this is the file they open first.
         sink.WriteText(
             "summary.txt",
-            Summary(now, environment.Value, health.Value, hosts.Value, processes.Value, drives.Value, events.Value,
-                logs.Value, rcloneVersion, problems, sink.EntryNames));
+            Summary(now, environment.Value, health.Value, startup.Value, hosts.Value, processes.Value, drives.Value, events.Value,
+                logs.Value, rclone, bootstrap.Value, bootstrap.Error, problems, sink.EntryNames));
     }
 
     private static object Failed(string? error) => new { collectionFailed = error ?? "unknown error" };
@@ -294,19 +411,50 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         }
     }
 
+    // ---- startup.json ----------------------------------------------------------------------
+
+    /// <summary>
+    /// The startup readiness snapshot (bs-1kt): config state and its errors, WinFsp, rclone, and the
+    /// supervisor's own start failure. None of it needs the supervisor, which is the point: when the
+    /// supervisor could not be built, this is where the reason is written down in full.
+    /// </summary>
+    private StartupReport CollectStartup()
+    {
+        var readiness = _startup?.Invoke();
+        return readiness is null
+            ? new StartupReport(null, "unavailable: no startup readiness has been published (the startup sequence is not running in this process)")
+            : new StartupReport(readiness, null);
+    }
+
+    private sealed record StartupReport(StartupReadiness? Readiness, string? Unavailable);
+
     // ---- hosts.json ------------------------------------------------------------------------
 
     private HostsReport CollectHosts(DateTimeOffset nowUtc, List<string> problems)
     {
         // The supervisor's snapshot is a lock-free read of its own fields, so it works even when
         // the loop is wedged, which is the situation that matters.
-        var snapshot = _supervisor.GetSnapshot();
+        IMountSupervisor supervisor;
+        try
+        {
+            supervisor = _supervisor();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Not a collection problem: the supervisor failing to exist is a known state that the
+            // app-health issues (and startup.json) already explain, and the bundle is being taken
+            // precisely because of it. The section says so in its own words instead of being absent.
+            _logger?.LogWarning(ex, "Diagnostics: the mount supervisor is unavailable");
+            return new HostsReport(nowUtc, null, null, null, $"unavailable: {ex.GetType().Name}: {FirstLine(ex.Message)}");
+        }
+
+        var snapshot = supervisor.GetSnapshot();
 
         IReadOnlyList<MountTransitionEntry>? transitions = null;
         string? transitionsError = null;
         try
         {
-            transitions = _supervisor.GetTransitionHistory();
+            transitions = supervisor.GetTransitionHistory();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -317,11 +465,14 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         return new HostsReport(nowUtc, snapshot.OrderBy(h => h.HostKey, StringComparer.OrdinalIgnoreCase).ToArray(), transitions ?? [], transitionsError);
     }
 
+    /// <summary><see cref="Hosts"/> and <see cref="RecentTransitions"/> are null, and
+    /// <see cref="SupervisorUnavailable"/> says why, when there was no supervisor to ask (bs-1kt).</summary>
     private sealed record HostsReport(
         DateTimeOffset CapturedAtUtc,
-        IReadOnlyList<HostMountSnapshot> Hosts,
-        IReadOnlyList<MountTransitionEntry> RecentTransitions,
-        string? TransitionsCollectionFailed);
+        IReadOnlyList<HostMountSnapshot>? Hosts,
+        IReadOnlyList<MountTransitionEntry>? RecentTransitions,
+        string? TransitionsCollectionFailed,
+        string? SupervisorUnavailable = null);
 
     // ---- processes.json --------------------------------------------------------------------
 
@@ -351,13 +502,29 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
             }
         }
 
-        var port = _options.RcPort();
+        // The port comes from the config store, which is unbuildable when the config is invalid (bs-1kt):
+        // that costs the owner lookup, not the process list that was already collected above.
+        int? port = null;
+        string? portUnavailable = null;
+        try
+        {
+            port = _options.RcPort();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            portUnavailable = $"unavailable: {ex.GetType().Name}: {FirstLine(ex.Message)}";
+        }
+
         ProcessRecord? owner = null;
         int? ownerPid = null;
         string? ownerError = null;
         try
         {
-            ownerPid = _portOwnerResolver.GetListeningProcessId(port);
+            if (port is { } listenPort)
+            {
+                ownerPid = _portOwnerResolver.GetListeningProcessId(listenPort);
+            }
+
             if (ownerPid is { } pid)
             {
                 owner = records.FirstOrDefault(r => r.Pid == pid) ?? Describe(pid, currentPid);
@@ -369,7 +536,7 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
             problems.Add($"processes.json: rc port {port} owner lookup failed: {ownerError}");
         }
 
-        return new ProcessesReport(port, ownerPid, owner, ownerError, listError, records);
+        return new ProcessesReport(port, portUnavailable, ownerPid, owner, ownerError, listError, records);
     }
 
     private ProcessRecord Describe(int pid, int currentPid)
@@ -412,7 +579,8 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         string? Error);
 
     private sealed record ProcessesReport(
-        int RcPort,
+        int? RcPort,
+        string? RcPortUnavailable,
         int? RcPortOwnerPid,
         ProcessRecord? RcPortOwner,
         string? RcPortOwnerError,
@@ -477,6 +645,51 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
 
     private sealed record LogsReport(DateTimeOffset NewerThanUtc, IReadOnlyList<string> Files);
 
+    // ---- rclone-mounts.json ----------------------------------------------------------------
+
+    private sealed record RcloneMountsFile(
+        DateTimeOffset CapturedAtUtc, string? Unavailable, IReadOnlyList<RcloneMountInfo>? Mounts);
+
+    // ---- bootstrap-failures.log ------------------------------------------------------------
+
+    /// <param name="Present">False when there is no file: nothing has failed to bootstrap, which is
+    /// the normal case and not a problem.</param>
+    /// <param name="Text">The copied text, led by a note when it is only the end of the file.</param>
+    /// <param name="Length">The file's size in bytes.</param>
+    /// <param name="Truncated">True when only the last part of the file was copied.</param>
+    private sealed record BootstrapLog(bool Present, string Text, long Length, bool Truncated);
+
+    private BootstrapLog CollectBootstrapFailures()
+    {
+        var path = _options.BootstrapFailuresLogPath;
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+        {
+            return new BootstrapLog(false, string.Empty, 0, false);
+        }
+
+        // The sink appends from a process that may be running right now, so share generously.
+        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var length = file.Length;
+        var tail = _options.BootstrapFailuresLogTailBytes;
+        var truncated = length > tail;
+        if (truncated)
+        {
+            file.Seek(length - tail, SeekOrigin.Begin);
+        }
+
+        using var reader = new StreamReader(file, Utf8NoBom, detectEncodingFromByteOrderMarks: true);
+        var text = reader.ReadToEnd();
+        if (truncated)
+        {
+            // The cut usually lands inside a line (and perhaps a character): start at the next whole line.
+            var newline = text.IndexOf('\n');
+            text = newline < 0 ? string.Empty : text[(newline + 1)..];
+            text = $"[Only the last {tail} of {length} bytes of this file are shown.]{Environment.NewLine}{text}";
+        }
+
+        return new BootstrapLog(true, text, length, truncated);
+    }
+
     // ---- config.redacted.toml --------------------------------------------------------------
 
     private string CollectConfig()
@@ -514,12 +727,15 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         DateTimeOffset now,
         EnvironmentInfo? info,
         AppHealth? health,
+        StartupReport? startup,
         HostsReport? hosts,
         ProcessesReport? processes,
         IReadOnlyList<LogicalDriveEntry>? drives,
         EventsReport? events,
         LogsReport? logs,
-        string rcloneVersion,
+        RcloneObservation rclone,
+        BootstrapLog? bootstrap,
+        string? bootstrapError,
         IReadOnlyList<string> problems,
         IReadOnlyList<string> entries)
     {
@@ -530,7 +746,7 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         s.AppendLine(info is null
             ? "Bosun: version unavailable (see problems below)"
             : $"Bosun: {info.InformationalVersion} (assembly {info.AssemblyVersion}), pid {info.CurrentProcessId}");
-        s.AppendLine($"rclone: {rcloneVersion}");
+        s.AppendLine($"rclone: {rclone.Version}");
         s.AppendLine();
 
         // The issues come first: they are why the maintainer clicked the button.
@@ -554,13 +770,22 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         }
 
         s.AppendLine();
+        AppendStartup(s, startup);
+
+        s.AppendLine();
         if (hosts is null)
         {
             s.AppendLine("HOSTS: unavailable (see problems below)");
         }
+        else if (hosts.SupervisorUnavailable is not null)
+        {
+            s.AppendLine($"HOSTS: {hosts.SupervisorUnavailable}");
+            s.AppendLine("  The mount supervisor could not be reached, so there is no host snapshot or transition history.");
+            s.AppendLine("  The reason it is missing is under HEALTH above and in startup.json.");
+        }
         else
         {
-            s.AppendLine($"HOSTS ({hosts.Hosts.Count})");
+            s.AppendLine($"HOSTS ({hosts.Hosts!.Count})");
             foreach (var host in hosts.Hosts)
             {
                 s.AppendLine(
@@ -592,7 +817,9 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         }
         else
         {
-            s.AppendLine(processes.RcPortOwnerError is not null
+            s.AppendLine(processes.RcPortUnavailable is not null
+                ? $"RC PORT: {processes.RcPortUnavailable}"
+                : processes.RcPortOwnerError is not null
                 ? $"RC PORT {processes.RcPort}: owner lookup failed: {processes.RcPortOwnerError}"
                 : processes.RcPortOwnerPid is { } ownerPid
                     ? $"RC PORT {processes.RcPort}: held by PID {ownerPid} ({processes.RcPortOwner?.Name ?? "unknown image"}, started {processes.RcPortOwner?.StartTime?.ToString("yyyy-MM-ddTHH:mm:ssK", CultureInfo.InvariantCulture) ?? "unknown"})"
@@ -618,6 +845,9 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
             : $"DRIVES: {string.Join(", ", drives.Select(d => $"{d.Name.TrimEnd('\\')} {d.DriveType}"))}");
 
         s.AppendLine();
+        AppendRcloneMounts(s, rclone.Mounts, drives);
+
+        s.AppendLine();
         if (events is null)
         {
             s.AppendLine("EVENTS: unavailable (see problems below)");
@@ -635,6 +865,13 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
         s.AppendLine(logs is null
             ? "LOGS: unavailable (see problems below)"
             : $"LOGS: {logs.Files.Count} file(s) modified since {Utc(logs.NewerThanUtc)}: {string.Join(", ", logs.Files)}");
+
+        s.AppendLine();
+        s.AppendLine(bootstrap is null
+            ? $"BOOTSTRAP FAILURES: unavailable ({bootstrapError ?? "see problems below"})"
+            : !bootstrap.Present
+                ? "BOOTSTRAP FAILURES: none recorded (no bootstrap-failures.log)"
+                : $"BOOTSTRAP FAILURES: bootstrap-failures.log, {bootstrap.Length} byte(s){(bootstrap.Truncated ? ", only the end is included" : string.Empty)}");
 
         s.AppendLine();
         if (problems.Count == 0)
@@ -662,6 +899,61 @@ public sealed class DiagnosticsBundleBuilder : IDiagnosticsBundleBuilder
 
         s.AppendLine("  summary.txt");
         return s.ToString();
+    }
+
+    private static void AppendRcloneMounts(StringBuilder s, RcloneMountsReport report, IReadOnlyList<LogicalDriveEntry>? drives)
+    {
+        if (report.Mounts is not { } mounts)
+        {
+            s.AppendLine($"RCLONE MOUNTS: {report.Unavailable}");
+            return;
+        }
+
+        s.AppendLine($"RCLONE MOUNTS ({mounts.Count}), rclone's own view from mount/listmounts; compare with DRIVES above");
+        foreach (var mount in mounts)
+        {
+            // drives.json lists "P:\\" where rclone says "P:", so compare without the separator.
+            var known = drives is null
+                ? string.Empty
+                : drives.Any(d => string.Equals(d.Name.TrimEnd('\\'), mount.MountPoint.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                    ? string.Empty
+                    : " -- NOT among the logical drives";
+            s.AppendLine(
+                $"  {mount.MountPoint} <- {mount.Fs}" +
+                (mount.MountedOn is { } on ? $", mounted {Utc(on)}" : string.Empty) + known);
+        }
+    }
+
+    private static void AppendStartup(StringBuilder s, StartupReport? startup)
+    {
+        if (startup is null)
+        {
+            s.AppendLine("STARTUP: unavailable (see problems below)");
+            return;
+        }
+
+        if (startup.Readiness is not { } r)
+        {
+            s.AppendLine($"STARTUP: {startup.Unavailable}");
+            return;
+        }
+
+        s.AppendLine("STARTUP (full detail in startup.json)");
+        s.AppendLine($"  config: {r.ConfigState}");
+        foreach (var error in r.ConfigErrors)
+        {
+            s.AppendLine($"      {error}");
+        }
+
+        s.AppendLine($"  WinFsp: {(r.WinFspInstalled ? "installed" : "NOT installed")} -- {r.WinFspMessage}");
+        s.AppendLine($"  rclone: {(r.RcloneHealthy ? "healthy" : "NOT healthy")}{(r.RcloneFaultMessage is { Length: > 0 } rf ? $" -- {rf}" : string.Empty)}");
+        s.AppendLine($"  supervisor: {(r.SupervisorRunning ? "running" : r.SupervisorStartFailed ? "FAILED TO START" : "not running")}");
+        if (r.SupervisorFaultMessage is { Length: > 0 } sf)
+        {
+            s.AppendLine($"      {sf}");
+        }
+
+        s.AppendLine($"  terminal fragment: {(r.TerminalFragmentWritten ? "written" : "NOT written")}{(r.TerminalFragmentFaultMessage is { Length: > 0 } tf ? $" -- {tf}" : string.Empty)}");
     }
 
     private static string Utc(DateTimeOffset value) =>

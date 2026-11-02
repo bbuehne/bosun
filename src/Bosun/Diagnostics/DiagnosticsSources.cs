@@ -54,8 +54,14 @@ public interface IExplorerRevealer
     void Reveal(string filePath);
 }
 
-/// <summary>Tells the user something went wrong. Behind an interface so a test never shows a dialog.</summary>
-public interface IDiagnosticsErrorPresenter
+/// <summary>Tells the user how "Copy diagnostics" went, when Explorer opening on the bundle is not enough.
+/// Behind an interface so a test never shows a dialog.</summary>
+public interface IDiagnosticsPresenter
 {
+    /// <summary>No bundle could be written.</summary>
     void ShowError(string message);
+
+    /// <summary>A bundle was written, but not everything could be collected (bs-egu). The bundle exists
+    /// and is open in Explorer; this says it is incomplete.</summary>
+    void ShowNotice(string message);
 }

@@ -275,5 +275,10 @@ public sealed class BosunHostFactoryTests : IDisposable
         // bs-ds3: App.InitializeUserInterface resolves this for the dispatcher. Resolving it builds
         // the whole bundle graph, which must stay inert (no process, Event Log or file access).
         Assert.NotNull(host.Services.GetRequiredService<Bosun.Diagnostics.CopyDiagnosticsCommand>());
+
+        // bs-6bc: a bundle failure is shown through the dispatched, window-owned prompt that App
+        // attaches, never an unowned MessageBox from the tray click.
+        Assert.IsType<Bosun.Diagnostics.DispatchedDiagnosticsPresenter>(
+            host.Services.GetRequiredService<Bosun.Diagnostics.IDiagnosticsPresenter>());
     }
 }

@@ -80,8 +80,21 @@ internal sealed class FakeRcloneClient : IRcloneClient
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<RcloneMountInfo>>(_mounts.ToList());
+    /// <summary>Puts a mount in rcd's table without a mount call, for a test that only reads the table.</summary>
+    public void SeedMount(RcloneMountInfo mount) => _mounts.Add(mount);
+
+    /// <summary>When set, ListMountsAsync fails with this.</summary>
+    public Exception? ListMountsThrows { get; set; }
+
+    public int ListMountsCalls { get; private set; }
+
+    public Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken cancellationToken)
+    {
+        ListMountsCalls++;
+        return ListMountsThrows is { } ex
+            ? Task.FromException<IReadOnlyList<RcloneMountInfo>>(ex)
+            : Task.FromResult<IReadOnlyList<RcloneMountInfo>>(_mounts.ToList());
+    }
 
     private Exception? _listThrows;
 

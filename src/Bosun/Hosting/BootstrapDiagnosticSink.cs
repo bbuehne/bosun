@@ -41,11 +41,16 @@ public sealed class BootstrapDiagnosticSink : IBootstrapDiagnosticSink
     private readonly string _fallbackFilePath;
 
     /// <summary>
-    /// Production instance: real Event Log, fallback file at
-    /// <c>%TEMP%\Bosun\bootstrap-failures.log</c>.
+    /// The fixed fallback file, <c>%TEMP%\Bosun\bootstrap-failures.log</c>. Public so the diagnostics
+    /// bundle (bs-egu) looks in the one place this sink writes to.
+    /// </summary>
+    public static string DefaultFallbackFilePath => Path.Combine(Path.GetTempPath(), "Bosun", "bootstrap-failures.log");
+
+    /// <summary>
+    /// Production instance: real Event Log, fallback file at <see cref="DefaultFallbackFilePath"/>.
     /// </summary>
     public BootstrapDiagnosticSink()
-        : this(new Win32EventLogWriter(), Path.Combine(Path.GetTempPath(), "Bosun", "bootstrap-failures.log"))
+        : this(new Win32EventLogWriter(), DefaultFallbackFilePath)
     {
     }
 

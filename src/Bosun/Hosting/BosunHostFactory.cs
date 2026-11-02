@@ -289,29 +289,12 @@ public static class BosunHostFactory
         builder.Services.AddSingleton<IWindowsEventSource, ApplicationEventLogSource>();
         builder.Services.AddSingleton<IEnvironmentInfoSource, AssemblyEnvironmentInfoSource>();
         builder.Services.AddSingleton<IExplorerRevealer, ExplorerRevealer>();
-        builder.Services.AddSingleton<IDiagnosticsErrorPresenter, MessageBoxDiagnosticsErrorPresenter>();
-        builder.Services.AddSingleton<IDiagnosticsBundleBuilder>(sp => new DiagnosticsBundleBuilder(
-            DiagnosticsBundleOptions.ForLogDirectory(
-                options.LogDirectory,
-                options.ConfigPath,
-                () => sp.GetRequiredService<IHostConfigStore>().Current.Global.RcloneRcPort),
-            sp.GetRequiredService<IAppHealth>(),
-            sp.GetRequiredService<IMountSupervisor>(),
-            sp.GetRequiredService<IRcloneClient>(),
-            sp.GetRequiredService<IPortOwnerResolver>(),
-            sp.GetRequiredService<IProcessInspector>(),
-            sp.GetRequiredService<IProcessLister>(),
-            sp.GetRequiredService<IDriveLister>(),
-            sp.GetRequiredService<IWindowsEventSource>(),
-            sp.GetRequiredService<IEnvironmentInfoSource>(),
-            sp.GetRequiredService<RcloneRcCredential>(),
-            TimeProvider.System,
-            sp.GetRequiredService<ILogger<DiagnosticsBundleBuilder>>()));
-        builder.Services.AddSingleton(sp => new CopyDiagnosticsCommand(
-            sp.GetRequiredService<IDiagnosticsBundleBuilder>(),
-            sp.GetRequiredService<IExplorerRevealer>(),
-            sp.GetRequiredService<IDiagnosticsErrorPresenter>(),
-            sp.GetRequiredService<ILogger<CopyDiagnosticsCommand>>()));
+        // bs-6bc: failures are shown through the dispatched, window-owned prompt, never an unowned
+        // MessageBox from the tray click. App.InitializeUserInterface attaches the prompt.
+        builder.Services.AddSingleton<DispatchedDiagnosticsPresenter>();
+        builder.Services.AddSingleton<IDiagnosticsPresenter>(sp => sp.GetRequiredService<DispatchedDiagnosticsPresenter>());
+        builder.Services.AddDiagnosticsBundle(
+            options.LogDirectory, options.ConfigPath, BootstrapDiagnosticSink.DefaultFallbackFilePath);
 
         // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
         // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without

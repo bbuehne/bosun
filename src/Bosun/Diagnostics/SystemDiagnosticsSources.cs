@@ -4,7 +4,6 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Windows;
 using Microsoft.Extensions.Logging;
 using Diag = System.Diagnostics;
 
@@ -138,11 +137,4 @@ public sealed class ExplorerRevealer(ILogger<ExplorerRevealer> logger) : IExplor
             logger.LogWarning(ex, "Could not reveal {Path} in Explorer", filePath);
         }
     }
-}
-
-/// <summary>A plain message box. Must be called on the UI thread, which a click handler already is.</summary>
-public sealed class MessageBoxDiagnosticsErrorPresenter : IDiagnosticsErrorPresenter
-{
-    public void ShowError(string message) =>
-        MessageBox.Show(message, "Bosun - Copy diagnostics", MessageBoxButton.OK, MessageBoxImage.Error);
 }
