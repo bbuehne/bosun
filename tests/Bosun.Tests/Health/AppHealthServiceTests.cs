@@ -240,6 +240,20 @@ public sealed class AppHealthServiceTests
     }
 
     [Fact]
+    public void The_rclone_not_found_banner_carries_where_Bosun_looked_and_the_restart_advice()
+    {
+        using var h = new Harness();
+        var exception = new RcloneExecutableNotFoundException("rclone", ["PATH", @"C:\x\rclone.exe"]);
+
+        h.Health.ObserveRclone(RcloneProcessStatus.Faulted, RcloneProcessFaultKind.ExecutableNotFound, exception.Message);
+
+        var issue = Assert.Single(h.Now.Issues);
+        Assert.Equal(HealthIssueCodes.RcloneExecutableNotFound, issue.Code);
+        Assert.Contains(@"C:\x\rclone.exe", issue.Detail, StringComparison.Ordinal);
+        Assert.Contains("restart Bosun", issue.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_fault_with_no_message_still_produces_a_readable_detail()
     {
         using var h = new Harness();

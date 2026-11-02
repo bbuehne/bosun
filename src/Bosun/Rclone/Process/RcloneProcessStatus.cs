@@ -37,10 +37,10 @@ public enum RcloneProcessFaultKind
     None,
 
     /// <summary>
-    /// The rclone executable could not be found at all (e.g. not on PATH). Per the E3 brief,
-    /// this is distinct from <see cref="LaunchFailed"/> ("present but failed to start") -- and
-    /// it is the one that will actually fire on the maintainer's first run, since rclone is not
-    /// yet installed on his machine. Terminal: <see cref="RcloneProcessService"/> does NOT retry
+    /// The rclone executable could not be found at all -- not on PATH and not in any of the
+    /// usual install locations (<see cref="RcloneExecutableResolver"/>, bs-64k). Per the E3 brief,
+    /// this is distinct from <see cref="LaunchFailed"/> ("present but failed to start").
+    /// Terminal: <see cref="RcloneProcessService"/> does NOT retry
     /// automatically for this fault kind, because retrying will not fix a missing executable --
     /// see the class remarks.
     /// </summary>

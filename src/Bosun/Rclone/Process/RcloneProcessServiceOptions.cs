@@ -6,8 +6,9 @@ namespace Bosun.Rclone.Process;
 /// separation <c>HostProbe</c> uses (it takes primitives per call, not a config store).</summary>
 public sealed record RcloneProcessServiceOptions
 {
-    /// <summary>Name or path of the rclone executable. "rclone" (resolved via PATH) in
-    /// production; tests override with a fake launcher instead of a real path.</summary>
+    /// <summary>Name or path of the rclone executable. "rclone" in production, which
+    /// <see cref="RcloneExecutableResolver"/> looks for on PATH and then in the usual install
+    /// locations (bs-64k); tests override with a fake launcher instead of a real path.</summary>
     public string ExecutablePath { get; init; } = "rclone";
 
     /// <summary>Loopback port to bind <c>rclone rcd</c> to. NEVER a non-loopback interface --

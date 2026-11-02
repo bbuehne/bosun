@@ -45,7 +45,8 @@ There is no roadmap and no support commitment.
 
 - Windows 10 (1809+) or Windows 11
 - [WinFsp](https://winfsp.dev/)
-- [rclone](https://rclone.org/)
+- [rclone](https://rclone.org/) — on `PATH`, or in a standard install location
+  (see `docs/OPERATIONS.md`, *Where Bosun looks for rclone*)
 - Windows Terminal
 - SSH key-based authentication with `ssh-agent` (password and MFA auth are not
   supported — see `docs/DECISIONS.md`, ADR-007)
