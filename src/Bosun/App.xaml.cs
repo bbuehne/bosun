@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 using Bosun.Configuration;
@@ -67,6 +68,10 @@ public partial class App : Application
     // above sees the real value; the default (Manual) is the safe one -- it opens no Terminal tabs.
     private LaunchContext _launchContext = LaunchContext.Manual;
 
+    // bs-ww9.1.3: the options the host is built from, kept so the window can show the path to the
+    // hosts.toml this process actually reads (the lambda below adds only the launch-dependent flag).
+    private readonly BosunHostOptions _hostOptions = BosunHostOptions.CreateDefault();
+
     private IHost? _host;
     private ILogger<App>? _logger;
 
@@ -94,7 +99,7 @@ public partial class App : Application
             message => _bootstrap?.RecordPreLoggerFailure(message, null));
         _bootstrap = new BootstrapOrchestrator(
             () => BosunHostFactory.CreateHost(
-                BosunHostOptions.CreateDefault() with { OpenAutostartTerminalTabs = _launchContext.OpensAutostartTerminalTabs() },
+                _hostOptions with { OpenAutostartTerminalTabs = _launchContext.OpensAutostartTerminalTabs() },
                 shutdownGuard: _shutdownGuard),
             new MessageBoxCatastrophicStartupNotifier(),
             new BootstrapDiagnosticSink(),
@@ -284,6 +289,9 @@ public partial class App : Application
 
         _mainWindow = new MainWindow { Logger = services.GetRequiredService<ILogger<MainWindow>>() };
         _mainWindow.Configure(statusReadModel, actionDispatcher, appHealth);
+        _mainWindow.ConfigureEmptyState(
+            Path.GetFullPath(_hostOptions.ConfigPath),
+            dependencies.ConfigStoreIsStandIn ? null : configStore);
 
         // bs-ww9.8 / ADR-019: host create/edit/delete. IHostConfigWriter is registered by the
         // config-writer delivery (bs-ww9.8's other half); resolved here, not constructed, so this
@@ -357,7 +365,25 @@ public partial class App : Application
         SingleInstance.ActivationRequested += (_, _) =>
             Dispatcher.BeginInvoke(() => _mainWindowController?.ShowAndActivate());
 
-        _mainWindowController.Initialize(_launchContext);
+        // bs-ww9.1.3 / ADR-012: no hosts.toml means the window is shown whatever the launch context.
+        // The config step runs first in the startup sequence and the host is already started, so the
+        // state is normally final here; the subscription covers the case where it is not (readiness
+        // starts as Invalid and is replaced as the sequence publishes). Subscribed BEFORE reading
+        // Current, so a change in between is not lost: the event is raised on the orchestrator's
+        // thread, and BeginInvoke runs after this method returns, i.e. after Initialize.
+        var startup = dependencies.Startup;
+        if (startup is not null)
+        {
+            startup.ReadinessChanged += (_, readinessArgs) =>
+            {
+                var configState = readinessArgs.Readiness.ConfigState;
+                Dispatcher.BeginInvoke(() => _mainWindowController?.OnConfigStateObserved(configState));
+            };
+        }
+
+        // No orchestrator means no first-run signal: Invalid is "not first run" for the window.
+        _mainWindowController.Initialize(
+            _launchContext, startup?.Current.ConfigState ?? ConfigReadinessState.Invalid);
     }
 
     protected override void OnExit(ExitEventArgs e)

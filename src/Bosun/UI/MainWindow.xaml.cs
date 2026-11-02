@@ -49,6 +49,11 @@ public partial class MainWindow : Window, IAppWindow
     // frame) and the health source it is fed from (null until Configure).
     private readonly HealthBannerViewModel _healthBanner = new();
     private IAppHealth? _appHealth;
+
+    // bs-ww9.1.3: the zero-hosts panel's view model (always present, like the banner's) and the
+    // config store it counts hosts from (null when no config is in service, which hides the panel).
+    private readonly HostsEmptyStateViewModel _emptyState = new();
+    private IHostConfigStore? _emptyStateConfigStore;
     private HostActionDispatcher? _actionDispatcher;
 
     // bs-ww9.8 / ADR-019: null until ConfigureHostEditor is called. HostEditorController owns all
@@ -73,6 +78,7 @@ public partial class MainWindow : Window, IAppWindow
         // Only the banner takes this view model as its DataContext; the grid and the header keep
         // theirs (none) and are populated from code, as before.
         HealthBanner.DataContext = _healthBanner;
+        EmptyStatePanel.DataContext = _emptyState;
 
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = RefreshInterval };
         _refreshTimer.Tick += (_, _) => RefreshRows();
@@ -112,6 +118,19 @@ public partial class MainWindow : Window, IAppWindow
         _bitviseProfilePicker = bitviseProfilePicker;
         _bitviseProfileParser = bitviseProfileParser;
     }
+
+    /// <summary>Wires the zero-hosts panel (bs-ww9.1.3): the full path of <c>hosts.toml</c> to show, and
+    /// the config store hosts are counted from -- <see langword="null"/> when no config is in service,
+    /// so the panel never claims "no hosts" about a config that did not load.</summary>
+    public void ConfigureEmptyState(string hostsFilePath, IHostConfigStore? configStore)
+    {
+        _emptyState.UseHostsFile(hostsFilePath);
+        _emptyStateConfigStore = configStore;
+        RefreshEmptyState();
+    }
+
+    private void RefreshEmptyState() =>
+        _emptyState.Update(_emptyStateConfigStore?.Current.Hosts.Count, canAddHost: _hostEditorController is not null);
 
     private void OnCopyDiagnosticsClick(object sender, RoutedEventArgs e) =>
         _actionDispatcher?.CopyDiagnostics();
@@ -288,6 +307,7 @@ public partial class MainWindow : Window, IAppWindow
             // The header and the banner come from one Update so they cannot disagree.
             _healthBanner.Update(_appHealth?.Current ?? AppHealth.Healthy, health);
             HealthTextBlock.Text = _healthBanner.HeaderText;
+            RefreshEmptyState();
         }
         catch (Exception ex)
         {

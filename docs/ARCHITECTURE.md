@@ -45,7 +45,16 @@ path touches a mount, `rclone rcd`, or the supervisor.
 
 The window is optional, not incidental (**ADR-018**): Bosun starts to tray with
 no window when launched at login, shows the window when launched by hand, and
-hides rather than exits when the window is closed. The tray icon is the
+hides rather than exits when the window is closed. The one override is first
+run: when there is no `hosts.toml` (`ConfigReadinessState.AwaitingFirstRun`) the
+window is shown whatever the launch context, once per process (`bs-ww9.1.3`,
+ADR-012). `MainWindowController.ShouldShowOnStartup(context, configState)` holds
+the rule; `App` passes it the orchestrator's config state and forwards later
+readiness changes to `OnConfigStateObserved`, so a state that settles after the
+UI is built still shows the window. With zero configured hosts the window shows
+an empty-state panel (`HostsEmptyStateViewModel`): "No hosts configured yet", an
+Add Host button, and the full path of `hosts.toml`. The panel is hidden when the
+config did not load, because the banner explains that case. The tray icon is the
 always-on surface and keeps every obligation ADR-012 gave it, because the window
 is closed most of the time. Exactly one instance may run — a second launch
 focuses the first and exits (`bs-2wa`), which is what keeps two supervisors from
@@ -67,7 +76,7 @@ own is killed; any other holder is reported by PID and image path and never kill
 ```
 Bosun.exe                      (single instance, named mutex — bs-2wa)
 ├── App (WPF, ShutdownMode=OnExplicitShutdown)
-├── MainWindow  ── shown on manual launch, hidden at login; close hides
+├── MainWindow  ── shown on manual launch and on first run, hidden at login; close hides
 ├── TrayIcon (H.NotifyIcon) ──► show/hide MainWindow, per-host actions, exit
 └── IHost
     ├── RcloneProcessService   : IHostedService    (owns rclone rcd lifetime)

@@ -39,6 +39,11 @@ public sealed record UserInterfaceDependencies
 
     private static readonly IReadOnlyDictionary<string, string> EmptyProvisioningFailures = new Dictionary<string, string>();
 
+    /// <summary>The startup orchestrator, for the config state the main window reacts to at first run
+    /// (bs-ww9.1.3): its <c>Current</c> and <c>ReadinessChanged</c>. Null when it is not registered (a
+    /// headless test host); the window then has no first-run signal and follows the launch context alone.</summary>
+    public StartupOrchestrator? Startup { get; init; }
+
     /// <summary>"Copy diagnostics". Null only when the command itself cannot be built (it is not
     /// registered, or the health model or one of the machine-reading seams is missing). It does NOT
     /// need the mount supervisor (bs-1kt): with <see cref="SupervisorIsStandIn"/> true it is still
@@ -105,6 +110,7 @@ public static class UserInterfaceDependencyResolver
 
         return new UserInterfaceDependencies
         {
+            Startup = startup,
             ProvisioningFailures = startup is null
                 ? static () => new Dictionary<string, string>()
                 : () => startup.Current.ProvisioningFailuresByHost,
