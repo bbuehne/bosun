@@ -44,9 +44,10 @@ public interface IRcloneProcessHandle : IDisposable
     void Kill();
 }
 
-/// <summary>What to launch. <see cref="ExecutablePath"/> is resolved the same way any Win32
-/// <c>CreateProcess</c> call resolves a bare filename -- via PATH -- which is what makes "not
-/// found" observable as a distinct, catchable failure rather than a silent no-op.</summary>
+/// <summary>What to launch. <see cref="RcloneProcessService"/> passes a full path when it found
+/// rclone (bs-64k); a bare filename is resolved the way any Win32 <c>CreateProcess</c> call
+/// resolves one -- via PATH -- which is what makes "not found" observable as a distinct,
+/// catchable failure rather than a silent no-op.</summary>
 public sealed record RcloneProcessStartInfo
 {
     public required string ExecutablePath { get; init; }
@@ -66,23 +67,54 @@ public sealed record RcloneProcessStartInfo
 
 /// <summary>
 /// The executable named by <see cref="ExecutablePath"/> could not be found (e.g. rclone is not
-/// installed, or is installed but not on PATH). Distinct from
-/// <see cref="RcloneProcessLaunchException"/> ("present but failed to start") per the E3 brief --
-/// this is the one that will actually fire on the maintainer's first run, since rclone is not
-/// yet installed on his machine.
+/// installed, or was installed after Bosun started). Distinct from
+/// <see cref="RcloneProcessLaunchException"/> ("present but failed to start") per the E3 brief.
 /// </summary>
+/// <remarks>
+/// bs-64k: when <see cref="RcloneProcessService"/> resolves the executable itself (PATH, then the
+/// usual install locations) and finds nothing, it throws this with
+/// <see cref="SearchedLocations"/> filled in, and the message says where it looked. The launcher
+/// throws it without a list when the OS itself reports file-not-found (for example an explicit
+/// path that does not exist).
+/// </remarks>
 public sealed class RcloneExecutableNotFoundException : Exception
 {
     public string ExecutablePath { get; }
 
+    /// <summary>Everywhere that was looked at, in order. Empty when the OS reported the failure
+    /// and no search was made.</summary>
+    public IReadOnlyList<string> SearchedLocations { get; }
+
     public RcloneExecutableNotFoundException(string executablePath, Exception innerException)
-        : base(
-            $"'{executablePath}' could not be found. Install rclone (https://rclone.org/downloads/) " +
-            "and ensure it is on PATH, then restart Bosun. Drive mounting is unavailable until then -- " +
-            "terminal profiles and SSH sessions are unaffected.",
-            innerException)
+        : base(BuildMessage(executablePath, []), innerException)
     {
         ExecutablePath = executablePath;
+        SearchedLocations = [];
+    }
+
+    public RcloneExecutableNotFoundException(string executablePath, IReadOnlyList<string> searchedLocations)
+        : base(BuildMessage(executablePath, searchedLocations))
+    {
+        ExecutablePath = executablePath;
+        SearchedLocations = searchedLocations;
+    }
+
+    /// <summary>One paragraph, plain words: what was not found, where Bosun looked, what to do,
+    /// and what still works. It becomes the health banner's detail text, so it must not read as
+    /// a reproach: a running program genuinely cannot see a PATH change made after it started.</summary>
+    internal static string BuildMessage(string executablePath, IReadOnlyList<string> searchedLocations)
+    {
+        var where = searchedLocations.Count == 0
+            ? $"'{executablePath}' could not be found."
+            : $"'{executablePath}' was not found. Bosun looked in: {string.Join("; ", searchedLocations)}.";
+
+        return where +
+            " If rclone is not installed, install it (https://rclone.org/downloads/, or " +
+            "'winget install Rclone.Rclone'). If it was installed after Bosun started, restart Bosun " +
+            "(if that is not enough, sign out and back in): a running program does not see PATH changes " +
+            "made after it began. " +
+            "Drive mounting is unavailable until rclone is found; " +
+            "terminal profiles and SSH sessions are unaffected.";
     }
 }
 

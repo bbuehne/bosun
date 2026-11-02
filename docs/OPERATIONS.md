@@ -5,6 +5,34 @@
 Run `scripts/dev-setup.ps1`. It installs WinFsp, rclone, and uv, and prints the
 Graphify and Beads setup commands.
 
+### Where Bosun looks for rclone
+
+Bosun looks for `rclone.exe` on `PATH` first. If `PATH` does not have it, Bosun
+tries these places, in this order, and logs which one it used
+(`Using rclone from <source>: <path>`):
+
+1. `%LOCALAPPDATA%\rclone\rclone.exe`
+2. `%ProgramFiles%\rclone\rclone.exe`
+3. winget: `%LOCALAPPDATA%\Microsoft\WinGet\Links\rclone.exe`, then
+   `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Rclone.Rclone_*\rclone-*\rclone.exe`,
+   then the same package path under `%ProgramFiles%\WinGet\Packages` (machine-wide
+   installs). The `*` parts are a source/hash and a version that winget chooses.
+4. scoop: `%SCOOP%\shims\rclone.exe`, or `%USERPROFILE%\scoop\shims\rclone.exe`
+5. Chocolatey: `%ChocolateyInstall%\bin\rclone.exe`, or
+   `%ProgramData%\chocolatey\bin\rclone.exe`
+
+The reason for the fallbacks: a program only reads `PATH` when it starts. If rclone
+was installed (and added to `PATH`) after Bosun, or after the Explorer session that
+launched Bosun, started, Bosun cannot see the change even though `rclone.exe` is in
+a standard place. The search is repeated on every start attempt, so **Restart
+rclone** in the Repair menu, or restarting Bosun, finds an rclone installed in
+one of the places above without a sign-out. An rclone installed somewhere else is
+found only through `PATH`, and a restarted Bosun inherits `PATH` from the program
+that launched it (usually Explorer), so after changing `PATH` sign out and back in.
+
+If rclone is in none of these places and not on `PATH`, put it on `PATH` or in
+one of the folders above. There is no `rclone_path` setting yet.
+
 ## Configuration
 
 Your configuration and your logs are both under `%LOCALAPPDATA%\Bosun` (ADR-012
@@ -206,6 +234,7 @@ once.
 | Symptom | First check |
 |---|---|
 | Explorer hangs on a drive | Was a mount left up while the host went away? Check the supervisor log for a missed unmount. This is an ADR-005 violation and a bug. |
+| Banner says "rclone was not found" | The message lists every place Bosun looked (PATH first, then the install locations in *Where Bosun looks for rclone*). If rclone is installed somewhere not on that list, add it to `PATH` and sign out and back in. If it was only just installed to a listed place, press **Restart rclone** in the banner (or restart Bosun). Mounting is off until rclone is found; terminal profiles and SSH sessions keep working. The log shows `Using rclone from <source>: <path>` once it is found. |
 | Drive never appears | Deep probe failing. Try `rclone lsd <remote>:` manually. |
 | Drive appears then vanishes | Expected on probe failure — check whether the host is genuinely reachable. If the host row says `mount failed ...; last error: P: is presented as a Fixed drive instead of a network drive`, the drive appeared and Bosun unmounted it on purpose: rclone mounted it but did not honour `--network-mode` (Invariant I7), which would make Explorer misbehave. Check the rclone version and its `mount/mount` handling of `network_mode`; Bosun retries on the mount-retry ladder, so the drive may flash up again until the cause is fixed. Other reasons seen here: `does not exist (drive type NoRootDirectory)` (rclone reported success but no drive letter is there) and `could not verify that P: is a network drive` (the drive type could not be read; the message carries the exception). |
 | Terminal profiles missing | Terminal reports **nothing** when a fragment fails to parse — no toast, no UI surface, no default log entry; it skips that fragment and loads the rest. Profiles appearing in the dropdown is the only confirmation available. Check `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Bosun\bosun.json` exists and is valid JSON, then restart Terminal. Bosun's own log records each write. (The Store-vs-unpackaged path distinction is a red herring — see ADR-006's amendment.) |

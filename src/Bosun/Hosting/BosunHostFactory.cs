@@ -219,6 +219,12 @@ public static class BosunHostFactory
         // that must only ever happen when Bosun exits.
         builder.Services.AddSingleton<IProcessJob>(new Bosun.Rclone.Process.Interop.Win32ProcessJob());
         builder.Services.AddSingleton<IRcloneProcessLauncher, Win32RcloneProcessLauncher>();
+
+        // bs-64k: PATH first, then the usual rclone install locations, so an rclone installed
+        // after Bosun (or the Explorer that launched it) started is still found. Construction
+        // does no I/O; the lookups happen per start attempt.
+        builder.Services.AddSingleton<IExecutableSearchEnvironment, SystemExecutableSearchEnvironment>();
+        builder.Services.AddSingleton<IRcloneExecutableResolver, RcloneExecutableResolver>();
         builder.Services.AddSingleton(sp =>
         {
             var global = sp.GetRequiredService<IHostConfigStore>().Current.Global;
@@ -236,7 +242,8 @@ public static class BosunHostFactory
                 sp.GetRequiredService<ILogger<RcloneProcessService>>(),
                 sp.GetRequiredService<RcloneRcCredential>(),
                 RcPortGuardFactory.CreateForCurrentUser(
-                    rcloneProcessOptions, TimeProvider.System, sp.GetRequiredService<ILoggerFactory>()));
+                    rcloneProcessOptions, TimeProvider.System, sp.GetRequiredService<ILoggerFactory>()),
+                sp.GetRequiredService<IRcloneExecutableResolver>());
         });
 
         // MountSupervisor (bs-psq; docs/ARCHITECTURE.md §4) -- registered as both its concrete

@@ -26,9 +26,11 @@ namespace Bosun.Rclone.Process;
 /// </para>
 /// <para>
 /// <b>Retry policy.</b> <see cref="RcloneProcessFaultKind.ExecutableNotFound"/> does not retry:
-/// rclone missing from PATH will not fix itself, and a tight retry loop against a guaranteed
-/// failure would just spam the log without helping anyone -- the actionable message
-/// (<see cref="RcloneExecutableNotFoundException"/>) is the whole point. Every other fault kind
+/// rclone missing (from PATH and from the usual install locations -- see
+/// <see cref="RcloneExecutableResolver"/>, bs-64k) will not fix itself, and a tight retry loop
+/// against a guaranteed failure would just spam the log without helping anyone -- the actionable
+/// message (<see cref="RcloneExecutableNotFoundException"/>, which lists where Bosun looked) is
+/// the whole point. Every other fault kind
 /// (<see cref="RcloneProcessFaultKind.LaunchFailed"/>, <see cref="RcloneProcessFaultKind.HealthCheckFailed"/>,
 /// <see cref="RcloneProcessFaultKind.HealthCheckUnauthorized"/>,
 /// <see cref="RcloneProcessFaultKind.ProcessExitedBeforeHealthy"/>,
@@ -55,7 +57,8 @@ public sealed class RcloneProcessService(
     TimeProvider timeProvider,
     ILogger<RcloneProcessService> logger,
     RcloneRcCredential credential,
-    IRcPortGuard? portGuard = null) : IHostedService, IAsyncDisposable, IRcloneProcessRestarter
+    IRcPortGuard? portGuard = null,
+    IRcloneExecutableResolver? executableResolver = null) : IHostedService, IAsyncDisposable, IRcloneProcessRestarter
 {
     private readonly object _gate = new();
 
@@ -386,7 +389,7 @@ public sealed class RcloneProcessService(
         IRcloneProcessHandle handle;
         try
         {
-            handle = launcher.Start(BuildStartInfo());
+            handle = launcher.Start(BuildStartInfo(ResolveExecutable()));
         }
         catch (RcloneExecutableNotFoundException ex)
         {
@@ -626,6 +629,40 @@ public sealed class RcloneProcessService(
         }
     }
 
+    // bs-64k: the last path logged, so the supervise loop's retries (every RestartDelay while some
+    // other fault persists) log "which rclone" once per distinct path rather than every attempt.
+    private string? _lastLoggedExecutable;
+
+    /// <summary>
+    /// The executable to launch (bs-64k): the configured name resolved through PATH and then the
+    /// usual install locations. Done on EVERY start attempt, not once, so Repair's
+    /// "Restart rclone" notices an rclone installed since the previous attempt. Without a
+    /// resolver the configured value goes to the launcher unchanged (the old behaviour).
+    /// </summary>
+    /// <exception cref="RcloneExecutableNotFoundException">Nothing found; carries the list of
+    /// places searched.</exception>
+    private string ResolveExecutable()
+    {
+        if (executableResolver is null)
+        {
+            return options.ExecutablePath;
+        }
+
+        var resolution = executableResolver.Resolve(options.ExecutablePath);
+        if (!resolution.Found)
+        {
+            throw new RcloneExecutableNotFoundException(options.ExecutablePath, resolution.Searched);
+        }
+
+        if (!string.Equals(_lastLoggedExecutable, resolution.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            _lastLoggedExecutable = resolution.Path;
+            logger.LogInformation("Using rclone from {Source}: {Path}", resolution.Source, resolution.Path);
+        }
+
+        return resolution.Path!;
+    }
+
     /// <summary>
     /// <c>rclone rcd --rc-addr 127.0.0.1:&lt;port&gt; --config &lt;path&gt;</c>, with
     /// <c>RCLONE_RC_USER</c>/<c>RCLONE_RC_PASS</c> set in the child's environment (bs-ard).
@@ -651,9 +688,9 @@ public sealed class RcloneProcessService(
     /// class remarks on <see cref="RcloneRcCredential"/> for why the SAME credential is reused
     /// across every restart rather than rotated per attempt.
     /// </remarks>
-    private RcloneProcessStartInfo BuildStartInfo() => new()
+    private RcloneProcessStartInfo BuildStartInfo(string executablePath) => new()
     {
-        ExecutablePath = options.ExecutablePath,
+        ExecutablePath = executablePath,
         Arguments =
         [
             "rcd",
