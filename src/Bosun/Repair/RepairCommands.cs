@@ -141,6 +141,11 @@ public sealed class RepairCommands
                 mounted.Count,
                 DescribeHealth());
 
+            // bs-z9e: tell the supervisor first, so the reconciliation that follows the restart records
+            // the dropped drives as a repair (silent), not as an rcd crash (toast). The restarter never
+            // reaches the supervisor itself, and a crash restart does not come through here.
+            supervisor.NoteUserRequestedRcloneRestart();
+
             var healthy = await restarter.RestartAsync().ConfigureAwait(true);
             if (healthy)
             {

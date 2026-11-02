@@ -172,6 +172,22 @@ public interface IMountSupervisor
     Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Call BEFORE a user-requested "Restart rclone" (bs-z9e). The restart drops every mount by design,
+    /// and the reconciliation that follows would otherwise drain them as <c>DrainCause.Automatic</c> --
+    /// indistinguishable from an rcd crash, and so announced as an unexpected unmount. While the mark is
+    /// held, a reconciliation drain is recorded as <c>DrainCause.Repair</c> instead (silent in the tray,
+    /// still logged and shown in the window), per the maintainer's decision in bs-p97.
+    /// </summary>
+    /// <remarks>
+    /// The mark is bounded two ways, so it can never mute a later crash: it is cleared by the first
+    /// <see cref="OnRcloneRestartedAsync"/> whose reconciliation completes, and it expires on the
+    /// supervisor's injected clock after <c>MountSupervisor.UserRestartMarkLifetime</c> (a restart that
+    /// never became healthy). Safe to call from any thread: it does not post to the command channel, so it
+    /// cannot be ordered after the restart it announces.
+    /// </remarks>
+    void NoteUserRequestedRcloneRestart();
+
+    /// <summary>
     /// Gates whether ANY host may enter <see cref="MountState.Mounting"/> (bs-yvw.1). Set by
     /// <see cref="Hosting.StartupOrchestrator"/> from WinFsp detection and <c>rclone rcd</c>
     /// health. Hosts still probe normally while unavailable, and never enter <c>Mounting</c> until

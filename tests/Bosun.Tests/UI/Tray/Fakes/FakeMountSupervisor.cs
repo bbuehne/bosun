@@ -59,6 +59,17 @@ internal sealed class FakeMountSupervisor : IMountSupervisor
 
     public Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
+    /// <summary>Every call to <see cref="NoteUserRequestedRcloneRestart"/>, in order (bs-z9e).</summary>
+    public List<string> Events { get; } = [];
+
+    public int UserRcloneRestartNotes { get; private set; }
+
+    public void NoteUserRequestedRcloneRestart()
+    {
+        UserRcloneRestartNotes++;
+        Events.Add("note-user-rclone-restart");
+    }
+
     public int RepairAllCalls { get; private set; }
 
     /// <summary>When set, <see cref="RepairAllAsync"/> returns this task instead of completing -- lets a

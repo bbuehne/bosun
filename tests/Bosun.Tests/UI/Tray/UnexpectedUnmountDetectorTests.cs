@@ -57,6 +57,7 @@ public sealed class UnexpectedUnmountDetectorTests
     [Theory]
     [InlineData(DrainCause.IdleTimeout, "idle timeout (120s without activity)")]
     [InlineData(DrainCause.Repair, "repair: unmount all and re-probe")]
+    [InlineData(DrainCause.Repair, "reconciliation: mount missing from listmounts after the user restarted rclone")]
     [InlineData(DrainCause.ConfigChanged, "config change: mount-affecting field changed")]
     [InlineData(DrainCause.ConfigChanged, "config change: mount.mode set to none")]
     [InlineData(DrainCause.ConfigRemoved, "config change: host removed")]
