@@ -200,6 +200,24 @@ means the path to the host may have altered, a resume means everything may have,
 including `rclone rcd` and WinFsp themselves — and it is what let `bs-brv` look
 correct in review.
 
+**The network-change event is debounced, and the debounce is bounded**
+(`Win32SystemEventSource`; `bs-u4a` item 2). Windows raises
+`NetworkAddressChanged` several times for one physical transition (adapter down,
+DHCP, adapter up), so the source coalesces a burst into one event. Two fixed
+numbers govern it; neither is configurable:
+
+| Number | Value | Meaning |
+|---|---|---|
+| Quiet period | 750 ms | The event fires once no further raw event has arrived for this long (trailing edge: each raw event restarts the window). |
+| Maximum deferral | 5 s | The event fires **at the latest** 5 s after the *first* raw event of a burst, however many more arrive. |
+
+So "re-probe all immediately" in the table above means 750 ms after the network
+settles, or 5 s after it started changing if it never settles. Without the cap a
+link flapping faster than the quiet period would defer the event indefinitely —
+and a network interruption is one of the two failure modes the project exists
+for. A burst begins with the first raw event after the previous public event;
+firing ends it, so the next raw event starts a new burst with a fresh 5 s.
+
 Re-derivation is gated on `rclone rcd` answering `core/version`. If it does not,
 nothing is reconciled or drained; the supervisor waits for the ordinary cadence
 rather than acting on state it cannot verify.

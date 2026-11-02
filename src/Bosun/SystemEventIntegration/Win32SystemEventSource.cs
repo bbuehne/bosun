@@ -28,6 +28,14 @@ namespace Bosun.SystemEventIntegration;
 /// <c>Bosun.Tests.SystemEventIntegration.Win32SystemEventSourceTests</c>.
 /// </para>
 /// <para>
+/// <b>The debounce is bounded (bs-u4a item 2).</b> A purely trailing-edge debounce defers
+/// indefinitely if raw events keep arriving faster than the quiet period -- a flapping link, and
+/// network interruption is one of the two failure modes this project exists for. So the window is
+/// capped: the public event fires <i>at the latest</i> <see cref="DefaultMaxNetworkChangeDeferral"/>
+/// after the FIRST raw event of a burst, however many more arrive. A burst starts with the first raw
+/// event after the previous public event; firing ends it. Both numbers are in docs/ARCHITECTURE.md §3.
+/// </para>
+/// <para>
 /// <b>Why <see cref="ISystemEventRegistrar"/> instead of subscribing to the static classes
 /// directly.</b> See that interface's remarks: it is what lets the filtering logic below
 /// (<c>PowerModes.StatusChange</c> is not Suspend/Resume and must be ignored; only
@@ -53,9 +61,16 @@ public sealed class Win32SystemEventSource : ISystemEventSource
     /// delivery report rather than silently treated as tunable-via-config.</summary>
     private static readonly TimeSpan DefaultNetworkChangeDebounce = TimeSpan.FromMilliseconds(750);
 
+    /// <summary>The longest the public event may be deferred, counted from the first raw event of a
+    /// burst (bs-u4a item 2). Without it a link flapping faster than
+    /// <see cref="DefaultNetworkChangeDebounce"/> would defer the event forever. Fixed, like the
+    /// debounce, not configurable.</summary>
+    private static readonly TimeSpan DefaultMaxNetworkChangeDeferral = TimeSpan.FromSeconds(5);
+
     private readonly ISystemEventRegistrar registrar;
     private readonly TimeProvider timeProvider;
     private readonly TimeSpan networkChangeDebounce;
+    private readonly TimeSpan maxNetworkChangeDeferral;
     private readonly ILogger<Win32SystemEventSource> logger;
     private readonly object gate = new();
 
@@ -64,6 +79,10 @@ public sealed class Win32SystemEventSource : ISystemEventSource
     private readonly NetworkAddressChangedEventHandler networkAddressHandler;
 
     private ITimer? networkChangeDebounceTimer;
+
+    /// <summary>When the first raw event of the burst now being debounced arrived; null when no
+    /// burst is pending. Guarded by <see cref="gate"/>.</summary>
+    private DateTimeOffset? networkBurstStartedUtc;
     private bool started;
     private bool disposed;
 
@@ -73,19 +92,25 @@ public sealed class Win32SystemEventSource : ISystemEventSource
     public event EventHandler? SessionLock;
 
     public Win32SystemEventSource(TimeProvider timeProvider, ILogger<Win32SystemEventSource> logger)
-        : this(new RealSystemEventRegistrar(), timeProvider, DefaultNetworkChangeDebounce, logger)
+        : this(new RealSystemEventRegistrar(), timeProvider, DefaultNetworkChangeDebounce, logger, DefaultMaxNetworkChangeDeferral)
     {
     }
 
     /// <summary>Test/internal-only constructor: injects the registrar seam and lets the debounce
     /// window be shortened so tests never need to advance a fake clock by 750ms of simulated time
-    /// just to prove the coalescing behaviour -- any positive window exercises the same code path.</summary>
+    /// just to prove the coalescing behaviour -- any positive window exercises the same code path.
+    /// <paramref name="maxNetworkChangeDeferral"/> defaults to the production 5 s cap.</summary>
     internal Win32SystemEventSource(
-        ISystemEventRegistrar registrar, TimeProvider timeProvider, TimeSpan networkChangeDebounce, ILogger<Win32SystemEventSource> logger)
+        ISystemEventRegistrar registrar,
+        TimeProvider timeProvider,
+        TimeSpan networkChangeDebounce,
+        ILogger<Win32SystemEventSource> logger,
+        TimeSpan? maxNetworkChangeDeferral = null)
     {
         this.registrar = registrar;
         this.timeProvider = timeProvider;
         this.networkChangeDebounce = networkChangeDebounce;
+        this.maxNetworkChangeDeferral = maxNetworkChangeDeferral ?? DefaultMaxNetworkChangeDeferral;
         this.logger = logger;
 
         // Captured once so the exact same delegate instance is passed to both Add* (Start) and
@@ -188,15 +213,34 @@ public sealed class Win32SystemEventSource : ISystemEventSource
             // Trailing-edge debounce: every raw event restarts the window. The public event fires
             // once no further raw event arrives for networkChangeDebounce -- see the class remarks
             // for why this lives here rather than in the adapter.
+            //
+            // Bounded (bs-u4a item 2): the window is shortened so the fire time never passes
+            // networkBurstStartedUtc + maxNetworkChangeDeferral. A timer with a zero due time
+            // fires at once, which is right for an event that arrives at or past the cap.
+            var now = timeProvider.GetUtcNow();
+            networkBurstStartedUtc ??= now;
+            var untilCap = networkBurstStartedUtc.Value + maxNetworkChangeDeferral - now;
+            var delay = untilCap < networkChangeDebounce ? untilCap : networkChangeDebounce;
+            if (delay < TimeSpan.Zero)
+            {
+                delay = TimeSpan.Zero;
+            }
+
             networkChangeDebounceTimer?.Dispose();
             networkChangeDebounceTimer = timeProvider.CreateTimer(
-                _ => FireNetworkAddressChanged(), null, networkChangeDebounce, Timeout.InfiniteTimeSpan);
+                _ => FireNetworkAddressChanged(), null, delay, Timeout.InfiniteTimeSpan);
         }
     }
 
     private void FireNetworkAddressChanged()
     {
-        logger.LogInformation("System event: network address changed (settled after debounce)");
+        lock (gate)
+        {
+            // The burst is over: the next raw event starts a new one with a fresh cap.
+            networkBurstStartedUtc = null;
+        }
+
+        logger.LogInformation("System event: network address changed (settled after debounce, or capped)");
         NetworkAddressChanged?.Invoke(this, EventArgs.Empty);
     }
 }
