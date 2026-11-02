@@ -11,15 +11,27 @@ namespace Bosun.UI.Tray;
 /// <b>How "unexpected" is decided.</b> By <see cref="MountTransitionEntry.DrainCause"/>, a typed
 /// value the supervisor records on every transition into <see cref="MountState.Draining"/>
 /// (bs-ynb) -- never by reading <see cref="MountTransitionEntry.Trigger"/>, which is human-readable
-/// text that may be reworded freely. A <see cref="MountState.Mounted"/> -&gt;
-/// <see cref="MountState.Draining"/> transition is "unexpected" unless its cause is
-/// <see cref="DrainCause.UserUnmount"/> or <see cref="DrainCause.Suspend"/>, the two causes where
-/// the user or the OS asked for the unmount. Every other cause (a probe-failure threshold, a
-/// deep-probe failure, reconciliation drift, an idle timeout, a config change, a repair, a mount
-/// failure) is an established mount going away without the user having just asked for that
-/// specific outcome, which is the case ADR-005 says must be communicated. A transition with no
-/// recorded cause cannot come from the supervisor but is treated as unexpected: failing toward a
-/// balloon is the safe direction for a rule that "MUST NOT be silent".
+/// text that may be reworded freely.
+/// <para>
+/// The maintainer's decision (bs-p97, 2026-11-01): the toast is for a genuinely unexpected loss of
+/// a <see cref="MountState.Mounted"/> drive and nothing else. A <see cref="MountState.Mounted"/>
+/// -&gt; <see cref="MountState.Draining"/> transition therefore toasts only for
+/// <see cref="DrainCause.Automatic"/> (a shallow or deep probe failure, or reconciliation drift)
+/// or for a missing cause, which cannot come from the supervisor but fails toward a balloon
+/// because ADR-005 says an unexpected unmount "MUST NOT be silent". Every other cause is silent
+/// here and is still logged and shown in the window: <see cref="DrainCause.UserUnmount"/>,
+/// <see cref="DrainCause.Suspend"/>, <see cref="DrainCause.IdleTimeout"/>,
+/// <see cref="DrainCause.Repair"/> (the user's own "Unmount all and re-probe"),
+/// <see cref="DrainCause.ConfigChanged"/> and <see cref="DrainCause.ConfigRemoved"/> (the user's
+/// own editor action), and <see cref="DrainCause.MountFailure"/> (an attempt that never reached
+/// <see cref="MountState.Mounted"/>; the supervisor only records it from
+/// <see cref="MountState.Mounting"/>, so it is also excluded by the From check).
+/// </para>
+/// <para>
+/// <b>Known gap.</b> Reconciliation after a user "Restart rclone" is still
+/// <see cref="DrainCause.Automatic"/>, because the supervisor is not told the restart was the
+/// user's (bs-z9e remains open on that point).
+/// </para>
 /// </remarks>
 public static class UnexpectedUnmountDetector
 {
@@ -35,7 +47,7 @@ public static class UnexpectedUnmountDetector
             return false;
         }
 
-        return entry.DrainCause is not (DrainCause.UserUnmount or DrainCause.Suspend);
+        return entry.DrainCause is null or DrainCause.Automatic;
     }
 
     /// <summary>

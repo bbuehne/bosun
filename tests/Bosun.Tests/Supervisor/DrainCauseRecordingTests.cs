@@ -100,7 +100,7 @@ public sealed class DrainCauseRecordingTests
     }
 
     [Fact]
-    public async Task An_idle_timeout_records_Automatic()
+    public async Task An_idle_timeout_records_IdleTimeout()
     {
         var harness = Harness(HostFixtures.OnDemand("archive", drive: "Q:", idleUnmountSeconds: 120));
         await harness.StartAsync();
@@ -109,11 +109,11 @@ public sealed class DrainCauseRecordingTests
         await harness.AdvanceAsync(TimeSpan.FromSeconds(120));
 
         var entry = Assert.Single(DrainStarts(harness, "archive"));
-        Assert.Equal(DrainCause.Automatic, entry.DrainCause);
+        Assert.Equal(DrainCause.IdleTimeout, entry.DrainCause);
     }
 
     [Fact]
-    public async Task A_mount_affecting_config_change_records_Automatic()
+    public async Task A_mount_affecting_config_change_records_ConfigChanged()
     {
         var host = HostFixtures.Persistent("prod", drive: "P:");
         var harness = Harness(host);
@@ -124,11 +124,11 @@ public sealed class DrainCauseRecordingTests
             () => harness.Supervisor.ConfigChangedAsync(HostFixtures.Build(HostFixtures.Global(), changed)));
 
         var entry = Assert.Single(DrainStarts(harness, "prod"));
-        Assert.Equal(DrainCause.Automatic, entry.DrainCause);
+        Assert.Equal(DrainCause.ConfigChanged, entry.DrainCause);
     }
 
     [Fact]
-    public async Task A_change_to_mode_none_records_Automatic()
+    public async Task A_change_to_mode_none_records_ConfigChanged()
     {
         var host = HostFixtures.Persistent("prod", drive: "P:");
         var harness = Harness(host);
@@ -139,7 +139,7 @@ public sealed class DrainCauseRecordingTests
             () => harness.Supervisor.ConfigChangedAsync(HostFixtures.Build(HostFixtures.Global(), changed)));
 
         var entry = Assert.Single(DrainStarts(harness, "prod"));
-        Assert.Equal(DrainCause.Automatic, entry.DrainCause);
+        Assert.Equal(DrainCause.ConfigChanged, entry.DrainCause);
     }
 
     [Fact]
@@ -265,5 +265,55 @@ public sealed class DrainCauseRecordingTests
         var unexpected = Assert.Single(
             failing.Supervisor.GetTransitionHistory(), UnexpectedUnmountDetector.IsUnexpectedUnmount);
         Assert.Equal(DrainCause.Automatic, unexpected.DrainCause);
+    }
+
+    /// <summary>
+    /// bs-p97, through the real supervisor history: the drains the maintainer decided are not
+    /// unexpected (idle timeout, a mount-affecting edit, a removed host, the user's repair, a
+    /// failed mount attempt) never satisfy the toast detector, while a lost drive (reconciliation
+    /// drift) does.
+    /// </summary>
+    [Fact]
+    public async Task The_detector_is_silent_for_idle_timeout_config_edit_removal_repair_and_failed_mount()
+    {
+        var idle = Harness(HostFixtures.OnDemand("archive", drive: "Q:", idleUnmountSeconds: 120));
+        await idle.StartAsync();
+        await idle.RunAsync(() => idle.Supervisor.RequestMountAsync("archive"));
+        await idle.AdvanceAsync(TimeSpan.FromSeconds(120));
+        Assert.Single(DrainStarts(idle, "archive"));
+        Assert.DoesNotContain(idle.Supervisor.GetTransitionHistory(), UnexpectedUnmountDetector.IsUnexpectedUnmount);
+
+        var host = HostFixtures.Persistent("prod", drive: "P:");
+        var edited = Harness(host);
+        await edited.StartAsync();
+        await edited.RunAsync(() => edited.Supervisor.ConfigChangedAsync(
+            HostFixtures.Build(HostFixtures.Global(), host with { Mount = host.Mount with { Drive = "Q:" } })));
+        Assert.Single(DrainStarts(edited, "prod"));
+        Assert.DoesNotContain(edited.Supervisor.GetTransitionHistory(), UnexpectedUnmountDetector.IsUnexpectedUnmount);
+
+        var removed = Harness(HostFixtures.Persistent("prod", drive: "P:"));
+        await removed.StartAsync();
+        await removed.RunAsync(() => removed.Supervisor.ConfigChangedAsync(HostFixtures.Build(HostFixtures.Global())));
+        Assert.Single(DrainStarts(removed, "prod"));
+        Assert.DoesNotContain(removed.Supervisor.GetTransitionHistory(), UnexpectedUnmountDetector.IsUnexpectedUnmount);
+
+        var repaired = Harness(HostFixtures.Persistent("prod", drive: "P:"));
+        await repaired.StartAsync();
+        await repaired.RunAsync(() => repaired.Supervisor.RepairAllAsync());
+        Assert.Single(DrainStarts(repaired, "prod"));
+        Assert.DoesNotContain(repaired.Supervisor.GetTransitionHistory(), UnexpectedUnmountDetector.IsUnexpectedUnmount);
+
+        var failedMount = Harness(HostFixtures.OnDemand("archive", drive: "Q:"));
+        await failedMount.StartAsync();
+        failedMount.Rclone.MakeMountFail("Q:", new InvalidOperationException("drive letter already in use"));
+        await failedMount.RunAsync(() => failedMount.Supervisor.RequestMountAsync("archive"));
+        Assert.Single(DrainStarts(failedMount, "archive"));
+        Assert.DoesNotContain(failedMount.Supervisor.GetTransitionHistory(), UnexpectedUnmountDetector.IsUnexpectedUnmount);
+
+        var drift = Harness(HostFixtures.Persistent("prod", drive: "P:"));
+        await drift.StartAsync();
+        drift.Rclone.SimulateMountLost("P:");
+        await drift.AdvanceAsync(TimeSpan.FromSeconds(30));
+        Assert.Single(drift.Supervisor.GetTransitionHistory(), UnexpectedUnmountDetector.IsUnexpectedUnmount);
     }
 }

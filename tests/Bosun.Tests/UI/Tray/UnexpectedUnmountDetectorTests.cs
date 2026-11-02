@@ -39,19 +39,55 @@ public sealed class UnexpectedUnmountDetectorTests
         Assert.False(UnexpectedUnmountDetector.IsUnexpectedUnmount(entry));
     }
 
+    /// <summary>bs-p97: the only cause that toasts is a lost drive (probe failure, deep-probe
+    /// failure, reconciliation drift), all <see cref="DrainCause.Automatic"/>.</summary>
     [Theory]
-    [InlineData(DrainCause.Automatic, "3 consecutive mounted-probe failures (threshold 3)")]
-    [InlineData(DrainCause.Automatic, "2 consecutive deep-probe failures (threshold 2)")]
-    [InlineData(DrainCause.Automatic, "reconciliation: mount missing from listmounts")]
-    [InlineData(DrainCause.Automatic, "idle timeout (120s without activity)")]
-    [InlineData(DrainCause.MountFailure, "mount/mount failed: connection refused")]
-    [InlineData(DrainCause.ConfigRemoved, "config change: host removed")]
+    [InlineData("3 consecutive mounted-probe failures (threshold 3)")]
+    [InlineData("2 consecutive deep-probe failures (threshold 2)")]
+    [InlineData("reconciliation: mount missing from listmounts")]
+    [InlineData("deep probe failed immediately after resume: SSH channel confirmed dead")]
+    public void IsUnexpectedUnmount_IsTrue_ForAnAutomaticDrainOfAMountedHost(string trigger)
+    {
+        var entry = Entry(MountState.Mounted, MountState.Draining, trigger, cause: DrainCause.Automatic);
+
+        Assert.True(UnexpectedUnmountDetector.IsUnexpectedUnmount(entry));
+    }
+
+    /// <summary>bs-p97 / bs-z9e, one case per silent cause.</summary>
+    [Theory]
+    [InlineData(DrainCause.IdleTimeout, "idle timeout (120s without activity)")]
     [InlineData(DrainCause.Repair, "repair: unmount all and re-probe")]
-    public void IsUnexpectedUnmount_IsTrue_ForAnyDrainCauseOtherThanUserOrSuspend(DrainCause cause, string trigger)
+    [InlineData(DrainCause.ConfigChanged, "config change: mount-affecting field changed")]
+    [InlineData(DrainCause.ConfigChanged, "config change: mount.mode set to none")]
+    [InlineData(DrainCause.ConfigRemoved, "config change: host removed")]
+    [InlineData(DrainCause.MountFailure, "mount/mount failed: connection refused")]
+    public void IsUnexpectedUnmount_IsFalse_ForCausesTheMaintainerDecidedAreSilent(DrainCause cause, string trigger)
     {
         var entry = Entry(MountState.Mounted, MountState.Draining, trigger, cause: cause);
 
-        Assert.True(UnexpectedUnmountDetector.IsUnexpectedUnmount(entry));
+        Assert.False(UnexpectedUnmountDetector.IsUnexpectedUnmount(entry));
+    }
+
+    /// <summary>A new <see cref="DrainCause"/> value must be classified here on purpose: this fails
+    /// until the new value is added to one of the two lists, so the toast policy is never decided
+    /// by accident.</summary>
+    [Fact]
+    public void Every_DrainCause_Value_Has_An_Explicit_Toast_Decision()
+    {
+        DrainCause[] toasts = [DrainCause.Automatic];
+        DrainCause[] silent =
+        [
+            DrainCause.UserUnmount, DrainCause.Suspend, DrainCause.IdleTimeout, DrainCause.Repair,
+            DrainCause.ConfigChanged, DrainCause.ConfigRemoved, DrainCause.MountFailure,
+        ];
+
+        Assert.Equal(
+            Enum.GetValues<DrainCause>().OrderBy(c => c),
+            toasts.Concat(silent).OrderBy(c => c));
+        Assert.All(toasts, c => Assert.True(
+            UnexpectedUnmountDetector.IsUnexpectedUnmount(Entry(MountState.Mounted, MountState.Draining, "x", cause: c))));
+        Assert.All(silent, c => Assert.False(
+            UnexpectedUnmountDetector.IsUnexpectedUnmount(Entry(MountState.Mounted, MountState.Draining, "x", cause: c))));
     }
 
     [Fact]
@@ -77,8 +113,8 @@ public sealed class UnexpectedUnmountDetectorTests
     [InlineData(DrainCause.Suspend, "2 consecutive deep-probe failures (threshold 2)", false)]
     [InlineData(DrainCause.Automatic, "user unmount", true)]
     [InlineData(DrainCause.Automatic, "USER UNMOUNT (from tray)", true)]
-    [InlineData(DrainCause.MountFailure, "system suspend", true)]
-    [InlineData(DrainCause.Repair, "", true)]
+    [InlineData(DrainCause.IdleTimeout, "2 consecutive deep-probe failures (threshold 2)", false)]
+    [InlineData(DrainCause.Repair, "reconciliation: mount missing from listmounts", false)]
     public void IsUnexpectedUnmount_IgnoresTheTriggerWording(DrainCause cause, string trigger, bool expected)
     {
         var entry = Entry(MountState.Mounted, MountState.Draining, trigger, cause: cause);

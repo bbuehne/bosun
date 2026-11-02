@@ -261,6 +261,23 @@ nothing, so there is nothing to unmount. (A supervisor that was constructed but
 whose initial `StartAsync` failed *is* subscribed, and a suspend then sweeps whatever
 that supervisor holds.)
 
+### Tray notifications
+
+The tray raises a balloon (`TrayIconController.ShowNotification`, the one place a balloon
+is shown) for:
+
+- **A mounted drive lost without anyone asking for it** (`UnexpectedUnmountDetector`).
+  Decided by the typed `DrainCause` on the `Mounted -> Draining` transition, never by the
+  trigger text. Only `DrainCause.Automatic` toasts: a shallow-probe or deep-probe failure
+  threshold, a forced deep-probe failure after a power or network transition, or
+  reconciliation drift. Silent, but still logged and shown in the window: `UserUnmount`,
+  `Suspend`, `IdleTimeout` (the on-demand idle timer), `Repair` (the user's "Unmount all and
+  re-probe"), `ConfigChanged` and `ConfigRemoved` (a host edit or removal), and
+  `MountFailure` (an attempt that never reached `Mounted`). Decided 2026-11-01 (bs-p97).
+  Not yet silent: reconciliation after a user "Restart rclone" (bs-z9e). Restarting rcd does
+  not go through the supervisor, which learns of it only as `OnRcloneRestartedAsync`
+  (the same call a crash recovery makes), so that drain is still `Automatic`.
+
 ## 4. The mount state machine
 
 One instance per configured host. This is the core of the application; get it
