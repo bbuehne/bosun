@@ -5,6 +5,7 @@ using Bosun.Health;
 using Bosun.Repair;
 using Bosun.Supervisor;
 using Bosun.UI.Autostart;
+using Bosun.UI;
 using H.NotifyIcon;
 using H.NotifyIcon.Core;
 using Microsoft.Extensions.Logging;
@@ -87,7 +88,8 @@ public sealed class TrayIconController : IDisposable
         _taskbarIcon.TrayLeftMouseUp += (_, _) => _windowController.ShowAndActivate();
 
         // Set the icon BEFORE creating the Win32 notification icon, so it is never briefly blank.
-        UpdateIcon(TrayStatus.Compose(_statusReadModel.Current.Health, _appHealth.Current));
+        var initial = _statusReadModel.Current;
+        UpdateIcon(TrayStatus.Compose(initial.Health, _appHealth.Current, initial.Rows));
 
         // TaskbarIcon is a FrameworkElement: declared in XAML it creates the actual Win32
         // notification icon when it is loaded into a visual tree. Bosun constructs it in code and
@@ -133,8 +135,10 @@ public sealed class TrayIconController : IDisposable
 
         try
         {
-            rows = _statusReadModel.Current.Rows;
-            status = TrayStatus.Compose(_statusReadModel.Current.Health, _appHealth.Current);
+            // One read, so the rows and the roll-up the tooltip is composed from are one poll.
+            var snapshot = _statusReadModel.Current;
+            rows = snapshot.Rows;
+            status = TrayStatus.Compose(snapshot.Health, _appHealth.Current, rows);
         }
         catch (Exception ex)
         {
@@ -198,7 +202,8 @@ public sealed class TrayIconController : IDisposable
 
         foreach (var row in rows)
         {
-            var hostItem = new MenuItem { Header = row.DisplayName, ToolTip = row.StatusText };
+            // bs-ww9.1.2: the status is in the header ("Mercury — parked"), not only on hover.
+            var hostItem = new MenuItem { Header = HostRowPresentation.Create(row).TrayHeader, ToolTip = row.StatusText };
 
             foreach (var action in HostContextMenuBuilder.Build(row))
             {
