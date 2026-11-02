@@ -340,7 +340,9 @@ right before building any UI.
    shallow *and* deep, and drains on a single deep failure once `rclone rcd` has
    answered `core/version`. Everything else previously enabled goes to `Probing`.
    A network address change takes the identical path. See ADR-017.
-6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount.
+6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount. The one
+   exception is ADR-022: an on-demand host the user mounted before a suspend is
+   mounted again after resume if its first post-resume probe reaches `Ready`.
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
    `Mounted → Draining` after that period without filesystem activity.
 
