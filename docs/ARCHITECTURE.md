@@ -430,7 +430,7 @@ right before building any UI.
    next becomes `Ready`. A parked host (rule 9) and an on-demand host (rule 6) are
    not mounted by resume; a `Disabled` or `Unreachable` host reaches `Ready`
    through `Probing` or the backoff ladder as before and the ordinary persistent
-   auto-mount applies. (Re-mounting an on-demand host that suspend dropped is
+   auto-mount applies. (Re-mounting an on-demand host that suspend dropped is covered by
    ADR-022, `bs-hrg`.)
 6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount. The one
    exception is ADR-022: an on-demand host the user mounted before a suspend is
