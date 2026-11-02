@@ -8,6 +8,7 @@ using Bosun.Supervisor;
 using Bosun.Tests.Rclone.Fakes;
 using Bosun.Tests.SessionMonitor.Fakes;
 using Bosun.Tests.Supervisor.Support;
+using Bosun.Tests.Supervisor.Fakes;
 using Bosun.UI;
 using Bosun.UI.Tray;
 using Microsoft.Extensions.DependencyInjection;
@@ -94,6 +95,7 @@ public sealed class UserInterfaceDependencyResolverTests
             sp.GetRequiredService<IHostConfigStore>(),
             sp.GetRequiredService<IRcloneClient>(),
             sp.GetRequiredService<IProbe>(),
+            new FakeDriveTypeReader(),
             TimeProvider.System,
             sp.GetRequiredService<ILogger<MountSupervisor>>()));
         services.AddSingleton<IMountSupervisor>(sp => sp.GetRequiredService<MountSupervisor>());
