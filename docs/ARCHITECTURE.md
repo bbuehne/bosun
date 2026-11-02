@@ -184,7 +184,7 @@ Wraps three .NET event sources:
 
 | Event | Reaction |
 |---|---|
-| `PowerModeChanged` → `Suspend` | Unmount all, enter `Suspended` |
+| `PowerModeChanged` → `Suspend` | Unmount all, enter `Suspended`; **no mount happens while suspended** (§4 rule 5) |
 | `PowerModeChanged` → `Resume` | **Re-derive** (below) |
 | `NetworkAddressChanged` | **Re-derive** (below) |
 | `SessionSwitch` → `SessionLock` | No action (v1); reserved |
@@ -407,6 +407,31 @@ right before building any UI.
    immediately: a `Disabled` host through `Probing`, a `Ready` or `Unreachable`
    host in place (rule 10).
    A network address change takes the identical path. See ADR-017.
+
+   **No mount happens while the supervisor is suspended** (Invariant I8,
+   `bs-bv0`). The suspend handler runs once; a mount created after it, in the
+   seconds before the machine sleeps, survives the sleep. So the suspended flag is
+   checked at the one place a host enters `Mounting` — the entry guard of
+   `TryBeginMountAsync`, the only caller of `mount/mount` — which covers every
+   route in at once: the persistent auto-mount on arriving at `Ready` (by the idle
+   probe, a network change, "retry now" or a config change), an explicit mount
+   request for a `Ready` host, the mounting-became-available sweep, and any route
+   added later. The mount-retry timer (a failed mount's paced re-enable) is also
+   skipped while suspended, so it does not probe in those seconds either: the host
+   stays `Disabled`, and resume re-enables it. A host held back this way simply
+   stays `Ready` (no new transition, no `Mounting`, no rc call).
+
+   At resume the flag is cleared and the held-back hosts are picked up through the
+   re-probe above, not around it. A persistent, non-parked host found `Ready` is
+   force-probed again like any other `Ready` host (ADR-017: a state that survived
+   a transition is not trusted), and only if that probe leaves it `Ready` does it
+   enter `Mounting`, with the deep probe of rule 2 first (rule 1 and Invariant I1
+   hold). A host whose probe fails goes `Unreachable` instead and mounts when it
+   next becomes `Ready`. A parked host (rule 9) and an on-demand host (rule 6) are
+   not mounted by resume; a `Disabled` or `Unreachable` host reaches `Ready`
+   through `Probing` or the backoff ladder as before and the ordinary persistent
+   auto-mount applies. (Re-mounting an on-demand host that suspend dropped is
+   separate work, `bs-hrg`.)
 6. On-demand hosts rest in `Ready`, not `Mounted`. They do not auto-mount.
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
    `Mounted → Draining` after that period without filesystem activity.

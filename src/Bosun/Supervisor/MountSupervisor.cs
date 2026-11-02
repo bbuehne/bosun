@@ -602,6 +602,23 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 case MountState.Ready:
                     host.Backoff = BackoffState.Initial;
                     await ForceImmediateIdleProbeAsync(host, "resume: bypass backoff", ct).ConfigureAwait(false);
+
+                    // bs-bv0: a persistent host can be sitting in Ready un-mounted because the suspend
+                    // gate in TryBeginMountAsync held its auto-mount back (it came up while suspended).
+                    // A Ready host's probe success is an in-place probe -- it does not re-run
+                    // OnEnteredReadyAsync -- so without this it would stay Ready forever. The forced
+                    // probe above is the fresh evidence ADR-017 requires (a Ready that survived a
+                    // transition is not trusted); only if it left the host Ready do we mount, and
+                    // TryBeginMountAsync still deep-probes it first (I1). Parked and on-demand hosts
+                    // are deliberately skipped, exactly as in OnEnteredReadyAsync.
+                    if (host.State == MountState.Ready
+                        && host.Config.Mount.Mode == MountMode.Persistent
+                        && !host.UserParked)
+                    {
+                        await TryBeginMountAsync(host, "resume: persistent host held back while suspended", ct)
+                            .ConfigureAwait(false);
+                    }
+
                     break;
                 case MountState.Unreachable:
                     // NO tier split here, deliberately. ADR-014 splits the RECURRING ladder only.
@@ -1280,6 +1297,27 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
+        if (suspended)
+        {
+            // bs-bv0 / Invariant I8: the suspend gate. This is the ONLY method that moves a host into
+            // Mounting and the only caller of mount/mount, so refusing here covers every route in --
+            // the persistent auto-mount in OnEnteredReadyAsync (whether the host arrived at Ready by a
+            // periodic probe, a retry-now, a network change or a config change), a user mount request
+            // against a Ready host, the mounting-became-available sweep, and a tier change to
+            // persistent -- including any path added later. A mount created after the suspend handler
+            // has run survives the sleep (or appears before ResumeAsync has re-derived anything),
+            // which is the exact thing I8 exists to prevent.
+            //
+            // The host stays Ready and nothing is lost: ResumeAsync clears the flag, force-probes
+            // every Ready host afresh (ADR-017), and mounts the persistent, non-parked ones that come
+            // back still Ready. No new transition; no deep probe, no rc call, no SetState.
+            logger.LogInformation(
+                "Not mounting {HostKey} ({Trigger}): the system is suspended (Invariant I8); staying {State} -- a " +
+                "persistent host is mounted by resume once a fresh probe passes",
+                host.Key, trigger, host.State);
+            return;
+        }
+
         if (!mountingAvailability.IsAvailable)
         {
             // bs-yvw.1: the second, structural condition on entering Mounting, alongside "must be
@@ -1900,7 +1938,26 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         var delaySeconds = host.MountRetryBackoff.NextDelaySeconds(global.BackoffSeconds);
         host.ProbeTimer = CreateOneShotTimer(
             TimeSpan.FromSeconds(Math.Max(delaySeconds, 0)),
-            () => Enqueue(ct => EnableHostAsync(host, "mount-retry backoff elapsed", ct)));
+            () => Enqueue(ct => OnMountRetryElapsedAsync(host, ct)));
+    }
+
+    /// <summary>The paced re-enable after a failed mount attempt (<see cref="ArmMountRetryTimer"/>).
+    /// bs-bv0 / Invariant I8: a timer armed just before suspend was processed fires during the
+    /// suspend; it must not probe and re-enter the mount path then. The host is left
+    /// <see cref="MountState.Disabled"/> and <see cref="ResumeAsync"/> enables every enabled
+    /// <c>Disabled</c> host. (Even if this did enable the host, <see cref="TryBeginMountAsync"/> would
+    /// still refuse to mount; skipping here just avoids probe traffic in the seconds before sleep.)</summary>
+    private Task OnMountRetryElapsedAsync(HostRuntime host, CancellationToken ct)
+    {
+        if (suspended)
+        {
+            logger.LogInformation(
+                "Mount-retry backoff elapsed for {HostKey} while the system is suspended; leaving it {State} for " +
+                "resume to re-enable (Invariant I8)", host.Key, host.State);
+            return Task.CompletedTask;
+        }
+
+        return EnableHostAsync(host, "mount-retry backoff elapsed", ct);
     }
 
     // ------------------------------------------------------------------------------------------
