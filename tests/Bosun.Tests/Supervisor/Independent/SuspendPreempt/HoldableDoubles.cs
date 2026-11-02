@@ -246,7 +246,7 @@ internal sealed record RcCall(DateTimeOffset At, string Operation, string? Targe
 internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IRcloneClient
 {
     private readonly object gate = new();
-    private readonly List<(string[] Operations, Hold Hold)> armed = [];
+    private readonly List<(string[] Operations, string? Target, Hold Hold)> armed = [];
     private readonly List<RcCall> calls = [];
 
     public RcloneDouble Inner => inner;
@@ -269,7 +269,22 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
         var hold = new Hold(onCancel);
         lock (gate)
         {
-            armed.Add((operations, hold));
+            armed.Add((operations, null, hold));
+        }
+
+        return hold;
+    }
+
+    /// <summary>Arms a hold on the next <paramref name="operation"/> call whose mount point or fs is
+    /// <paramref name="target"/>. Needed since bs-5o4: the suspend sweep has several
+    /// <c>mount/unmount</c> calls in flight at once, in an order the spec does not fix, so a test
+    /// that wants one particular host's call held must say which.</summary>
+    public Hold HoldNextAt(OnCancel onCancel, string operation, string target)
+    {
+        var hold = new Hold(onCancel);
+        lock (gate)
+        {
+            armed.Add(([operation], target, hold));
         }
 
         return hold;
@@ -335,7 +350,8 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
         lock (gate)
         {
             calls.Add(new RcCall(time.GetUtcNow(), operation, target));
-            var index = armed.FindIndex(a => a.Operations.Contains(operation));
+            var index = armed.FindIndex(a => a.Operations.Contains(operation)
+                                             && (a.Target is null || string.Equals(a.Target, target, StringComparison.OrdinalIgnoreCase)));
             hold = index < 0 ? null : armed[index].Hold;
             if (index >= 0)
             {
