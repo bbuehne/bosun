@@ -258,6 +258,31 @@ right before building any UI.
    `Unreachable` or `Probing` directly to `Mounting`. (Invariant I1.)
 2. Entering `Mounting` triggers a deep probe. Deep probe failure routes to
    `Draining`, not to `Mounted`.
+
+2a. **A confirmed `mount/mount` is not yet `Mounted`: the drive must read back as
+    a network drive (Invariant I7, `bs-dtk`).** Once `mount/mount` returns, the
+    supervisor reads the drive's type through `IDriveTypeReader` (production:
+    `new DriveInfo(letter).DriveType`; pure BCL, no P/Invoke). Only
+    `DriveType.Network` proceeds to `Mounted` (the verified baseline for a
+    correct `--network-mode` mount is `Network` with `DriveFormat` `FUSE-rclone`).
+    Anything else (`Fixed`, `Removable`, `NoRootDirectory`, `Unknown`, ...) or a
+    read that throws is treated as a **failed mount**: `Mounting -> Draining`,
+    the existing mount-failure edge (no new transition), then `mount/unmount`
+    through the supervisor. A drive presented as a fixed disk makes Explorer
+    behave pathologically, so the supervisor does not keep it. The reason is
+    recorded in `LastMountFailureReason` and counted in `ConsecutiveMountFailures`,
+    which is the route ADR-012 Decision 3 already uses for a host that answers TCP
+    but cannot be mounted: the window row reads "mount failed N times; last error:
+    ...", and a persistent host puts the tray icon in the error state. The retry
+    is paced on the mount-retry ladder (see Backoff), not immediate.
+
+    The check **fails closed**: a read that throws, or `NoRootDirectory` straight
+    after a successful `mount/mount`, cannot be shown to satisfy I7, so it drains
+    like any other mismatch, with a distinct reason ("could not verify ...",
+    "does not exist"). Only the type is read, never `DriveFormat`, `IsReady` or
+    the size, because those touch the volume (see rule 3a). It applies to the
+    mount this supervisor just made; a mount adopted at startup
+    (Reconciliation) is not re-checked.
 3. While `Mounted`, a host is **always** shallow-probed, whatever
    `probe.interval_seconds` says. The effective mounted interval is:
 
@@ -297,7 +322,9 @@ right before building any UI.
     two timer continuations happens to be processed first, an order-dependent
     race rather than a deterministic policy. Never implemented by enumerating
     the drive letter (`DriveInfo`, `Directory.GetFiles`, etc.) — that is
-    precisely the call that can hang, and the supervisor's channel is globally
+    precisely the call that can hang (the one exception is rule 2a's single
+    `DriveInfo.DriveType` read, taken once right after `mount/mount`, which asks
+    the mount manager for the drive's type and does not touch the volume), and the supervisor's channel is globally
     serialised (see `MountSupervisor`'s class remarks), so one hung enumeration
     would stall every host, not just this one. See ADR-016.
 4. `Draining` calls `mount/unmount`. If unmount does not confirm within the
@@ -442,6 +469,7 @@ state directly, it posts commands to the same channel.
 | `rclone rcd` orphaned by a dead Bosun, still holding the rc port | Prevented by the Job Object; if one survives anyway (the few ms before assignment), the next launch kills it when its command line is exactly Bosun's own and it runs as the current user. Otherwise the port holder is reported by PID and image path. The fault text names the real cause (HTTP 401, exit code, port holder), never a generic "did not respond". See ADR-020 §1-2. |
 | WinFsp not installed | Detect at startup, show an actionable message, disable all mount features, leave terminal features working. |
 | Drive letter already in use | Refuse the mount, surface the conflict in the tray, do not silently pick another letter. |
+| `mount/mount` succeeds but the drive is not `DriveType.Network` (rclone accepted `network_mode` and stopped honouring it; the drive is presented as a fixed disk) | Treat as a failed mount: drain and unmount, record the reason on the host, show it in the window and tray as a mount failure. Never keep a fixed-disk presentation of an SFTP mount. See §4 rule 2a (`bs-dtk`). |
 | Machine sleeps with mounts up | Unmount on suspend. If we missed it, force-unmount and reconcile on resume. |
 | Config file invalid | Keep running on the last valid config; surface the parse error. Never apply a partial config. |
 | Bosun crashes with mounts up | On next start, enumerate existing mounts via `mount/listmounts` and adopt or clear them before doing anything else. |

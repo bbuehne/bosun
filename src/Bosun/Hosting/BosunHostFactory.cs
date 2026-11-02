@@ -247,6 +247,7 @@ public static class BosunHostFactory
             sp.GetRequiredService<IHostConfigStore>(),
             sp.GetRequiredService<IRcloneClient>(),
             sp.GetRequiredService<IProbe>(),
+            new DriveInfoDriveTypeReader(),
             TimeProvider.System,
             sp.GetRequiredService<ILogger<MountSupervisor>>()));
         builder.Services.AddSingleton<IMountSupervisor>(sp => sp.GetRequiredService<MountSupervisor>());

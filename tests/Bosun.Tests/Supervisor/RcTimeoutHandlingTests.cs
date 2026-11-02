@@ -230,7 +230,7 @@ public sealed class RcTimeoutHandlingTests
         var tcp = new FakeTcpProbeTransport();
         tcp.SucceedsImmediately();
         var probe = new HostProbe(tcp, new RemoteRootLister(rclone, store), time, NullLogger<HostProbe>.Instance);
-        var supervisor = new MountSupervisor(store, rclone, probe, time, NullLogger<MountSupervisor>.Instance);
+        var supervisor = new MountSupervisor(store, rclone, probe, new FakeDriveTypeReader(), time, NullLogger<MountSupervisor>.Instance);
 
         var start = supervisor.StartAsync();
         await supervisor.DrainAsync();

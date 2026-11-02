@@ -1,3 +1,4 @@
+using System.IO;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Bosun.Configuration;
@@ -91,6 +92,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     private readonly IHostConfigStore configStore;
     private readonly IRcloneClient rcloneClient;
     private readonly IProbe probe;
+    private readonly IDriveTypeReader driveTypeReader;
     private readonly TimeProvider timeProvider;
     private readonly ILogger<MountSupervisor> logger;
 
@@ -150,6 +152,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         IHostConfigStore configStore,
         IRcloneClient rcloneClient,
         IProbe probe,
+        IDriveTypeReader driveTypeReader,
         TimeProvider timeProvider,
         ILogger<MountSupervisor> logger)
     {
@@ -161,6 +164,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         // and end, and a 20-host StartAsync could look "stalled" to the watchdog while working.
         this.rcloneClient = new ActivityStampingRcloneClient(rcloneClient, TouchLoopActivity);
         this.probe = probe;
+        this.driveTypeReader = driveTypeReader;
         this.timeProvider = timeProvider;
         this.logger = logger;
         repeatingFaults = new RepeatingFaultLogger(timeProvider);
@@ -1290,6 +1294,24 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
+        // bs-dtk: Invariant I7 runtime guard. mount/mount succeeding is not proof the drive is
+        // presented as a network drive -- rclone could keep accepting network_mode and stop acting
+        // on it. A fixed-disk presentation of an SFTP mount produces pathological Explorer
+        // behaviour, so a mount that is not verifiably DriveType.Network is a failed mount: it
+        // takes the existing mount-failure route (Mounting -> Draining, no new transition), so the
+        // reason reaches the window and tray through the same LastMountFailureReason /
+        // MountFailing path as every other failed mount (ADR-012 Decision 3), and the retry is
+        // paced on the mount-retry ladder rather than hammering.
+        var driveTypeProblem = DescribeDriveTypeProblem(host, drive);
+        if (driveTypeProblem is not null)
+        {
+            host.MountRetryBackoff = host.MountRetryBackoff.RecordFailure();
+            host.ConsecutiveMountFailures++;
+            host.LastMountFailureReason = driveTypeProblem;
+            await BeginDrainAsync(host, driveTypeProblem, DrainCause.MountFailure, ct).ConfigureAwait(false);
+            return;
+        }
+
         host.ConsecutiveMountedFailures = 0;
         host.ConsecutiveDeepProbeFailures = 0;
         host.MountRetryBackoff = BackoffState.Initial;
@@ -1299,6 +1321,46 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         ArmMountedProbeTimer(host);
         ArmMountedDeepProbeTimer(host);
         ArmIdleUnmountTimer(host);
+    }
+
+    /// <summary>
+    /// bs-dtk: null when <paramref name="drive"/> reads back as <see cref="DriveType.Network"/>
+    /// (the verified baseline for a correct <c>--network-mode</c> rclone mount is Network /
+    /// <c>FUSE-rclone</c>); otherwise the user-facing reason the mount is rejected. Fails closed:
+    /// a drive type that cannot be read, or is anything but Network (including
+    /// <see cref="DriveType.NoRootDirectory"/> -- <c>mount/mount</c> said yes but no drive exists --
+    /// and <see cref="DriveType.Unknown"/>), is a mount that cannot be shown to satisfy I7.
+    /// Reads only the type, never the volume (see <see cref="IDriveTypeReader"/>).
+    /// </summary>
+    private string? DescribeDriveTypeProblem(HostRuntime host, string drive)
+    {
+        DriveType driveType;
+        try
+        {
+            driveType = driveTypeReader.GetDriveType(drive);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex, "Could not read the drive type of {Drive} for {HostKey} after mounting; unmounting rather " +
+                "than keeping a mount that cannot be verified as a network drive (Invariant I7)",
+                drive, host.Key);
+            return $"could not verify that {drive} is a network drive (reading its drive type failed: {ex.Message}); unmounted";
+        }
+
+        if (driveType == DriveType.Network)
+        {
+            return null;
+        }
+
+        logger.LogError(
+            "Mounted drive {Drive} for {HostKey} reports DriveType {DriveType}, expected Network; unmounting " +
+            "(Invariant I7 -- a non-network presentation of an SFTP mount hangs Explorer)",
+            drive, host.Key, driveType);
+
+        return driveType == DriveType.NoRootDirectory
+            ? $"mount/mount reported success but {drive} does not exist (drive type NoRootDirectory); unmounted"
+            : $"{drive} is presented as a {driveType} drive instead of a network drive (--network-mode was not applied); unmounted";
     }
 
     // ------------------------------------------------------------------------------------------
