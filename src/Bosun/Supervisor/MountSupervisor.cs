@@ -170,60 +170,6 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         repeatingFaults = new RepeatingFaultLogger(timeProvider);
     }
 
-    /// <summary>
-    /// Why a drain was begun (bs-fix-e5, see the delivery report). Drives two things in
-    /// <see cref="CompleteDrainAsync"/>: whether the host is parked rather than auto re-enabled
-    /// (<see cref="UserUnmount"/>), and whether the post-drain re-enable is paced through
-    /// <see cref="ArmMountRetryTimer"/> instead of firing immediately (<see cref="MountFailure"/>).
-    /// Also drives which timeout <see cref="AttemptDrainStepAsync"/> escalates against
-    /// (<see cref="Suspend"/> uses <c>global.suspend_unmount_timeout_seconds</c>; everything else
-    /// uses the fixed ordinary <see cref="DrainConfirmTimeout"/>).
-    /// </summary>
-    private enum DrainCause
-    {
-        /// <summary>Reconciliation drift, a mounted-probe-failure threshold, or an idle-unmount
-        /// timeout -- the host should come back exactly as it did before this fix: re-enabled
-        /// immediately once the drain completes.</summary>
-        Automatic,
-
-        /// <summary>System suspend (Invariant I8). Escalates on the suspend budget, not the
-        /// ordinary drain timeout; never re-enabled while <c>suspended</c> is true (that is
-        /// <see cref="ResumeAsync"/>'s job).</summary>
-        Suspend,
-
-        /// <summary>An explicit <see cref="RequestUnmountAsync"/>. Parks the host
-        /// (<see cref="HostRuntime.UserParked"/>) so it does not auto-remount itself the moment the
-        /// drain completes -- see the defect-3 discussion in the delivery report.</summary>
-        UserUnmount,
-
-        /// <summary>A deep-probe or <c>mount/mount</c> failure while entering <c>Mounting</c>
-        /// (<see cref="TryBeginMountAsync"/>). Paced via <see cref="ArmMountRetryTimer"/> instead of
-        /// an immediate re-enable -- see the defect-1 discussion in the delivery report (ADR-005 /
-        /// docs/ARCHITECTURE.md §6 "drive letter already in use: refuse the mount... do not retry
-        /// forever").</summary>
-        MountFailure,
-
-        /// <summary>A host removed entirely from config while Mounting/Mounted (bs-7ck, Invariant
-        /// I2). Drains exactly like <see cref="Automatic"/>, but <see cref="CompleteDrainAsync"/>
-        /// additionally evicts the host from <see cref="hosts"/> once it settles rather than
-        /// re-enabling it -- nothing in config describes this host any more, so nothing should keep
-        /// probing or remounting it. Deliberately distinct from a host reconfigured to
-        /// <c>mount.mode = "none"</c> (which stays in <see cref="hosts"/>, parked
-        /// <see cref="MountState.Disabled"/>, exactly like a <c>mode = "none"</c> host at startup --
-        /// see <see cref="ApplyHostConfigChangeAsync"/>): that host's KEY still exists in config, so
-        /// it still belongs in the snapshot as an administratively-disabled entry, whereas a REMOVED
-        /// key has nothing left to describe.</summary>
-        ConfigRemoved,
-
-        /// <summary>"Unmount all and re-probe" (<see cref="RepairAllAsync"/>, bs-aoz). Drains exactly
-        /// like <see cref="Automatic"/> -- the host is re-enabled, so it re-probes and a persistent
-        /// host remounts -- and deliberately NOT like <see cref="UserUnmount"/>: the host is not
-        /// parked. A repair means "drop everything and start clean", not "keep these hosts down".
-        /// Kept as its own cause (rather than reusing <see cref="Automatic"/>) so the log says why,
-        /// and so a future change to <see cref="Automatic"/> cannot silently change a repair.</summary>
-        Repair,
-    }
-
     /// <summary>Mutable per-host runtime state. Deliberately a private nested class: nothing
     /// outside <see cref="MountSupervisor"/> can even see this type, let alone mutate
     /// <see cref="State"/> directly -- the only mutations happen through <see cref="SetState"/>
@@ -1065,7 +1011,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     // Transition enforcement (see class remarks)
     // ------------------------------------------------------------------------------------------
 
-    private void SetState(HostRuntime host, MountState to, string trigger)
+    private void SetState(HostRuntime host, MountState to, string trigger, DrainCause? drainCause = null)
     {
         var from = host.State;
         if (!AllowedTransitions.TryGetValue(from, out var allowed) || Array.IndexOf(allowed, to) < 0)
@@ -1082,7 +1028,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.LastTransitionUtc = timestamp;
         host.LastTransitionTrigger = trigger;
 
-        RecordTransition(host.Key, from, to, trigger, timestamp);
+        RecordTransition(host.Key, from, to, trigger, timestamp, drainCause);
 
         logger.LogInformation(
             "Host {HostKey} transitioned {From} -> {To} (trigger: {Trigger})", host.Key, from, to, trigger);
@@ -1113,7 +1059,9 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// backing collection is a <see cref="ConcurrentQueue{T}"/> anyway (it is the read side, not the
     /// write side, that needs it).
     /// </remarks>
-    private void RecordTransition(string hostKey, MountState from, MountState to, string trigger, DateTimeOffset timestampUtc)
+    private void RecordTransition(
+        string hostKey, MountState from, MountState to, string trigger, DateTimeOffset timestampUtc,
+        DrainCause? drainCause = null)
     {
         transitionHistory.Enqueue(new MountTransitionEntry
         {
@@ -1122,6 +1070,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             From = from,
             To = to,
             Trigger = trigger,
+            DrainCause = drainCause,
         });
 
         while (transitionHistory.Count > TransitionHistoryCapacity && transitionHistory.TryDequeue(out _))
@@ -1686,7 +1635,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
-        SetState(host, MountState.Draining, reason);
+        SetState(host, MountState.Draining, reason, cause);
         host.DrainReason = reason;
         host.DrainStartedUtc = timeProvider.GetUtcNow();
         host.DrainEscalated = false;

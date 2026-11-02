@@ -53,7 +53,7 @@ public sealed class TransitionTableStructureTests
         Assert.NotNull(setState);
 
         var thrown = Assert.Throws<TargetInvocationException>(() =>
-            setState!.Invoke(harness.Supervisor, [host, MountState.Mounting, "illegal-test-transition"]));
+            setState!.Invoke(harness.Supervisor, [host, MountState.Mounting, "illegal-test-transition", null]));
 
         var inner = Assert.IsType<InvalidOperationException>(thrown.InnerException);
         Assert.Contains($"{illegalFrom} -> {MountState.Mounting}", inner.Message);
@@ -72,7 +72,7 @@ public sealed class TransitionTableStructureTests
         var setState = typeof(MountSupervisor).GetMethod("SetState", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
         // Must not throw.
-        setState.Invoke(harness.Supervisor, [host, MountState.Mounting, "legal-test-transition"]);
+        setState.Invoke(harness.Supervisor, [host, MountState.Mounting, "legal-test-transition", null]);
 
         var stateField = host.GetType().GetField("State")!;
         Assert.Equal(MountState.Mounting, (MountState)stateField.GetValue(host)!);
