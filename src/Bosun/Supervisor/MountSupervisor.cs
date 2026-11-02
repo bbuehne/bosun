@@ -418,6 +418,19 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         {
             var host = RequireHost(hostKey);
 
+            // bs-oly (maintainer decision 2026-11-01): while the system is suspended EVERY mount
+            // request is refused, whatever the host's state -- Ready, Unreachable, Disabled, parked.
+            // The TryBeginMountAsync gate (bs-bv0, Invariant I8) already stops the mount itself, but
+            // it does so with only a log line, which is the silent no-op ADR-014 rule 8 forbids for a
+            // user click. Checked FIRST, before anything below can change host state: the refusal
+            // must not clear UserParked (the user did not get the remount they asked for, so their
+            // earlier "take it down" still stands) and must not issue a probe. It precedes the
+            // mounting-availability check because suspend is the more specific, self-clearing cause.
+            if (suspended)
+            {
+                throw new MountRequestRefusedException(hostKey, "the system is suspended");
+            }
+
             // bs-yvw.1 / ADR-014 rule 8: an explicit mount request while mounting is unavailable
             // must fail loudly with the causal reason, not silently do nothing -- the same
             // "no silent no-op" standard rule 8 already set for a request against an Unreachable
@@ -442,14 +455,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 // 1 forbids Mounting from anywhere but Ready and nothing else would ever move it
                 // there again. The click IS the trigger a suppressed timer no longer supplies.
                 //
-                // Refuses first, rather than probing, if the system is currently suspended --
-                // Invariant I8 in reverse: bringing reachability information (or a mount) back up
-                // in the moments around a suspend is exactly the mount this invariant exists to
-                // prevent.
-                if (suspended)
-                {
-                    throw new MountRequestRefusedException(hostKey, "the system is suspended");
-                }
+                // The suspended refusal (bs-oly) has already happened above, before UserParked was
+                // touched, so this path never probes around a suspend (Invariant I8 in reverse).
 
                 // Reuses RequestRetryNowAsync's own reset-and-probe path: a user asking to mount is
                 // at least as strong a signal as a user asking to retry, and the Backoff section

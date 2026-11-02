@@ -233,7 +233,7 @@ public sealed class MountAuthorisationTests
     /// reverse.
     /// </summary>
     [Fact]
-    public async Task A_mount_request_while_suspended_is_ignored()
+    public async Task A_mount_request_while_suspended_is_refused_and_mounts_nothing()
     {
         var host = HostFixtures.OnDemand("archive", drive: "Q:");
         var harness = new IndependentHarness(HostFixtures.Build(HostFixtures.Global(), host));
@@ -243,7 +243,10 @@ public sealed class MountAuthorisationTests
         await harness.RunAsync(() => harness.Supervisor.SuspendAsync());
         Assert.Equal(MountState.Disabled, harness.State("archive"));
 
-        await harness.RunAsync(() => harness.Supervisor.RequestMountAsync("archive"));
+        // bs-oly: refused loudly (was a silent no-op), and still nothing is mounted.
+        var ex = await Assert.ThrowsAsync<MountRequestRefusedException>(
+            () => harness.RunAsync(() => harness.Supervisor.RequestMountAsync("archive")));
+        Assert.Equal("the system is suspended", ex.Reason);
 
         Assert.Equal(MountState.Disabled, harness.State("archive"));
         Assert.Equal(1, harness.Rclone.MountCount("Q:"));

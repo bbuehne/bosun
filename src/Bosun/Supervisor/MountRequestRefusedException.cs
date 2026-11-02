@@ -12,7 +12,8 @@ namespace Bosun.Supervisor;
 /// came back negative, so the host is still unreachable and there is nothing to mount.</item>
 /// <item>The system is currently suspended (Invariant I8): triggering a probe -- let alone a mount
 /// -- in the moments around a suspend would be I8 in reverse, so the request is refused outright
-/// rather than attempted.</item>
+/// rather than attempted. This applies to a request against a host in ANY state (bs-oly), not
+/// only an Unreachable one.</item>
 /// </list>
 /// <para>
 /// Deliberately distinct from <see cref="MountingUnavailableException"/>, which reports a
