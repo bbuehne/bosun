@@ -57,6 +57,7 @@ public static class StatusDerivation
             ConsecutiveMountFailures = snapshot.ConsecutiveMountFailures,
             LastMountFailureReason = snapshot.LastMountFailureReason,
             ProvisioningFailure = mode == MountMode.None ? null : provisioningFailure,
+            UploadFailureCount = snapshot.UploadFailureCount,
         };
     }
 
@@ -78,6 +79,15 @@ public static class StatusDerivation
         if (provisioningFailure is not null && snapshot.State == MountState.Mounted)
         {
             return (StatusCategory.ProvisioningFailed, $"{drive} is mounted, but {ProvisioningFailureSentence(provisioningFailure)}");
+        }
+
+        // Rung 0c (bs-obf): mounted, but rclone has files it could not upload. Below the provisioning
+        // failure (a possibly-wrong remote is the more fundamental statement) and above "healthy",
+        // because the files the user wrote are not on the host. Host-specific: row only, no banner.
+        if (snapshot.State == MountState.Mounted && snapshot.UploadFailureCount > 0)
+        {
+            var count = snapshot.UploadFailureCount;
+            return (StatusCategory.UploadsFailing, $"{drive} is mounted, but {count} {(count == 1 ? "file" : "files")} failed to upload");
         }
 
         // Rung 1: Mounted is unconditionally healthy. Nothing below can be simultaneously true in

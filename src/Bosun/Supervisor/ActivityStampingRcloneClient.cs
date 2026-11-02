@@ -108,4 +108,40 @@ internal sealed class ActivityStampingRcloneClient(IRcloneClient inner, Action s
             stamp();
         }
     }
+
+    public async Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await inner.ListVfsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            stamp();
+        }
+    }
+
+    public async Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await inner.GetVfsStatsAsync(fs, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            stamp();
+        }
+    }
+
+    public async Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await inner.GetVfsQueueAsync(fs, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            stamp();
+        }
+    }
 }

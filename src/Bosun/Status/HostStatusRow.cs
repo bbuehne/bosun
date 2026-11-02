@@ -42,6 +42,11 @@ public enum StatusCategory
     /// not in the app-wide banner.</summary>
     ProvisioningFailed,
 
+    /// <summary>Mounted, but rclone reports files that failed to upload (bs-obf; see
+    /// <see cref="HostStatusRow.UploadFailureCount"/>). Host-specific, so it is shown on the row and
+    /// not in the app-wide banner. Does not change <see cref="AggregateHealth"/>.</summary>
+    UploadsFailing,
+
     /// <summary><c>mount.mode = "none"</c> -- this host was never configured to have a mount.</summary>
     NotConfigured,
 
@@ -139,4 +144,7 @@ public sealed record HostStatusRow
     /// <see langword="null"/>. Always <see langword="null"/> for a <see cref="MountMode.None"/> host, which
     /// mounts nothing and so has nothing to be blocked.</summary>
     public string? ProvisioningFailure { get; init; }
+
+    /// <summary>See <see cref="HostMountSnapshot.UploadFailureCount"/> (bs-obf).</summary>
+    public int UploadFailureCount { get; init; }
 }

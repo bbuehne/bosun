@@ -97,6 +97,12 @@ public sealed class RcloneClient : IRcloneClient
     /// above any sane probe timeout so it never pre-empts one.</summary>
     internal static readonly TimeSpan ListTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>vfs/list, vfs/stats, vfs/queue (bs-obf): rcd's in-memory VFS tables, no remote I/O,
+    /// but they take the VFS's cache locks and so can queue behind a stuck flush. Same order of
+    /// magnitude as mount/listmounts. This is only the backstop: <c>MountSupervisor</c> bounds every
+    /// such poll with the (shorter) probe timeout, which fires first.</summary>
+    internal static readonly TimeSpan VfsTimeout = TimeSpan.FromSeconds(10);
+
     private readonly HttpClient _httpClient;
     private readonly TimeProvider _timeProvider;
 
@@ -333,6 +339,99 @@ public sealed class RcloneClient : IRcloneClient
         return result;
     }
 
+    public async Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken cancellationToken)
+    {
+        // No parameters: https://rclone.org/rc/#vfs-list. The list is under "vfses"; a Go nil slice
+        // marshals as null, so null/absent means "no active VFS".
+        var body = await PostAsync("vfs/list", body: null, VfsTimeout, cancellationToken).ConfigureAwait(false);
+
+        if (!body.TryGetPropertyValue("vfses", out var node) || node is not JsonArray array)
+        {
+            return [];
+        }
+
+        var result = new List<string>(array.Count);
+        foreach (var item in array)
+        {
+            if (item is not null && item.GetValueKind() == JsonValueKind.String)
+            {
+                result.Add(item.GetValue<string>());
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(fs);
+
+        // Parameter and field names: https://rclone.org/rc/#vfs-stats and vfs/rc.go (the help text
+        // shows diskCache {bytesUsed, erroredFiles, files, hashType, outOfSpace, path, pathMeta,
+        // uploadsInProgress, uploadsQueued}, metadataCache {dirs, files}, fs, inUse, opt).
+        var body = await PostAsync("vfs/stats", new JsonObject { ["fs"] = fs }, VfsTimeout, cancellationToken)
+            .ConfigureAwait(false);
+
+        RcloneVfsDiskCache? disk = null;
+        if (body.TryGetPropertyValue("diskCache", out var diskNode) && diskNode is JsonObject diskObject)
+        {
+            disk = new RcloneVfsDiskCache
+            {
+                BytesUsed = RequireLong(diskObject, "bytesUsed", "vfs/stats"),
+                Files = RequireLong(diskObject, "files", "vfs/stats"),
+                UploadsInProgress = RequireLong(diskObject, "uploadsInProgress", "vfs/stats"),
+                UploadsQueued = RequireLong(diskObject, "uploadsQueued", "vfs/stats"),
+                ErroredFiles = RequireLong(diskObject, "erroredFiles", "vfs/stats"),
+            };
+        }
+
+        RcloneVfsMetadataCache? metadata = null;
+        if (body.TryGetPropertyValue("metadataCache", out var metaNode) && metaNode is JsonObject metaObject)
+        {
+            metadata = new RcloneVfsMetadataCache
+            {
+                Dirs = RequireLong(metaObject, "dirs", "vfs/stats"),
+                Files = RequireLong(metaObject, "files", "vfs/stats"),
+            };
+        }
+
+        // "inUse" is deliberately never read: it is a refcount on the VFS, not open files (bs-obf).
+        return new RcloneVfsStats { DiskCache = disk, MetadataCache = metadata };
+    }
+
+    public async Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(fs);
+
+        // https://rclone.org/rc/#vfs-queue: optional "fs"; the response's "queue" array items carry
+        // name, id, size, expiry, tries, delay, uploading. A VFS without a cache returns nothing.
+        var body = await PostAsync("vfs/queue", new JsonObject { ["fs"] = fs }, VfsTimeout, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!body.TryGetPropertyValue("queue", out var node) || node is not JsonArray array)
+        {
+            return [];
+        }
+
+        var result = new List<RcloneVfsQueueItem>(array.Count);
+        foreach (var item in array)
+        {
+            if (item is not JsonObject entry)
+            {
+                continue;
+            }
+
+            result.Add(new RcloneVfsQueueItem
+            {
+                Name = TryGetString(entry, "name") ?? string.Empty,
+                Uploading = entry.TryGetPropertyValue("uploading", out var up) && up is not null &&
+                            up.GetValueKind() == JsonValueKind.True,
+            });
+        }
+
+        return result;
+    }
+
     /// <summary>
     /// POSTs <paramref name="body"/> (or <c>{}</c> when <see langword="null"/>) as JSON to
     /// <paramref name="endpoint"/> and returns the parsed response object. Throws
@@ -425,6 +524,28 @@ public sealed class RcloneClient : IRcloneClient
         }
 
         throw new RcloneRcException(endpoint, httpStatusCode: null, $"rc call to '{endpoint}' response was missing expected string field '{property}'");
+    }
+
+    /// <summary>A required integer counter. A missing, null or non-numeric value is an
+    /// <see cref="RcloneRcException"/>, not zero: the idle-unmount decision must fail closed on a
+    /// response it cannot read rather than read a missing counter as "nothing is happening".</summary>
+    private static long RequireLong(JsonObject body, string property, string endpoint)
+    {
+        if (body.TryGetPropertyValue(property, out var node) && node is JsonValue value &&
+            value.GetValueKind() == JsonValueKind.Number)
+        {
+            if (value.TryGetValue<long>(out var asLong))
+            {
+                return asLong;
+            }
+
+            if (value.TryGetValue<double>(out var asDouble))
+            {
+                return (long)asDouble;
+            }
+        }
+
+        throw new RcloneRcException(endpoint, httpStatusCode: null, $"rc call to '{endpoint}' response was missing expected numeric field '{property}'");
     }
 
     private static string? TryGetString(JsonObject body, string property) =>

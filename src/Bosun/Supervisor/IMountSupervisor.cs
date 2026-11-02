@@ -102,9 +102,10 @@ public interface IMountSupervisor
     Task RequestRetryNowAsync(string hostKey, CancellationToken cancellationToken = default);
 
     /// <summary>Resets the idle-unmount clock for an on-demand host (docs/ARCHITECTURE.md §4 rule
-    /// 7). No-op unless the host is currently <see cref="MountState.Mounted"/>. See the delivery
-    /// report for the caveat that nothing in this codebase yet calls this -- there is no
-    /// filesystem-activity signal wired up.</summary>
+    /// 7). No-op unless the host is currently <see cref="MountState.Mounted"/>. Nothing outside the
+    /// supervisor calls this: the supervisor produces the same effect itself when its periodic
+    /// <c>vfs/stats</c> sample sees rclone's counters change (bs-obf, see
+    /// <c>MountSupervisor.SampleVfsActivityAsync</c>).</summary>
     Task RecordActivityAsync(string hostKey, CancellationToken cancellationToken = default);
 
     /// <summary>Every host in <see cref="MountState.Mounted"/> or <see cref="MountState.Mounting"/>
@@ -306,6 +307,16 @@ public sealed record HostMountSnapshot
     /// <see langword="null"/> if no mount attempt has ever failed for this host.
     /// </summary>
     public string? LastMountFailureReason { get; init; }
+
+    /// <summary>
+    /// How many files rclone's VFS reports as having failed to upload (<c>vfs/stats</c>
+    /// <c>diskCache.erroredFiles</c>, bs-obf), as of the latest successful poll of this host's mount.
+    /// Only ever non-zero for a <see cref="MountState.Mounted"/> on-demand host with
+    /// <c>idle_unmount_seconds &gt; 0</c>, the only hosts polled; zero in every other state. The
+    /// supervisor does not idle-unmount while this is above zero. Host-specific, so it belongs on
+    /// the host's status row, not in the app-wide banner.
+    /// </summary>
+    public int UploadFailureCount { get; init; }
 }
 
 /// <summary>

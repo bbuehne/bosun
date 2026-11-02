@@ -8,11 +8,10 @@ namespace Bosun.Tests.Supervisor;
 /// Mounted -&gt; Draining after that period without filesystem activity."
 /// </summary>
 /// <remarks>
-/// There is no filesystem-activity signal wired into this codebase yet (no VFS-stats poll, no
-/// session-monitor correlation) -- see the delivery report. What IS built and tested here is the
-/// timer mechanics: the clock starts at Mounted, elapses after <c>idle_unmount_seconds</c>, and
-/// <see cref="IMountSupervisor.RecordActivityAsync"/> is the seam a future activity signal would
-/// call to reset it.
+/// The timer mechanics: the clock starts at Mounted, elapses after <c>idle_unmount_seconds</c>, and
+/// <see cref="IMountSupervisor.RecordActivityAsync"/> resets it. What counts as activity (rclone's
+/// VFS counters, bs-obf) and what blocks the unmount (pending or failed uploads, an unreadable VFS)
+/// is covered in <see cref="IdleActivityTests"/>; the fake rclone here reports an idle VFS.
 /// </remarks>
 public sealed class IdleUnmountTests
 {

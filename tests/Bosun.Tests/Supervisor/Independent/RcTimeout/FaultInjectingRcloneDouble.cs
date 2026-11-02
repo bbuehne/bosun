@@ -1,4 +1,5 @@
 using Bosun.Rclone;
+using Bosun.Tests.Rclone.Fakes;
 
 namespace Bosun.Tests.Supervisor.Independent.RcTimeout;
 
@@ -222,6 +223,21 @@ internal sealed class FaultInjectingRcloneDouble(TimeProvider time) : IRcloneCli
 
     public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<RcloneListItem>>([]);
+
+    // bs-obf: an idle, healthy VFS per mounted fs; never recorded in the call log or faulted.
+    public Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            return Task.FromResult(IdleVfs.NamesFor(mounts));
+        }
+    }
+
+    public Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken cancellationToken) =>
+        Task.FromResult(IdleVfs.Stats());
+
+    public Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken) =>
+        Task.FromResult(IdleVfs.EmptyQueue);
 
     private static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 

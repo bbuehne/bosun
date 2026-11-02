@@ -1,4 +1,5 @@
 using Bosun.Rclone;
+using Bosun.Tests.Rclone.Fakes;
 
 namespace Bosun.Tests.Supervisor.Independent.Fakes;
 
@@ -136,6 +137,17 @@ internal sealed class RcloneDouble(SupervisorCallLog log) : IRcloneClient
 
     public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<RcloneListItem>>([]);
+
+    // bs-obf: an idle, healthy VFS per mounted fs. Deliberately not written to the call log, so the
+    // ordering assertions the existing tests make against it are unchanged.
+    public Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(IdleVfs.NamesFor(mounts));
+
+    public Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken cancellationToken) =>
+        Task.FromResult(IdleVfs.Stats());
+
+    public Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken) =>
+        Task.FromResult(IdleVfs.EmptyQueue);
 
     private sealed class PendingFailure(Exception exception, int times)
     {

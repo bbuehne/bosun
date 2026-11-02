@@ -190,6 +190,15 @@ internal sealed class VersionGatedRclone(RcloneDouble inner, SupervisorCallLog l
 
     public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken) =>
         inner.ListAsync(fs, remote, cancellationToken);
+
+    public Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken cancellationToken) =>
+        inner.ListVfsAsync(cancellationToken);
+
+    public Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken cancellationToken) =>
+        inner.GetVfsStatsAsync(fs, cancellationToken);
+
+    public Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken) =>
+        inner.GetVfsQueueAsync(fs, cancellationToken);
 }
 
 /// <summary>

@@ -292,6 +292,28 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         /// (<see cref="BeginDrainAsync"/>, <see cref="StopAsync"/>, <see cref="DisposeAsync"/>).</summary>
         public ITimer? DeepProbeTimer;
         public ITimer? IdleUnmountTimer;
+
+        /// <summary>Bumped by every <see cref="ArmIdleUnmountTimer"/>. A fire captures the value its
+        /// timer was armed with and is ignored if it no longer matches (bs-obf): disposing a timer
+        /// does not retract a callback that already ran and is queued on the channel, and an activity
+        /// reset that lands between a timer firing and its continuation running must win.</summary>
+        public int IdleTimerGeneration;
+
+        /// <summary>The previous <c>vfs/stats</c> sample while Mounted (bs-obf): the six counters whose
+        /// change counts as activity. Null until the first sample after a mount, which becomes the
+        /// baseline; cleared on every mount, adoption and drain (<see cref="ResetVfsActivityTracking"/>).</summary>
+        public VfsCounters? VfsBaseline;
+
+        /// <summary>Files rclone reports as having failed to upload, from the latest successful
+        /// <c>vfs/stats</c> poll (bs-obf). Surfaced on <see cref="HostMountSnapshot.UploadFailureCount"/>.
+        /// Last known value: a failed poll leaves it alone. Zero outside Mounted.</summary>
+        public long UploadFailureCount;
+
+        /// <summary>Last reason an idle unmount was skipped, and whether a failed activity sample has
+        /// been logged since the last good one -- both only so a recurring condition is logged when it
+        /// starts, not on every tick.</summary>
+        public string? LastIdleBlockReason;
+        public bool VfsPollFaultLogged;
         public DateTimeOffset? DrainStartedUtc;
 
         /// <summary>Set by <see cref="SuspendAsync"/> on a host that was ALREADY
@@ -402,6 +424,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 MountUnavailableCause = mountingAvailability.IsAvailable ? null : mountingAvailability.Cause,
                 ConsecutiveMountFailures = h.ConsecutiveMountFailures,
                 LastMountFailureReason = h.LastMountFailureReason,
+                UploadFailureCount = h.State == MountState.Mounted ? (int)Math.Min(h.UploadFailureCount, int.MaxValue) : 0,
             })
             .ToList();
 
@@ -1681,9 +1704,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.ConsecutiveMountFailures = 0;
         host.LastMountFailureReason = null;
         SetState(host, MountState.Mounted, "mount/mount succeeded");
+        ResetVfsActivityTracking(host);
         ArmMountedProbeTimer(host);
         ArmMountedDeepProbeTimer(host);
         ArmIdleUnmountTimer(host);
+
+        // bs-obf: the baseline for activity detection is the VFS as it stands at mount, so even an
+        // idle period shorter than the probe interval compares against something real.
+        await SampleVfsActivityAsync(host, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1761,6 +1789,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                     ct).ConfigureAwait(false);
                 return;
             }
+        }
+
+        if (result.Outcome == ShallowProbeOutcome.Success)
+        {
+            // bs-obf: the activity sample rides the mounted probe's own cadence and timer, so no
+            // extra timer exists per host. Only after a PASSING shallow probe: a host that is
+            // failing probes is heading for a drain and its idle timer no longer matters.
+            await SampleVfsActivityAsync(host, ct).ConfigureAwait(false);
         }
 
         ArmMountedProbeTimer(host);
@@ -1916,6 +1952,9 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.IdleUnmountTimer?.Dispose();
         host.IdleUnmountTimer = null;
 
+        // Retires any fire already queued from the timer just disposed (see IdleTimerGeneration).
+        var generation = ++host.IdleTimerGeneration;
+
         if (host.State != MountState.Mounted)
         {
             return;
@@ -1929,18 +1968,212 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         host.IdleUnmountTimer = CreateOneShotTimer(
             TimeSpan.FromSeconds(idleSeconds),
-            () => Enqueue(ct => HandleIdleUnmountDueAsync(host, ct)));
+            () => Enqueue(ct => HandleIdleUnmountDueAsync(host, generation, ct)));
     }
 
-    private Task HandleIdleUnmountDueAsync(HostRuntime host, CancellationToken ct)
+    // ------------------------------------------------------------------------------------------
+    // Idle unmount: activity comes from rclone's VFS counters (bs-obf, docs/ARCHITECTURE.md §4 rule 7)
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>The six <c>vfs/stats</c> counters whose change counts as activity (bs-obf). Value
+    /// equality is the whole comparison. <c>inUse</c> is deliberately not here: it is a refcount on
+    /// the VFS object, not a count of open files.</summary>
+    private readonly record struct VfsCounters(
+        long BytesUsed, long CacheFiles, long UploadsInProgress, long UploadsQueued, long MetaDirs, long MetaFiles);
+
+    /// <summary>One successful poll of a host's VFS. <see cref="QueueLength"/> is null when the poll
+    /// did not ask for the upload queue (the periodic sample), non-null at fire time.</summary>
+    private sealed record VfsReading(VfsCounters Counters, long ErroredFiles, int? QueueLength);
+
+    /// <summary>A poll either yields a reading or says why it could not. There is no third outcome,
+    /// and no default reading: every caller treats a failure as "do not unmount".</summary>
+    private sealed record VfsPoll(VfsReading? Reading, string? Failure);
+
+    /// <summary>Only on-demand hosts with <c>idle_unmount_seconds &gt; 0</c> are ever polled.</summary>
+    private static bool UsesIdleUnmount(HostRuntime host) =>
+        host.Config.Mount.Mode == MountMode.OnDemand && (host.Config.Mount.IdleUnmountSeconds ?? 0) > 0;
+
+    private static void ResetVfsActivityTracking(HostRuntime host)
     {
-        if (host.State != MountState.Mounted)
+        host.VfsBaseline = null;
+        host.UploadFailureCount = 0;
+        host.LastIdleBlockReason = null;
+        host.VfsPollFaultLogged = false;
+    }
+
+    /// <summary>
+    /// One look at <paramref name="host"/>'s VFS: <c>vfs/list</c> to find it, <c>vfs/stats</c> for the
+    /// counters and, when <paramref name="includeQueue"/>, <c>vfs/queue</c>. Loopback HTTP to rcd
+    /// only; the drive letter is never touched (rule 3a). All the calls share ONE budget of the
+    /// probe timeout, so a hung rcd holds the serialised channel no longer than a single probe can.
+    /// </summary>
+    /// <remarks>
+    /// The VFS is identified by the exact <c>fs</c> string <see cref="TryBeginMountAsync"/> passes to
+    /// <c>mount/mount</c> (<see cref="RcloneRemoteNaming.RemoteFsPath"/>), compared ordinally with
+    /// the names <c>vfs/list</c> returns. No match is a failure, never a guess: another VFS's
+    /// counters would say nothing about this drive, and "no activity seen" is the answer that
+    /// unmounts it. A missing <c>diskCache</c> (cache mode off) or <c>metadataCache</c> is a failure
+    /// for the same reason.
+    /// </remarks>
+    private async Task<VfsPoll> PollVfsAsync(HostRuntime host, bool includeQueue, CancellationToken ct)
+    {
+        var fs = RcloneRemoteNaming.RemoteFsPath(host.Key, host.Config.Mount.RemotePath!);
+
+        using var budget = new CancellationTokenSource(ProbeTimeout(), timeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, budget.Token);
+
+        try
         {
-            return Task.CompletedTask;
+            var names = await rcloneClient.ListVfsAsync(linked.Token).ConfigureAwait(false);
+            if (!names.Contains(fs, StringComparer.Ordinal))
+            {
+                return new VfsPoll(null, $"no VFS named '{fs}' (rcd lists: {(names.Count == 0 ? "none" : string.Join(", ", names.Select(n => $"'{n}'")))})");
+            }
+
+            var stats = await rcloneClient.GetVfsStatsAsync(fs, linked.Token).ConfigureAwait(false);
+            if (stats.DiskCache is not { } disk)
+            {
+                return new VfsPoll(null, "vfs/stats has no diskCache section");
+            }
+
+            if (stats.MetadataCache is not { } meta)
+            {
+                return new VfsPoll(null, "vfs/stats has no metadataCache section");
+            }
+
+            int? queueLength = null;
+            if (includeQueue)
+            {
+                queueLength = (await rcloneClient.GetVfsQueueAsync(fs, linked.Token).ConfigureAwait(false)).Count;
+            }
+
+            return new VfsPoll(
+                new VfsReading(
+                    new VfsCounters(disk.BytesUsed, disk.Files, disk.UploadsInProgress, disk.UploadsQueued, meta.Dirs, meta.Files),
+                    disk.ErroredFiles,
+                    queueLength),
+                null);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // Same rule as every rc catch here (bs-x57): filter on the supervisor's own token, never
+            // the exception type, so a timeout (the probe-timeout budget, or the client's own) is an
+            // ordinary failed poll and not shutdown.
+            return new VfsPoll(null, $"{RcFaultKinds.Kind(ex)}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The periodic activity sample (bs-obf). The first sample after a mount only sets the baseline;
+    /// after that, any change in <see cref="VfsCounters"/> is activity and does what
+    /// <see cref="RecordActivityAsync"/> does: restarts the idle clock. A failed sample records
+    /// nothing, so it can only ever let the idle timer run on -- and the fire-time check
+    /// (<see cref="HandleIdleUnmountDueAsync"/>) refuses to unmount on a failed poll.
+    /// </summary>
+    private async Task SampleVfsActivityAsync(HostRuntime host, CancellationToken ct)
+    {
+        if (host.State != MountState.Mounted || !UsesIdleUnmount(host))
+        {
+            return;
         }
 
-        return BeginDrainAsync(
-            host, $"idle timeout ({host.Config.Mount.IdleUnmountSeconds}s without activity)", DrainCause.IdleTimeout, ct);
+        var poll = await PollVfsAsync(host, includeQueue: false, ct).ConfigureAwait(false);
+        if (poll.Reading is not { } reading)
+        {
+            if (!host.VfsPollFaultLogged)
+            {
+                host.VfsPollFaultLogged = true;
+                logger.LogWarning(
+                    "Could not sample VFS activity for {HostKey}: {Failure}. No activity is recorded; the idle " +
+                    "unmount will not fire while the VFS cannot be read (bs-obf, fail closed)",
+                    host.Key, poll.Failure);
+            }
+
+            return;
+        }
+
+        host.VfsPollFaultLogged = false;
+        host.UploadFailureCount = reading.ErroredFiles;
+
+        var previous = host.VfsBaseline;
+        host.VfsBaseline = reading.Counters;
+        if (previous is { } before && before != reading.Counters)
+        {
+            logger.LogDebug(
+                "VFS activity for {HostKey}: {Before} -> {After}; restarting the idle clock", host.Key, before, reading.Counters);
+            ArmIdleUnmountTimer(host);
+        }
+    }
+
+    /// <summary>
+    /// The idle clock ran out (bs-obf). Looks again before unmounting: the drive is taken down only
+    /// if the VFS can be read, has nothing uploading, queued or failed, and shows no change since the
+    /// last sample. Anything else skips the unmount and re-arms the clock for a full period.
+    /// </summary>
+    private async Task HandleIdleUnmountDueAsync(HostRuntime host, int generation, CancellationToken ct)
+    {
+        if (host.State != MountState.Mounted || generation != host.IdleTimerGeneration)
+        {
+            return;
+        }
+
+        var poll = await PollVfsAsync(host, includeQueue: true, ct).ConfigureAwait(false);
+
+        string? skipReason = null;
+        var worthAWarning = false;
+        if (poll.Reading is not { } reading)
+        {
+            skipReason = $"the VFS could not be read ({poll.Failure})";
+            worthAWarning = true;
+        }
+        else
+        {
+            host.UploadFailureCount = reading.ErroredFiles;
+            var previous = host.VfsBaseline;
+            host.VfsBaseline = reading.Counters;
+
+            if (reading.Counters.UploadsInProgress > 0 || reading.Counters.UploadsQueued > 0 || reading.QueueLength > 0)
+            {
+                skipReason = $"uploads are pending ({reading.Counters.UploadsInProgress} in progress, " +
+                             $"{reading.Counters.UploadsQueued} queued, {reading.QueueLength} in the upload queue)";
+            }
+            else if (reading.ErroredFiles > 0)
+            {
+                skipReason = $"{reading.ErroredFiles} file(s) failed to upload";
+                worthAWarning = true;
+            }
+            else if (previous is not { } before)
+            {
+                skipReason = "no earlier activity sample to compare with; recorded one";
+            }
+            else if (before != reading.Counters)
+            {
+                skipReason = "the VFS changed since the last sample (activity)";
+            }
+        }
+
+        if (skipReason is null)
+        {
+            host.LastIdleBlockReason = null;
+            await BeginDrainAsync(
+                host, $"idle timeout ({host.Config.Mount.IdleUnmountSeconds}s without activity)", DrainCause.IdleTimeout, ct)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (!string.Equals(host.LastIdleBlockReason, skipReason, StringComparison.Ordinal))
+        {
+            host.LastIdleBlockReason = skipReason;
+            logger.Log(
+                worthAWarning ? LogLevel.Warning : LogLevel.Information,
+                "Not idle-unmounting {HostKey}: {Reason}; restarting the idle clock (bs-obf)", host.Key, skipReason);
+        }
+        else
+        {
+            logger.LogDebug("Still not idle-unmounting {HostKey}: {Reason}", host.Key, skipReason);
+        }
+
+        ArmIdleUnmountTimer(host);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1970,6 +2203,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.DeepProbeTimer = null;
         host.IdleUnmountTimer?.Dispose();
         host.IdleUnmountTimer = null;
+        ResetVfsActivityTracking(host);
 
         await AttemptDrainStepAsync(host, ct).ConfigureAwait(false);
     }
@@ -2314,9 +2548,11 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 RecordTransition(host.Key, MountState.Disabled, MountState.Mounted, "startup: adopted existing mount", adoptTimestamp);
                 host.ConsecutiveMountedFailures = 0;
                 host.ConsecutiveDeepProbeFailures = 0;
+                ResetVfsActivityTracking(host);
                 ArmMountedProbeTimer(host);
                 ArmMountedDeepProbeTimer(host);
                 ArmIdleUnmountTimer(host);
+                await SampleVfsActivityAsync(host, ct).ConfigureAwait(false);
             }
             else
             {

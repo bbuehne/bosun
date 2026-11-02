@@ -96,6 +96,15 @@ internal sealed class FakeRcloneClient : IRcloneClient
             : Task.FromResult<IReadOnlyList<RcloneMountInfo>>(_mounts.ToList());
     }
 
+    public Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(IdleVfs.NamesFor(_mounts));
+
+    public Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken cancellationToken) =>
+        Task.FromResult(IdleVfs.Stats());
+
+    public Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken) =>
+        Task.FromResult(IdleVfs.EmptyQueue);
+
     private Exception? _listThrows;
 
     public void ListThrows(Exception exception) => _listThrows = exception;

@@ -258,5 +258,12 @@ public sealed class SupervisorLoopDeathTests
 
         public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken ct) =>
             inner.ListAsync(fs, remote, ct);
+
+        public Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken ct) => inner.ListVfsAsync(ct);
+
+        public Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken ct) => inner.GetVfsStatsAsync(fs, ct);
+
+        public Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken ct) =>
+            inner.GetVfsQueueAsync(fs, ct);
     }
 }
