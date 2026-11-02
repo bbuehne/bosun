@@ -579,4 +579,51 @@ public sealed class StatusDerivationTests
 
         Assert.Equal(AggregateHealth.Degraded, StatusDerivation.DeriveAggregateHealth(rows));
     }
+
+    // ------------------------------------------------------------------------------------------
+    // bs-obf: files rclone could not upload, shown on the host's own row
+    // ------------------------------------------------------------------------------------------
+
+    private static HostMountSnapshot MountedWithUploadFailures(int count) =>
+        Snapshot(hostKey: "archive", state: MountState.Mounted) with { UploadFailureCount = count };
+
+    [Theory]
+    [InlineData(1, "Q: is mounted, but 1 file failed to upload")]
+    [InlineData(3, "Q: is mounted, but 3 files failed to upload")]
+    public void Upload_failures_are_stated_on_the_mounted_hosts_row(int count, string expected)
+    {
+        var row = StatusDerivation.DeriveRow(MountedWithUploadFailures(count), OnDemandHost, 0);
+
+        Assert.Equal(StatusCategory.UploadsFailing, row.Category);
+        Assert.Equal(expected, row.StatusText);
+        Assert.Equal(count, row.UploadFailureCount);
+    }
+
+    [Fact]
+    public void A_mounted_host_without_upload_failures_is_still_just_healthy()
+    {
+        var row = StatusDerivation.DeriveRow(MountedWithUploadFailures(0), OnDemandHost, 0);
+
+        Assert.Equal(StatusCategory.Healthy, row.Category);
+        Assert.Equal("Q: is mounted", row.StatusText);
+    }
+
+    [Fact]
+    public void Upload_failures_belong_to_their_own_host_and_never_reach_another_hosts_row()
+    {
+        var other = StatusDerivation.DeriveRow(
+            Snapshot(hostKey: "prod", state: MountState.Mounted), PersistentHost, 0);
+
+        Assert.Equal(StatusCategory.Healthy, other.Category);
+        Assert.Equal(0, other.UploadFailureCount);
+    }
+
+    [Fact]
+    public void Upload_failures_do_not_make_the_aggregate_health_worse()
+    {
+        // Host-specific, row-only (bs-obf): not a banner issue and not an icon change.
+        var rows = new[] { StatusDerivation.DeriveRow(MountedWithUploadFailures(2), OnDemandHost, 0) };
+
+        Assert.Equal(AggregateHealth.Healthy, StatusDerivation.DeriveAggregateHealth(rows));
+    }
 }

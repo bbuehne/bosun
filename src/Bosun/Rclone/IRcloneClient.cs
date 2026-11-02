@@ -111,6 +111,67 @@ public interface IRcloneClient
     /// <c>operations/list</c>'s own documentation explicitly says its <c>list</c> array matches.
     /// </summary>
     Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// <c>vfs/list</c> -- the names of rcd's active VFSes (bs-obf). Takes no parameters and returns
+    /// them "under the key <c>vfses</c>" (https://rclone.org/rc/#vfs-list; vfs/rc.go <c>rcList</c>).
+    /// A VFS is keyed by <c>fs.ConfigString(f)</c> of the fs it was created for -- for a mount, the
+    /// <c>fs</c> value given to <c>mount/mount</c> -- and a name shared by several VFSes is listed as
+    /// <c>name[0]</c>, <c>name[1]</c>, so the supervisor matches its own fs string EXACTLY against
+    /// these names and treats no match as "do not know" (see <c>MountSupervisor</c>). Loopback HTTP to
+    /// rcd only; never touches a drive letter (docs/ARCHITECTURE.md §4 rule 3a).
+    /// </summary>
+    Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// <c>vfs/stats</c> for the VFS named <paramref name="fs"/> (bs-obf). Source:
+    /// https://rclone.org/rc/#vfs-stats and vfs/rc.go <c>rcStats</c> / <c>VFS.Stats</c>. Only the
+    /// counters the idle-unmount decision reads are modelled. <b>Never read <c>inUse</c> from this
+    /// response:</b> it is a reference count of the VFS object, not a count of open files.
+    /// </summary>
+    Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// <c>vfs/queue</c> for the VFS named <paramref name="fs"/> -- the upload queue (bs-obf).
+    /// Source: https://rclone.org/rc/#vfs-queue ("only useful if --vfs-cache-mode &gt; off"). A VFS
+    /// with no cache, or an empty queue, yields an empty list.
+    /// </summary>
+    Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken);
+}
+
+/// <summary>The parts of <c>vfs/stats</c> the supervisor reads (bs-obf). Either cache section is
+/// <see langword="null"/> when rcd did not return it: <c>diskCache</c> is documented as present
+/// "only when cache mode is not off", and the caller must treat an absent section as "cannot tell",
+/// never as zero.</summary>
+public sealed record RcloneVfsStats
+{
+    public RcloneVfsDiskCache? DiskCache { get; init; }
+    public RcloneVfsMetadataCache? MetadataCache { get; init; }
+}
+
+/// <summary><c>vfs/stats</c> <c>diskCache</c> counters: bytes and files held in the on-disk cache,
+/// uploads running and waiting, and files whose upload has failed.</summary>
+public sealed record RcloneVfsDiskCache
+{
+    public required long BytesUsed { get; init; }
+    public required long Files { get; init; }
+    public required long UploadsInProgress { get; init; }
+    public required long UploadsQueued { get; init; }
+    public required long ErroredFiles { get; init; }
+}
+
+/// <summary><c>vfs/stats</c> <c>metadataCache</c> counters: directories and files rclone has listed.</summary>
+public sealed record RcloneVfsMetadataCache
+{
+    public required long Dirs { get; init; }
+    public required long Files { get; init; }
+}
+
+/// <summary>One entry of <c>vfs/queue</c>'s <c>queue</c> array (only the fields Bosun logs).</summary>
+public sealed record RcloneVfsQueueItem
+{
+    public required string Name { get; init; }
+    public bool Uploading { get; init; }
 }
 
 /// <summary>Result of <c>core/version</c>. Only the fields Bosun actually logs are modelled --

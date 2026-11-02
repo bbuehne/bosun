@@ -101,6 +101,7 @@ Thin typed wrapper over the rclone rc HTTP API. The endpoints in use:
 | `mount/unmount` | Unmount |
 | `mount/listmounts` | Reconcile actual state against intended state |
 | `operations/list` | Deep probe — verifies SFTP works, not just TCP |
+| `vfs/list`, `vfs/stats`, `vfs/queue` | Idle-unmount activity and upload safety for on-demand hosts (§4 rule 7). Read-only; never `inUse` |
 
 ### `IProbe`
 Two levels:
@@ -460,7 +461,48 @@ right before building any UI.
    mounted again after resume if its first post-resume probe reaches `Ready` (rule 9a
    covers what happens when mounting is unavailable at that moment).
 7. On-demand hosts with `idle_unmount_seconds > 0` transition
-   `Mounted → Draining` after that period without filesystem activity.
+   `Mounted → Draining` after that period without filesystem activity (bs-obf).
+
+   **What counts as activity.** Only what rclone itself reports, through its rc API
+   (`vfs/list`, `vfs/stats`, `vfs/queue`, over loopback HTTP to `rclone rcd` — never by
+   touching the drive letter, rule 3a). While a host is `Mounted`, the supervisor samples
+   `vfs/stats` on the mounted shallow-probe cadence (rule 3; no extra timer per host) and
+   restarts the idle clock whenever any of these changed since the previous sample:
+   `diskCache.bytesUsed`, `diskCache.files`, `diskCache.uploadsInProgress`,
+   `diskCache.uploadsQueued`, `metadataCache.dirs`, `metadataCache.files`. The first
+   sample after a mount (taken at the mount itself) is the baseline; it is thrown away
+   on every unmount, so a remount never compares against the previous mount. `vfs/stats`'s
+   `inUse` is never read: it is a reference count on the VFS object, not a count of open
+   files. Only on-demand hosts with `idle_unmount_seconds > 0` are polled at all.
+
+   **Which VFS.** rclone keys a VFS by the `fs` string of the mount. The supervisor
+   looks for the exact `fs` it passed to `mount/mount` (`bosun-<key>:<remote_path>`) among the
+   names `vfs/list` returns. No exact match is not guessed at: no activity is recorded and
+   the idle unmount does not happen, with a log line saying why.
+
+   **Safety when the clock fires.** The supervisor reads `vfs/stats` and `vfs/queue` once more
+   and unmounts only if the VFS can be read, `uploadsInProgress` and `uploadsQueued` are
+   zero, the upload queue is empty, `erroredFiles` is zero, and nothing changed since the last
+   sample. Otherwise it skips the unmount, logs the reason and restarts the clock for a full
+   period. Failing to read the VFS (rcd not answering, no matching VFS name, `diskCache`
+   absent because the cache mode is off) counts as a reason: the rule fails closed, because
+   unmounting a drive that has pending writes loses them. A clock that fires with no earlier
+   sample to compare against (an idle period shorter than the probe interval, and a baseline
+   that could not be taken) takes one and waits one more period. Every such poll runs in the
+   supervisor's serialised channel under one probe timeout (`global.probe_timeout_seconds`), so
+   a hung rcd cannot stall it longer than a hung probe can.
+
+   **Failed uploads.** `diskCache.erroredFiles > 0` keeps the drive up (above) and is shown on
+   that host's status row as "N files failed to upload". It is host-specific, so it is on
+   the row, not in the app-wide banner, and it does not change the tray icon.
+
+   **Known limit.** Re-browsing content rclone has cached, and re-reading files it has
+   cached, do not touch any counter above and are invisible to rclone rc. They do **not**
+   keep the drive up: a user who only re-reads cached files is idle by this definition.
+   Cache expiry (`--dir-cache-time`, `--vfs-cache-max-age`) also moves these counters, so it
+   can restart the clock — in the safe direction, keeping the drive up a little longer.
+   The activity is seen at the granularity of the probe interval: the clock restarts up to one
+   mounted-probe interval after the activity itself.
 
 8. **`RequestMountAsync` on an `Unreachable` host triggers an immediate probe**
    and proceeds to mount if it passes. It is never a silent no-op — a tray menu

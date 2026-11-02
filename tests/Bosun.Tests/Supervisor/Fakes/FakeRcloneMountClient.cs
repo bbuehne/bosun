@@ -1,4 +1,5 @@
 using Bosun.Rclone;
+using Bosun.Tests.Rclone.Fakes;
 
 namespace Bosun.Tests.Supervisor.Fakes;
 
@@ -156,6 +157,128 @@ internal sealed class FakeRcloneMountClient : IRcloneClient
         }
 
         return Task.FromResult<IReadOnlyList<RcloneMountInfo>>(mounts.ToList());
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // VFS (bs-obf): by default one idle, healthy VFS per mounted fs, with constant counters.
+    // ------------------------------------------------------------------------------------------
+
+    private RcloneVfsStats vfsStats = IdleVfs.Stats();
+    private IReadOnlyList<RcloneVfsQueueItem> vfsQueue = IdleVfs.EmptyQueue;
+    private IReadOnlyList<string>? vfsNamesOverride;
+    private Exception? vfsListThrows;
+    private Exception? vfsStatsThrows;
+    private Exception? vfsQueueThrows;
+
+    public int VfsListCallCount { get; private set; }
+    public int VfsStatsCallCount { get; private set; }
+    public int VfsQueueCallCount { get; private set; }
+
+    /// <summary>The fs argument of every <c>vfs/stats</c> call, in order.</summary>
+    public List<string> VfsStatsFsArguments { get; } = [];
+
+    /// <summary>The fs argument of every <c>vfs/queue</c> call, in order.</summary>
+    public List<string> VfsQueueFsArguments { get; } = [];
+
+    /// <summary>When true, every VFS call waits for its token to be cancelled and then throws
+    /// <see cref="OperationCanceledException"/> -- an rcd that has stopped answering. Honours the
+    /// token exactly as the real client does, so the supervisor's own timeout is what ends it.</summary>
+    public bool HangVfsCalls { get; set; }
+
+    /// <summary>What <c>vfs/stats</c> answers from now on, whatever the fs.</summary>
+    public void SetVfsStats(RcloneVfsStats stats) => vfsStats = stats;
+
+    public void SetVfsQueue(params RcloneVfsQueueItem[] queue) => vfsQueue = queue;
+
+    /// <summary>What <c>vfs/list</c> answers from now on, instead of the fs of each mounted drive.</summary>
+    public void SetVfsNames(params string[] names) => vfsNamesOverride = names;
+
+    public void MakeVfsListThrow(Exception exception) => vfsListThrows = exception;
+
+    public void MakeVfsStatsThrow(Exception exception) => vfsStatsThrows = exception;
+
+    public void MakeVfsQueueThrow(Exception exception) => vfsQueueThrows = exception;
+
+    public void StopThrowingFromVfs() => (vfsListThrows, vfsStatsThrows, vfsQueueThrows) = (null, null, null);
+
+    public async Task<IReadOnlyList<string>> ListVfsAsync(CancellationToken cancellationToken)
+    {
+        VfsListCallCount++;
+        await MaybeHangAsync(cancellationToken);
+        return vfsListThrows is not null
+            ? throw vfsListThrows
+            : vfsNamesOverride ?? IdleVfs.NamesFor(mounts);
+    }
+
+    public async Task<RcloneVfsStats> GetVfsStatsAsync(string fs, CancellationToken cancellationToken)
+    {
+        VfsStatsCallCount++;
+        VfsStatsFsArguments.Add(fs);
+        await MaybeHangAsync(cancellationToken);
+        return vfsStatsThrows is not null ? throw vfsStatsThrows : vfsStats;
+    }
+
+    public async Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken)
+    {
+        VfsQueueCallCount++;
+        VfsQueueFsArguments.Add(fs);
+        await MaybeHangAsync(cancellationToken);
+        return vfsQueueThrows is not null ? throw vfsQueueThrows : vfsQueue;
+    }
+
+    private readonly object vfsCallGate = new();
+    private int vfsCallTotal;
+    private readonly List<(int Total, TaskCompletionSource Signal)> vfsCallWaiters = [];
+
+    /// <summary>Every VFS call so far (list + stats + queue).</summary>
+    public int VfsCallTotal
+    {
+        get
+        {
+            lock (vfsCallGate)
+            {
+                return vfsCallTotal;
+            }
+        }
+    }
+
+    /// <summary>Completes once <paramref name="total"/> VFS calls have STARTED. Lets a test wait for
+    /// a call that is about to hang without racing the supervisor's continuation.</summary>
+    public Task WaitForVfsCallAsync(int total)
+    {
+        lock (vfsCallGate)
+        {
+            if (vfsCallTotal >= total)
+            {
+                return Task.CompletedTask;
+            }
+
+            var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            vfsCallWaiters.Add((total, signal));
+            return signal.Task;
+        }
+    }
+
+    private void NoteVfsCall()
+    {
+        lock (vfsCallGate)
+        {
+            vfsCallTotal++;
+            foreach (var waiter in vfsCallWaiters.Where(w => vfsCallTotal >= w.Total).ToList())
+            {
+                waiter.Signal.TrySetResult();
+                vfsCallWaiters.Remove(waiter);
+            }
+        }
+    }
+
+    private async Task MaybeHangAsync(CancellationToken cancellationToken)
+    {
+        NoteVfsCall();
+        if (HangVfsCalls)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
     }
 
     public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken)

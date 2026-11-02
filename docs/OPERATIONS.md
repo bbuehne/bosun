@@ -539,7 +539,10 @@ for the test host (or a second host), restart Bosun. Then `T = 120` below.
    `Mounting -> Mounted (trigger: mount/mount succeeded)`; the tray item for the host
    now offers **Unmount** and **Open in Explorer**.
 2. Leave the drive completely alone, with no Explorer window on it, for `T` seconds.
-   **Expected:** about `T` after the mount,
+   **Expected:** about `T` after the mount (bs-obf: counted from the last activity rclone
+   reported, and rclone may itself list the drive root just after the mount, which the
+   next sample reads as activity, so allow up to one mounted-probe interval more, 60 s by
+   default),
    `transitioned Mounted -> Draining (trigger: idle timeout (120s without activity))`,
    then `Unmount confirmed ...`, `Draining -> Disabled (trigger: drain completed: idle timeout ...)`,
    `Disabled -> Probing (trigger: auto re-enable after drain)`, `Probing -> Ready`.
@@ -548,22 +551,31 @@ for the test host (or a second host), restart Bosun. Then `T = 120` below.
    reads `P: is not mounted -- on-demand; mount it from the tray when you need it`.
 3. Check the letter is gone (drive-type listing in the drive check) and that **Mount** is offered again.
 
-**PASS (T5)** when the unmount happens within about `T ± 15 s` of the mount and the
-host ends in `Ready`, not `Unreachable` and not parked. **FAIL** otherwise.
+**PASS (T5)** when the unmount happens between `T - 15 s` and `T + 75 s` after the mount
+(the extra 60 s is the sampling interval described above) and the host ends in `Ready`, not
+`Unreachable` and not parked. **FAIL** otherwise.
 
-**T5b: activity should postpone it (spec conformance; expected to FAIL today).**
-`docs/ARCHITECTURE.md` §4 rule 7 says the idle unmount comes after the period
-*without filesystem activity*. Reading the code (`MountSupervisor.ArmIdleUnmountTimer`;
-`RecordActivityAsync` has no caller in production), the timer starts when the drive
-is mounted and nothing restarts it, so it should fire `T` seconds after the mount
-even while you are using the drive. To check:
+**T5b: activity postpones it (bs-obf).**
+`docs/ARCHITECTURE.md` §4 rule 7: the idle unmount comes after the period *without
+activity*, where activity is a change in rclone's VFS counters (cache bytes or files,
+uploads running or queued, listings), sampled about once a minute. Using the drive must
+keep it mounted. To check:
 
 4. Mount again. At about 80 s, write a file: `Set-Content "$Scratch\t5b.txt" (Get-Date -Format o)`.
    Wait to 130 s after the mount.
-   **Expected by the spec:** still `Mounted` at 130 s, unmounting about 120 s after the
-   write. **Expected from the code:** `Mounted -> Draining (trigger: idle timeout ...)` at
-   about 120 s after the mount. Record which happened. If it is the second, that
-   is a divergence between spec and code: report it, do not edit the Expected line.
+   **Expected:** still `Mounted` at 130 s (the original 120 s deadline passed without
+   an unmount), and the unmount comes roughly 120 s after the write is *sampled*, i.e.
+   between about 200 s and 265 s after the mount (`Mounted -> Draining (trigger: idle
+   timeout ...)`). If the host unmounts at about 120 s after the mount, the activity
+   was not seen: record it and attach the log lines that start `Could not sample VFS
+   activity` or `Not idle-unmounting`, which name the reason (most likely, no `vfs/list`
+   name equal to `bosun-<key>:<remote_path>`). Do not edit the Expected line.
+
+**T5c: the known limit (documented, not a defect).** Mount again, open a folder and a file
+that were read before so that rclone serves them from its cache, and keep re-reading them
+for longer than `T`. **Expected:** the host unmounts about `T` after the last change rclone
+reported, even though you were still reading, because cached reads are invisible to rclone
+rc (`docs/ARCHITECTURE.md` §4 rule 7). Record it; this is not a FAIL.
 
 ### T6 — Crash recovery
 
@@ -903,6 +915,7 @@ the notes beside it.
 | T4 Drag and drop | | | | | |
 | T5 Idle unmount | | | | | |
 | T5b Activity postpones idle unmount | | | | | |
+| T5c Cached reads do not keep it up (known limit) | | | | | |
 | T6 Crash recovery | | | | | |
 | T7 Dead mount, deep probe | | | | | |
 | T8 Short sleep: budget, no mount while suspended | | | | | |
