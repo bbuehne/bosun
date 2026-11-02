@@ -634,7 +634,7 @@ public sealed class StartupOrchestratorTests
 
         // 4. The tray: red icon (AggregateHealth.Error), tooltip names the cause -- even though the
         //    host roll-up is Healthy because there are no rows (the supervisor never existed).
-        var tray = TrayStatus.Compose(AggregateHealth.Healthy, health);
+        var tray = TrayStatus.Compose(AggregateHealth.Healthy, health, []);
         Assert.Equal(AggregateHealth.Error, tray.IconHealth);
         Assert.StartsWith("Bosun — Faulted: The mount supervisor failed to start: ", tray.Tooltip, StringComparison.Ordinal);
 

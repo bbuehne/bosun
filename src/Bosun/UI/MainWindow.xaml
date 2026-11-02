@@ -8,11 +8,13 @@
         Show/hide/activate and geometry persistence are owned by MainWindowController (see
         MainWindow.xaml.cs); this file is chrome only.
 
-        Content is intentionally minimal: a host table with a per-row context menu built from the
-        same HostContextMenuBuilder/HostActionDispatcher the tray uses (ADR-018: "two surfaces can
-        now trigger the same action ... both post commands to the supervisor channel"). Causal
-        status text (ADR-012 Decision 3) and a scrollable transition-log view are bs-ww9.6 and
-        bs-ww9.1's jobs respectively, not built here; see MainWindow.xaml.cs's remarks.
+        Content: the application-health banner (bs-yyg), then a host table with a per-row context
+        menu built from the same HostContextMenuBuilder/HostActionDispatcher the tray uses (ADR-018:
+        "two surfaces can now trigger the same action ... both post commands to the supervisor
+        channel"). The grid binds to HostRowPresentation (bs-ww9.1.2): the State column's words,
+        glyph and tone come from the row's StatusCategory, not the raw MountState, and the Details
+        column carries the causal text (ADR-012 Decision 3). There is no transition-log view yet;
+        see MainWindow.xaml.cs's remarks.
     -->
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
@@ -23,6 +25,47 @@
             window and the tray say the same thing in the same colours. Degraded is the default and
             Faulted overrides it, so an unexpected level can never render as "fine".
         -->
+        <!--
+            bs-ww9.1.2: host rows by tone (HostRowPresentation.Tone). Same palette as the banner and
+            the tray icon (green, amber, red). Healthy and Muted only recolour the State cell's text;
+            Warning and Error also tint the row, so a host that needs a look stands out in a long
+            list without the whole grid turning red. The glyph in the State cell carries the same
+            distinction for anyone who cannot rely on colour.
+        -->
+        <Style x:Key="StateCellStyle" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Tone}" Value="Healthy">
+                    <Setter Property="Foreground" Value="#2E7D32" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Tone}" Value="Muted">
+                    <Setter Property="Foreground" Value="#6B6B6B" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Tone}" Value="Warning">
+                    <Setter Property="Foreground" Value="#8A5A00" />
+                    <Setter Property="FontWeight" Value="SemiBold" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Tone}" Value="Error">
+                    <Setter Property="Foreground" Value="#C62828" />
+                    <Setter Property="FontWeight" Value="SemiBold" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="HostRowStyle" TargetType="DataGridRow">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Tone}" Value="Warning">
+                    <Setter Property="Background" Value="#FFF4D6" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Tone}" Value="Error">
+                    <Setter Property="Background" Value="#FDECEA" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Tone}" Value="Muted">
+                    <Setter Property="Foreground" Value="#6B6B6B" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
         <Style x:Key="HealthBannerStyle" TargetType="Border">
             <Setter Property="Background" Value="#FFF4D6" />
             <Setter Property="BorderBrush" Value="#F9A825" />
@@ -141,12 +184,14 @@
                   CanUserAddRows="False"
                   CanUserDeleteRows="False"
                   HeadersVisibility="Column"
-                  GridLinesVisibility="Horizontal">
+                  GridLinesVisibility="Horizontal"
+                  RowStyle="{StaticResource HostRowStyle}">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Host" Binding="{Binding DisplayName}" Width="180" />
-                <DataGridTextColumn Header="State" Binding="{Binding State}" Width="110" />
-                <DataGridTextColumn Header="Drive" Binding="{Binding Drive}" Width="60" />
-                <DataGridTextColumn Header="Details" Binding="{Binding StatusText}" Width="*" />
+                <DataGridTextColumn Header="Host" Binding="{Binding DisplayName, Mode=OneWay}" Width="180" />
+                <DataGridTextColumn Header="State" Binding="{Binding StateDisplay, Mode=OneWay}" Width="170"
+                                    ElementStyle="{StaticResource StateCellStyle}" />
+                <DataGridTextColumn Header="Drive" Binding="{Binding Drive, Mode=OneWay}" Width="60" />
+                <DataGridTextColumn Header="Details" Binding="{Binding StatusText, Mode=OneWay}" Width="*" />
             </DataGrid.Columns>
         </DataGrid>
     </Grid>

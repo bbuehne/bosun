@@ -30,12 +30,12 @@ namespace Bosun.UI;
 /// <see cref="MainWindowController"/> itself uses for <see cref="MainWindowController.Initialize"/>.
 /// </para>
 /// <para>
-/// <b>What this window's content deliberately does NOT attempt.</b> ADR-018's stated reasons for
-/// a window at all are a readable status table and a scrollable transition log. This delivery
-/// builds the table (bound to <see cref="IStatusReadModel.GetRows"/>, refreshed on a timer) but
-/// not a transition-log view -- rendering degraded startup state and the transition history
-/// causally is bs-ww9.1's job, tracked separately, and out of scope for the app-shell epic this
-/// class belongs to.
+/// <b>What this window shows, and what it does not.</b> ADR-018's stated reasons for a window at
+/// all are a readable status table and a scrollable transition log. The table is here: one
+/// <see cref="HostRowPresentation"/> per row of <see cref="IStatusReadModel.Current"/>, refreshed on
+/// a timer, with the State column derived from each row's <see cref="StatusCategory"/> (bs-ww9.1.2)
+/// and the causal sentence in Details. The application-health banner above it (bs-yyg) carries the
+/// app-wide causes. A scrollable transition-log view does not exist yet.
 /// </para>
 /// </remarks>
 public partial class MainWindow : Window, IAppWindow
@@ -283,7 +283,7 @@ public partial class MainWindow : Window, IAppWindow
         {
             var rows = _statusReadModel.Current.Rows;
             var health = _statusReadModel.Current.Health;
-            HostsGrid.ItemsSource = rows;
+            HostsGrid.ItemsSource = rows.Select(HostRowPresentation.Create).ToList();
 
             // The header and the banner come from one Update so they cannot disagree.
             _healthBanner.Update(_appHealth?.Current ?? AppHealth.Healthy, health);
@@ -306,7 +306,7 @@ public partial class MainWindow : Window, IAppWindow
             return;
         }
 
-        var row = FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject)?.Item as HostStatusRow;
+        var row = (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject)?.Item as HostRowPresentation)?.Row;
         if (row is null)
         {
             e.Handled = true;

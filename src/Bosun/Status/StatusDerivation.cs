@@ -216,47 +216,73 @@ public static class StatusDerivation
     /// </remarks>
     public static AggregateHealth DeriveAggregateHealth(IReadOnlyList<HostStatusRow> rows)
     {
-        var sawDegraded = false;
+        var worst = AggregateHealth.Healthy;
 
         foreach (var row in rows)
         {
-            if (row.Category == StatusCategory.MountingUnavailable)
+            var contribution = ContributionOf(row);
+            if (contribution == AggregateHealth.Error)
             {
                 return AggregateHealth.Error;
             }
 
-            if (row.Category == StatusCategory.MountFailing && row.Mode == MountMode.Persistent)
+            if (contribution > worst)
             {
-                return AggregateHealth.Error;
-            }
-
-            // bs-qwv: no rclone remote means a persistent host can never mount, and nothing retries
-            // it -- the same "asked for that drive at every login and is not getting it" case as
-            // MountFailing. A host that IS mounted (so its remote may be stale) is Degraded, and an
-            // on-demand host does not escalate at all (the failing click gives its own feedback).
-            if (row.Category == StatusCategory.ProvisioningFailed)
-            {
-                if (row.State == MountState.Mounted)
-                {
-                    sawDegraded = true;
-                }
-                else if (row.Mode == MountMode.Persistent)
-                {
-                    return AggregateHealth.Error;
-                }
-            }
-
-            if (row.Category == StatusCategory.Unreachable && row.Mode == MountMode.Persistent)
-            {
-                sawDegraded = true;
-            }
-
-            if (row.State == MountState.Mounted && (row.ConsecutiveMountedFailures > 0 || row.ConsecutiveDeepProbeFailures > 0))
-            {
-                sawDegraded = true;
+                worst = contribution;
             }
         }
 
-        return sawDegraded ? AggregateHealth.Degraded : AggregateHealth.Healthy;
+        return worst;
+    }
+
+    /// <summary>
+    /// What ONE row adds to <see cref="DeriveAggregateHealth"/> (bs-ww9.1.2): the whole of that
+    /// method's per-row logic, extracted so a surface that wants to NAME the row responsible (the
+    /// tray tooltip) asks the same question the roll-up asked and cannot pick a different culprit.
+    /// <see cref="AggregateHealth.Healthy"/> means the row adds nothing. See
+    /// <see cref="DeriveAggregateHealth"/>'s remarks for why each case sits at its level.
+    /// </summary>
+    public static AggregateHealth ContributionOf(HostStatusRow row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+
+        if (row.Category == StatusCategory.MountingUnavailable)
+        {
+            return AggregateHealth.Error;
+        }
+
+        if (row.Category == StatusCategory.MountFailing && row.Mode == MountMode.Persistent)
+        {
+            return AggregateHealth.Error;
+        }
+
+        // bs-qwv: no rclone remote means a persistent host can never mount, and nothing retries
+        // it -- the same "asked for that drive at every login and is not getting it" case as
+        // MountFailing. A host that IS mounted (so its remote may be stale) is Degraded, and an
+        // on-demand host does not escalate at all (the failing click gives its own feedback).
+        if (row.Category == StatusCategory.ProvisioningFailed)
+        {
+            if (row.State == MountState.Mounted)
+            {
+                return AggregateHealth.Degraded;
+            }
+
+            if (row.Mode == MountMode.Persistent)
+            {
+                return AggregateHealth.Error;
+            }
+        }
+
+        if (row.Category == StatusCategory.Unreachable && row.Mode == MountMode.Persistent)
+        {
+            return AggregateHealth.Degraded;
+        }
+
+        if (row.State == MountState.Mounted && (row.ConsecutiveMountedFailures > 0 || row.ConsecutiveDeepProbeFailures > 0))
+        {
+            return AggregateHealth.Degraded;
+        }
+
+        return AggregateHealth.Healthy;
     }
 }
