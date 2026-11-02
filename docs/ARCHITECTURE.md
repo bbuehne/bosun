@@ -204,10 +204,18 @@ Re-derivation is gated on `rclone rcd` answering `core/version`. If it does not,
 nothing is reconciled or drained; the supervisor waits for the ordinary cadence
 rather than acting on state it cannot verify.
 
-The suspend handler must complete quickly. Windows does not wait indefinitely.
-Issue unmounts with a short timeout and accept that a forced unmount may be
-needed on resume — that is what re-derivation is for, and it is now implemented
-rather than aspirational.
+The suspend handler must complete quickly. Windows does not wait indefinitely:
+Microsoft's `PBT_APMSUSPEND` reference says "The system allows approximately two
+seconds for an application to handle this notification. If an application is
+still performing operations after its time allotment has expired, the system may
+interrupt the application"
+(<https://learn.microsoft.com/en-us/windows/win32/power/pbt-apmsuspend>).
+`global.suspend_unmount_timeout_seconds` therefore defaults to **3** (`bs-ajh`):
+the documented two seconds plus one second of headroom. A longer default would
+only hold `SystemEvents`' single notification thread past the point Windows
+stops waiting. Issue unmounts with that short timeout and accept that a forced
+unmount may be needed on resume — that is what re-derivation is for, and it is
+now implemented rather than aspirational.
 
 ## 4. The mount state machine
 

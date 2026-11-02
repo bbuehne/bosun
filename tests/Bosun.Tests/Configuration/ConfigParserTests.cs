@@ -21,7 +21,7 @@ public sealed class ConfigParserTests
         Assert.Equal([5, 15, 30, 60, 300], config.Global.BackoffSeconds);
         Assert.Equal(60, config.Global.MountedProbeIntervalSeconds);
         Assert.Equal(300, config.Global.MountedDeepProbeIntervalSeconds);
-        Assert.Equal(8, config.Global.SuspendUnmountTimeoutSeconds);
+        Assert.Equal(3, config.Global.SuspendUnmountTimeoutSeconds);
         Assert.True(config.Global.StartWithWindows);
     }
 
@@ -204,6 +204,17 @@ public sealed class ConfigParserTests
         Assert.Equal(GlobalConfig.DefaultMountedDeepProbeIntervalSeconds, config.Global.MountedDeepProbeIntervalSeconds);
         Assert.Equal(GlobalConfig.DefaultSuspendUnmountTimeoutSeconds, config.Global.SuspendUnmountTimeoutSeconds);
         Assert.Equal(GlobalConfig.DefaultStartWithWindows, config.Global.StartWithWindows);
+    }
+
+    [Fact]
+    public void Parse_SuspendUnmountTimeoutSecondsAbsent_DefaultsTo3()
+    {
+        // bs-ajh: PBT_APMSUSPEND allows ~2 s; 3 s is that plus headroom. Pinned as a literal so a
+        // change to the constant is a deliberate act, not a side effect.
+        var config = ConfigParser.Parse("[global]\nrclone_rc_port = 5572\n");
+
+        Assert.Equal(3, GlobalConfig.DefaultSuspendUnmountTimeoutSeconds);
+        Assert.Equal(3, config.Global.SuspendUnmountTimeoutSeconds);
     }
 
     [Fact]

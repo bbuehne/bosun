@@ -38,7 +38,7 @@ public sealed record GlobalConfig
     public const int DefaultFailuresBeforeUnmount = 3;
     public const int DefaultMountedProbeIntervalSeconds = 60; // ADR-011
     public const int DefaultMountedDeepProbeIntervalSeconds = 300; // ADR-016 (bs-2eg)
-    public const int DefaultSuspendUnmountTimeoutSeconds = 8;
+    public const int DefaultSuspendUnmountTimeoutSeconds = 3; // bs-ajh: PBT_APMSUSPEND allows ~2 s; see docs/ARCHITECTURE.md §3
     public const bool DefaultStartWithWindows = true;
 
     public static readonly IReadOnlyList<int> DefaultBackoffSeconds = [5, 15, 30, 60, 300];
