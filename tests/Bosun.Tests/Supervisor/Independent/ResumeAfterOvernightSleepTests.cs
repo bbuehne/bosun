@@ -148,25 +148,28 @@ public sealed class ResumeAfterOvernightSleepTests
     /// <summary>
     /// <b>Protects:</b> docs/ARCHITECTURE.md §4 rule 5 end to end for the case that actually happens
     /// -- sleep all night, wake up, the host is still there -- plus rule 6 ("on-demand hosts rest in
-    /// <c>Ready</c>, not <c>Mounted</c>. They do not auto-mount").
-    /// <b>Catches:</b> two opposite bugs with one setup. A resume that fails to re-enable and
-    /// remount the persistent host leaves the maintainer with no drive letter after every overnight
-    /// sleep -- the tool silently stops working once a day. A resume that re-mounts the on-demand
-    /// host as well violates the tier split, and does it in the least visible way possible: an
-    /// on-demand drive letter that reappears by itself the morning after a single manual mount, and
-    /// keeps reappearing forever.
+    /// <c>Ready</c>, not <c>Mounted</c>. They do not auto-mount") as amended by ADR-022 (bs-hrg): the
+    /// one on-demand exception is a drive the user had mounted before the sleep.
+    /// <b>Catches:</b> opposite bugs with one setup. A resume that fails to re-enable and remount the
+    /// persistent host leaves the maintainer with no drive letter after every overnight sleep -- the
+    /// tool silently stops working once a day. A resume that does not bring back the on-demand drive
+    /// the user had mounted (ADR-022) makes them click Mount after every wake. A resume that re-mounts
+    /// an on-demand host the user had NOT mounted violates the tier split in the least visible way
+    /// possible: an on-demand drive letter that appears by itself after a sleep.
     /// </summary>
     [Fact]
-    public async Task An_overnight_sleep_brings_back_the_persistent_drive_and_only_the_persistent_drive()
+    public async Task An_overnight_sleep_brings_back_the_persistent_drive_and_the_on_demand_drive_the_user_had_mounted_and_nothing_else()
     {
         var persistent = HostFixtures.Persistent("prod", probeIntervalSeconds: 0, drive: "P:");
         var onDemand = HostFixtures.OnDemand("archive", drive: "Q:");
-        var harness = new IndependentHarness(HostFixtures.Build(HostFixtures.Global(), persistent, onDemand));
+        var spare = HostFixtures.OnDemand("spare", drive: "R:");
+        var harness = new IndependentHarness(HostFixtures.Build(HostFixtures.Global(), persistent, onDemand, spare));
 
         await harness.StartAsync();
         await harness.RunAsync(() => harness.Supervisor.RequestMountAsync("archive"));
         Assert.Equal(MountState.Mounted, harness.State("prod"));
         Assert.Equal(MountState.Mounted, harness.State("archive"));
+        Assert.Equal(MountState.Ready, harness.State("spare"));
 
         await harness.RunAsync(() => harness.Supervisor.SuspendAsync());
         Assert.Null(harness.Rclone.FsAt("P:"));
@@ -179,9 +182,15 @@ public sealed class ResumeAfterOvernightSleepTests
         Assert.Equal(MountState.Mounted, harness.State("prod"));
         Assert.NotNull(harness.Rclone.FsAt("P:"));
 
-        Assert.Equal(MountState.Ready, harness.State("archive"));
-        Assert.Null(harness.Rclone.FsAt("Q:"));
-        Assert.Equal(1, harness.Rclone.MountCount("Q:"));
+        // ADR-022: the user mounted it, so it comes back.
+        Assert.Equal(MountState.Mounted, harness.State("archive"));
+        Assert.NotNull(harness.Rclone.FsAt("Q:"));
+        Assert.Equal(2, harness.Rclone.MountCount("Q:"));
+
+        // The on-demand host nobody mounted is not auto-mounted.
+        Assert.Equal(MountState.Ready, harness.State("spare"));
+        Assert.Null(harness.Rclone.FsAt("R:"));
+        Assert.Equal(0, harness.Rclone.MountCount("R:"));
     }
 
     /// <summary>
