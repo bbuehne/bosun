@@ -1,6 +1,7 @@
 using Bosun.Configuration;
 using Bosun.Diagnostics;
 using Bosun.Health;
+using Bosun.Hosting;
 using Bosun.SessionMonitor;
 using Bosun.Supervisor;
 using Bosun.Watchdog;
@@ -30,6 +31,13 @@ public sealed record UserInterfaceDependencies
     public required TimeProvider TimeProvider { get; init; }
 
     public required IAppHealth AppHealth { get; init; }
+
+    /// <summary>Host key -&gt; why that host's rclone remote could not be set up (bs-qwv), read live from
+    /// the startup orchestrator's current readiness. Empty when the orchestrator is not registered
+    /// (a headless test host) -- the rows then simply show no provisioning failure.</summary>
+    public Func<IReadOnlyDictionary<string, string>> ProvisioningFailures { get; init; } = static () => EmptyProvisioningFailures;
+
+    private static readonly IReadOnlyDictionary<string, string> EmptyProvisioningFailures = new Dictionary<string, string>();
 
     /// <summary>Null when the diagnostics bundle builder could not be built. It needs the real
     /// supervisor, so a failed supervisor takes "Copy diagnostics" with it (reported, not hidden).</summary>
@@ -89,8 +97,15 @@ public static class UserInterfaceDependencyResolver
         var supervisor = TryResolve<IMountSupervisor>(services, logger, "the mount supervisor", out var supervisorOk);
         var sessionMonitor = TryResolve<ISessionMonitor>(services, logger, "the session monitor", out _, LogLevel.Warning);
 
+        // bs-qwv: optional. The orchestrator is the one place that knows which hosts' remotes could
+        // not be provisioned; the status rows read it live. Absent, the rows show no such failure.
+        var startup = TryResolve<StartupOrchestrator>(services, logger, "the startup orchestrator", out _, LogLevel.Warning);
+
         return new UserInterfaceDependencies
         {
+            ProvisioningFailures = startup is null
+                ? static () => new Dictionary<string, string>()
+                : () => startup.Current.ProvisioningFailuresByHost,
             Supervisor = supervisor ?? new UnavailableMountSupervisor(),
             ConfigStore = configStore ?? new EmptyHostConfigStore(),
             SessionMonitor = sessionMonitor ?? new NoSessionMonitor(),

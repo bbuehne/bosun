@@ -187,6 +187,57 @@ public sealed class StatusReadModelTests
     }
 
     [Fact]
+    public void A_hosts_provisioning_failure_reaches_only_that_hosts_row_and_clears_when_the_source_clears()
+    {
+        // bs-qwv, through the real StatusReadModel and the real StatusDerivation.
+        var hostA = HostFixtures.Persistent("host-a", drive: "P:");
+        var hostB = HostFixtures.Persistent("host-b", drive: "Q:");
+        var failures = new Dictionary<string, string> { ["host-b"] = "boom for host-b" };
+        var time = new FakeTimeProvider();
+        var supervisor = new FakeMountSupervisorSnapshotSource
+        {
+            SnapshotToReturn = [Mounted("host-a"), ReadyOnly("host-b")],
+        };
+        var model = new StatusReadModel(
+            supervisor,
+            new FakeHostConfigStore(HostFixtures.Build(HostFixtures.Global(), hostA, hostB)),
+            new FakeSessionMonitor(),
+            time,
+            NullLogger<StatusReadModel>.Instance,
+            () => failures);
+        model.Start();
+
+        time.Advance(StatusReadModel.PollInterval);
+
+        var a = model.Current.Rows.Single(r => r.HostKey == "host-a");
+        var b = model.Current.Rows.Single(r => r.HostKey == "host-b");
+        Assert.Equal("P: is mounted", a.StatusText);
+        Assert.Null(a.ProvisioningFailure);
+        Assert.Equal(StatusCategory.ProvisioningFailed, b.Category);
+        Assert.Equal(
+            "Q: is not mounted -- the rclone remote for this host could not be set up: boom for host-b",
+            b.StatusText);
+        Assert.Equal(AggregateHealth.Error, model.Current.Health);
+
+        // A successful re-provision replaces the dictionary; the very next poll must drop the text.
+        failures = [];
+        time.Advance(StatusReadModel.PollInterval);
+
+        var bAfter = model.Current.Rows.Single(r => r.HostKey == "host-b");
+        Assert.NotEqual(StatusCategory.ProvisioningFailed, bAfter.Category);
+        Assert.Null(bAfter.ProvisioningFailure);
+        Assert.DoesNotContain("rclone remote", bAfter.StatusText, StringComparison.Ordinal);
+        Assert.Equal(AggregateHealth.Healthy, model.Current.Health);
+    }
+
+    private static HostMountSnapshot ReadyOnly(string hostKey) => new()
+    {
+        HostKey = hostKey,
+        State = MountState.Ready,
+        AdministrativelyEnabled = true,
+    };
+
+    [Fact]
     public void RecentTransitions_is_carried_through_verbatim_from_the_supervisor()
     {
         var host = HostFixtures.Persistent("prod", drive: "P:");

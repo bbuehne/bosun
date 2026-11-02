@@ -215,7 +215,8 @@ public partial class App : Application
             configStore,
             dependencies.SessionMonitor,
             dependencies.TimeProvider,
-            services.GetRequiredService<ILogger<StatusReadModel>>());
+            services.GetRequiredService<ILogger<StatusReadModel>>(),
+            dependencies.ProvisioningFailures);
         readModel.Start();
         _statusReadModel = readModel;
         IStatusReadModel statusReadModel = readModel;

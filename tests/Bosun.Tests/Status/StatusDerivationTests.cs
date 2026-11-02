@@ -458,4 +458,125 @@ public sealed class StatusDerivationTests
 
         Assert.Equal(AggregateHealth.Healthy, StatusDerivation.DeriveAggregateHealth(rows));
     }
+
+    // ------------------------------------------------------------------------------------------
+    // bs-qwv: a per-host rclone remote provisioning failure
+    // ------------------------------------------------------------------------------------------
+
+    private const string ProvisioningReason = "config/create failed: boom";
+
+    [Fact]
+    public void ProvisioningFailure_names_the_cause_in_plain_language_on_that_hosts_row()
+    {
+        var row = StatusDerivation.DeriveRow(Snapshot(), PersistentHost, 0, provisioningFailure: ProvisioningReason);
+
+        Assert.Equal(StatusCategory.ProvisioningFailed, row.Category);
+        Assert.Equal(
+            "P: is not mounted -- the rclone remote for this host could not be set up: config/create failed: boom",
+            row.StatusText);
+        Assert.Equal(ProvisioningReason, row.ProvisioningFailure);
+    }
+
+    [Fact]
+    public void ProvisioningFailure_for_another_host_does_not_touch_this_row()
+    {
+        // The caller passes only THIS host's entry; a null means "no failure for this host".
+        var row = StatusDerivation.DeriveRow(Snapshot(), PersistentHost, 0, provisioningFailure: null);
+
+        Assert.NotEqual(StatusCategory.ProvisioningFailed, row.Category);
+        Assert.Null(row.ProvisioningFailure);
+        Assert.DoesNotContain("rclone remote", row.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProvisioningFailure_without_a_reason_still_says_something()
+    {
+        var row = StatusDerivation.DeriveRow(Snapshot(), PersistentHost, 0, provisioningFailure: "");
+
+        Assert.Equal(
+            "P: is not mounted -- the rclone remote for this host could not be set up: unknown error",
+            row.StatusText);
+    }
+
+    [Fact]
+    public void ProvisioningFailure_on_a_Mounted_host_is_still_shown_because_the_remote_may_be_stale()
+    {
+        var row = StatusDerivation.DeriveRow(Snapshot(state: MountState.Mounted), PersistentHost, 0, ProvisioningReason);
+
+        Assert.Equal(StatusCategory.ProvisioningFailed, row.Category);
+        Assert.Equal(
+            "P: is mounted, but the rclone remote for this host could not be set up: config/create failed: boom",
+            row.StatusText);
+    }
+
+    [Fact]
+    public void ProvisioningFailure_is_more_current_than_unreachable_and_than_old_mount_failures()
+    {
+        var unreachable = StatusDerivation.DeriveRow(
+            Snapshot(state: MountState.Unreachable, consecutiveIdleFailures: 3), PersistentHost, 0, ProvisioningReason);
+        var mountFailing = StatusDerivation.DeriveRow(
+            Snapshot(state: MountState.Disabled, consecutiveMountFailures: 5, lastMountFailureReason: "x"),
+            PersistentHost, 0, ProvisioningReason);
+
+        Assert.Equal(StatusCategory.ProvisioningFailed, unreachable.Category);
+        Assert.Equal(StatusCategory.ProvisioningFailed, mountFailing.Category);
+    }
+
+    [Fact]
+    public void ProvisioningFailure_yields_to_process_wide_unavailability_and_to_the_users_own_park()
+    {
+        var unavailable = StatusDerivation.DeriveRow(
+            Snapshot(
+                mountUnavailableReason: "WinFsp is not installed",
+                mountUnavailableCause: MountingUnavailableCause.WinFspMissing),
+            PersistentHost, 0, ProvisioningReason);
+        var parked = StatusDerivation.DeriveRow(
+            Snapshot(state: MountState.Ready, userParked: true), PersistentHost, 0, ProvisioningReason);
+
+        Assert.Equal(StatusCategory.MountingUnavailable, unavailable.Category);
+        Assert.Equal(StatusCategory.Parked, parked.Category);
+    }
+
+    [Fact]
+    public void ProvisioningFailure_is_ignored_for_a_host_with_no_mount_configured()
+    {
+        var row = StatusDerivation.DeriveRow(Snapshot(hostKey: "jump"), NoneHost, 0, ProvisioningReason);
+
+        Assert.Equal(StatusCategory.NotConfigured, row.Category);
+        Assert.Null(row.ProvisioningFailure);
+    }
+
+    [Fact]
+    public void Aggregate_Error_for_a_persistent_host_whose_remote_could_not_be_set_up()
+    {
+        var rows = new[]
+        {
+            StatusDerivation.DeriveRow(Snapshot(), PersistentHost, 0, ProvisioningReason),
+        };
+
+        Assert.Equal(AggregateHealth.Error, StatusDerivation.DeriveAggregateHealth(rows));
+    }
+
+    [Fact]
+    public void Aggregate_does_NOT_escalate_for_an_on_demand_host_whose_remote_could_not_be_set_up()
+    {
+        var rows = new[]
+        {
+            StatusDerivation.DeriveRow(
+                Snapshot(hostKey: "archive", state: MountState.Ready), OnDemandHost, 0, ProvisioningReason),
+        };
+
+        Assert.Equal(AggregateHealth.Healthy, StatusDerivation.DeriveAggregateHealth(rows));
+    }
+
+    [Fact]
+    public void Aggregate_Degraded_not_Error_for_a_Mounted_host_whose_remote_could_not_be_set_up()
+    {
+        var rows = new[]
+        {
+            StatusDerivation.DeriveRow(Snapshot(state: MountState.Mounted), PersistentHost, 0, ProvisioningReason),
+        };
+
+        Assert.Equal(AggregateHealth.Degraded, StatusDerivation.DeriveAggregateHealth(rows));
+    }
 }

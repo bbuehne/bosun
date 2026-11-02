@@ -18,6 +18,10 @@ internal sealed class FakeRcloneRemoteProvisioner(List<string>? order = null) : 
 
     public void FailFor(string hostKey, Exception exception) => _failures[hostKey] = exception;
 
+    /// <summary>Makes the next <see cref="EnsureRemoteAsync"/> for this host succeed again (bs-qwv:
+    /// "the user fixed it, then rcd restarted / the config reloaded").</summary>
+    public void ClearFailure(string hostKey) => _failures.Remove(hostKey);
+
     public Task EnsureRemoteAsync(HostConfig host, CancellationToken cancellationToken)
     {
         EnsureRemoteCalls.Add(host.Key);

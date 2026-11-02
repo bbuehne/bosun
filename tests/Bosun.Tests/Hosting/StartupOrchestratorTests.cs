@@ -349,6 +349,108 @@ public sealed class StartupOrchestratorTests
         Assert.Null(readiness.MountBlockedReason("host-a"));
     }
 
+    // ------------------------------------------------------------------------------------------
+    // bs-qwv: a per-host provisioning failure reaches that host's row, and is cleared when a
+    // re-provision succeeds. Real orchestrator -> real StatusReadModel -> real StatusDerivation.
+    // ------------------------------------------------------------------------------------------
+
+    private static string OnDemandHostBlock(string key, string drive) =>
+        HostBlock(key, MountMode.Persistent, drive).Replace("\"persistent\"", "\"on-demand\"", StringComparison.Ordinal);
+
+    private static StatusReadModel RowsFor(Harness harness) => new(
+        harness.MountSupervisor,
+        harness.Services.GetRequiredService<IHostConfigStore>(),
+        new Bosun.Tests.SessionMonitor.Fakes.FakeSessionMonitor(),
+        new FakeTimeProvider(),
+        Microsoft.Extensions.Logging.Abstractions.NullLogger<StatusReadModel>.Instance,
+        () => harness.Orchestrator.Current.ProvisioningFailuresByHost);
+
+    [Fact]
+    public async Task ProvisioningFailure_ShowsOnThatHostsRowOnly_AndNotInTheBanner()
+    {
+        var hostA = OnDemandHostBlock("host-a", "P:");
+        var hostB = OnDemandHostBlock("host-b", "Q:");
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [hostA, hostB]), withHealth: true);
+        harness.Provisioner.FailFor("host-b", new InvalidOperationException("boom for host-b"));
+
+        await harness.StartAsync();
+
+        using var model = RowsFor(harness);
+        var rows = model.Current.Rows;
+        var a = rows.Single(r => r.HostKey == "host-a");
+        var b = rows.Single(r => r.HostKey == "host-b");
+        Assert.Equal(StatusCategory.ProvisioningFailed, b.Category);
+        Assert.Equal(
+            "Q: is not mounted -- the rclone remote for this host could not be set up: boom for host-b",
+            b.StatusText);
+        Assert.NotEqual(StatusCategory.ProvisioningFailed, a.Category);
+        Assert.DoesNotContain("rclone remote", a.StatusText, StringComparison.Ordinal);
+
+        // Host-specific, so the app-wide banner must not carry it.
+        Assert.DoesNotContain(
+            harness.Health.Current.Issues,
+            i => (i.Detail ?? "").Contains("boom for host-b", StringComparison.Ordinal)
+                || i.Code.Contains("provision", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ProvisioningFailure_IsClearedFromTheRow_WhenRcloneRestartsAndReProvisioningSucceeds()
+    {
+        var host = OnDemandHostBlock("host-b", "Q:");
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]));
+        harness.Provisioner.FailFor("host-b", new InvalidOperationException("boom for host-b"));
+        await harness.StartAsync();
+        using (var before = RowsFor(harness))
+        {
+            Assert.Equal(StatusCategory.ProvisioningFailed, before.Current.Rows.Single().Category);
+        }
+
+        // The cause is fixed; ADR-020's restart re-provisions every host.
+        harness.Provisioner.ClearFailure("host-b");
+        var restarted = await harness.Services.GetRequiredService<RcloneProcessService>().RestartAsync();
+        Assert.True(restarted);
+        await AdvanceUntilAsync(
+            harness.SupervisorTime, TimeSpan.Zero, () => harness.Orchestrator.Current.ProvisioningFailuresByHost.Count == 0);
+
+        using var after = RowsFor(harness);
+        var row = after.Current.Rows.Single();
+        Assert.NotEqual(StatusCategory.ProvisioningFailed, row.Category);
+        Assert.Null(row.ProvisioningFailure);
+    }
+
+    [Fact]
+    public async Task ProvisioningFailure_FromAConfigChangeReProvision_AppearsAndIsLaterCleared()
+    {
+        var host = OnDemandHostBlock("host-b", "Q:");
+        await using var harness = new Harness(initialConfigContent: ValidConfig(hostBlocks: [host]));
+        await harness.StartAsync();
+        Assert.Empty(harness.Orchestrator.Current.ProvisioningFailuresByHost);
+
+        // Edit 1: the hostname changes and the re-provision fails.
+        harness.Provisioner.FailFor("host-b", new InvalidOperationException("boom after edit"));
+        var moved = host.Replace("host-b.example.internal", "moved.example.internal", StringComparison.Ordinal);
+        File.WriteAllText(harness.ConfigPath, ValidConfig(hostBlocks: [moved]));
+        await AdvanceUntilAsync(
+            harness.SupervisorTime, TimeSpan.FromSeconds(1), () => harness.Orchestrator.Current.ProvisioningFailuresByHost.Count == 1);
+
+        using (var failed = RowsFor(harness))
+        {
+            Assert.Equal(
+                "Q: is not mounted -- the rclone remote for this host could not be set up: boom after edit",
+                failed.Current.Rows.Single().StatusText);
+        }
+
+        // Edit 2: fixed, and the next re-provision succeeds.
+        harness.Provisioner.ClearFailure("host-b");
+        var movedAgain = host.Replace("host-b.example.internal", "moved-again.example.internal", StringComparison.Ordinal);
+        File.WriteAllText(harness.ConfigPath, ValidConfig(hostBlocks: [movedAgain]));
+        await AdvanceUntilAsync(
+            harness.SupervisorTime, TimeSpan.FromSeconds(1), () => harness.Orchestrator.Current.ProvisioningFailuresByHost.Count == 0);
+
+        using var cleared = RowsFor(harness);
+        Assert.Null(cleared.Current.Rows.Single().ProvisioningFailure);
+    }
+
     [Fact]
     public async Task RemotesAreProvisionedBeforeTheFirstDeepProbe()
     {
