@@ -263,8 +263,8 @@ that supervisor holds.)
 
 ### Tray notifications
 
-The tray raises a balloon (`TrayIconController.ShowNotification`, the one place a balloon
-is shown) for:
+The tray raises a balloon (through `TrayIconController.ShowBalloon`, the one place a balloon
+is shown) for two things:
 
 - **A mounted drive lost without anyone asking for it** (`UnexpectedUnmountDetector`).
   Decided by the typed `DrainCause` on the `Mounted -> Draining` transition, never by the
@@ -277,6 +277,13 @@ is shown) for:
   Not yet silent: reconciliation after a user "Restart rclone" (bs-z9e). Restarting rcd does
   not go through the supervisor, which learns of it only as `OnRcloneRestartedAsync`
   (the same call a crash recovery makes), so that drain is still `Automatic`.
+- **Bosun entering a Faulted state** (`DegradedStateNotifier`, bs-ww9.1.1; ADR-012's channel
+  table). One balloon, titled "Bosun" with the issue's title as text, when a Faulted issue
+  code newly appears on `IAppHealth`. Degraded issues never toast. A code that stays Faulted
+  does not toast again; it can only after it has cleared (or dropped to Degraded) and come
+  back. While `AppHealth.IsStarting` is true nothing is raised, and a fault seen then is
+  toasted once when that ends. The always-on surface remains the tray icon (ADR-012
+  Decision 3); the toast is the one-shot.
 
 ## 4. The mount state machine
 

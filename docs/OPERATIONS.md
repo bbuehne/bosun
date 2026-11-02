@@ -300,7 +300,11 @@ and you did not cause that), the tray shows a notification that starts
 Unmounts you or the configuration asked for -- your own unmount, a sleep, an idle
 timeout, a host edit or removal in the editor, **Repair > Unmount all & re-probe**, or a
 mount attempt that failed before the drive appeared -- raise no notification; they are
-still in the log and the window.
+still in the log and the window. Separately, when Bosun itself enters a faulted state (the
+tray icon turns red: rclone not found, WinFsp missing, supervision stopped, ...), one
+notification titled `Bosun` names the problem in the same words as the window banner. It
+appears once per fault, not once per retry, and not during the first moments after Bosun
+starts while rclone is still coming up.
 
 **Bundle. Copy diagnostics.** Tray menu > *Copy diagnostics*, or the button in the window.
 Explorer opens on `%LOCALAPPDATA%\Bosun\diagnostics\bosun-diagnostics-<yyyyMMdd-HHmmss>.zip`.
