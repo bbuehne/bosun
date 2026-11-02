@@ -28,9 +28,10 @@ namespace Bosun.UI.Tray;
 /// <see cref="MountState.Mounting"/>, so it is also excluded by the From check).
 /// </para>
 /// <para>
-/// <b>Known gap.</b> Reconciliation after a user "Restart rclone" is still
-/// <see cref="DrainCause.Automatic"/>, because the supervisor is not told the restart was the
-/// user's (bs-z9e remains open on that point).
+/// <b>Restart rclone (bs-z9e).</b> The reconciliation after a user "Restart rclone" is
+/// <see cref="DrainCause.Repair"/>, because <c>RepairCommands</c> tells the supervisor first
+/// (<c>IMountSupervisor.NoteUserRequestedRcloneRestart</c>). An rcd crash restart is not announced and
+/// stays <see cref="DrainCause.Automatic"/>, so it still toasts.
 /// </para>
 /// </remarks>
 public static class UnexpectedUnmountDetector

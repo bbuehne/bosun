@@ -746,8 +746,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     {
         if (suspended)
         {
-            logger.LogWarning("Repair (unmount all and re-probe) ignored: the system is suspended");
-            return;
+            logger.LogWarning("Repair (unmount all and re-probe) refused: the system is suspended");
+            throw new RepairRefusedException("the system is suspended");
         }
 
         var mounted = hosts.Values.Where(h => h.State is MountState.Mounting or MountState.Mounted).ToList();
@@ -799,10 +799,39 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
     }, cancellationToken);
 
+    /// <summary>How long a <see cref="NoteUserRequestedRcloneRestart"/> mark stays valid if no
+    /// <see cref="OnRcloneRestartedAsync"/> consumes it (bs-z9e). A restart is bounded by the stop,
+    /// port-guard and 15 s health timeouts plus remote provisioning, so two minutes is generous; the
+    /// cost of longer is muting a real crash, so it is not longer.</summary>
+    internal static readonly TimeSpan UserRestartMarkLifetime = TimeSpan.FromMinutes(2);
+
+    /// <summary>UTC ticks at which the user-restart mark expires, or 0 for none. Written from the
+    /// caller's thread, read on the channel thread, hence Volatile.</summary>
+    private long userRestartMarkExpiresTicks;
+
+    public void NoteUserRequestedRcloneRestart()
+    {
+        Volatile.Write(ref userRestartMarkExpiresTicks, (timeProvider.GetUtcNow() + UserRestartMarkLifetime).UtcTicks);
+        logger.LogInformation(
+            "Rclone restart requested by the user; drives dropped by the reconciliation that follows are a repair, not an unexpected unmount");
+    }
+
+    private bool UserRestartMarkActive()
+    {
+        var expires = Volatile.Read(ref userRestartMarkExpiresTicks);
+        return expires != 0 && timeProvider.GetUtcNow().UtcTicks < expires;
+    }
+
     public Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default) =>
         EnqueueAndWait(async ct =>
         {
-            await ReconcileAsync(ct).ConfigureAwait(false);
+            // The mark covers exactly this reconciliation: cleared once it has actually run (a
+            // listmounts failure leaves it for the next tick, which is still that restart's), so a
+            // later crash is Automatic again.
+            if (await ReconcileAsync(ct).ConfigureAwait(false))
+            {
+                Volatile.Write(ref userRestartMarkExpiresTicks, 0);
+            }
 
             // ADR-022 amendment: the caller reports rcd healthy again, which is the "rcd answers
             // again" signal for a remount record held back by a failed core/version gate. Confirm it
@@ -2421,7 +2450,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 // host is re-enabled exactly as after any automatic drain, and a persistent host
                 // remounts only after the probe that re-enable runs (Invariant I1).
                 var trigger = host.DrainCause == DrainCause.Repair
-                    ? "repair: re-probe after unmount all"
+                    ? "repair: re-probe after drain"
                     : "auto re-enable after drain";
                 Enqueue(ct2 => EnableHostAsync(host, trigger, ct2));
             }
@@ -2627,7 +2656,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// </summary>
     private const string ReconcileFaultSource = "reconcile-listmounts";
 
-    private async Task ReconcileAsync(CancellationToken ct)
+    private async Task<bool> ReconcileAsync(CancellationToken ct)
     {
         IReadOnlyList<RcloneMountInfo> mounts;
         try
@@ -2639,7 +2668,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             LogRepeatedRcFault(
                 ReconcileFaultSource, ex, "Reconciliation: mount/listmounts failed; skipping this tick",
                 "Reconciliation: mount/listmounts");
-            return;
+            return false;
         }
 
         logger.LogFaultRecovered(repeatingFaults, ReconcileFaultSource, "Reconciliation: mount/listmounts", "ticks");
@@ -2661,8 +2690,15 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 logger.LogWarning(
                     "Reconciliation: {HostKey} believed Mounted at {Drive} but rclone reports no such mount; " +
                     "correcting", host.Key, drive);
-                await BeginDrainAsync(host, "reconciliation: mount missing from listmounts", DrainCause.Automatic, ct)
-                    .ConfigureAwait(false);
+                // bs-z9e: a mount lost to a restart the user asked for is a repair, not a loss.
+                var restartedByUser = UserRestartMarkActive();
+                await BeginDrainAsync(
+                    host,
+                    restartedByUser
+                        ? "reconciliation: mount missing from listmounts after the user restarted rclone"
+                        : "reconciliation: mount missing from listmounts",
+                    restartedByUser ? DrainCause.Repair : DrainCause.Automatic,
+                    ct).ConfigureAwait(false);
             }
             else if (host.State is not (MountState.Mounted or MountState.Mounting or MountState.Draining) && actuallyMounted)
             {
@@ -2679,6 +2715,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 }
             }
         }
+
+        return true;
     }
 
     // ------------------------------------------------------------------------------------------

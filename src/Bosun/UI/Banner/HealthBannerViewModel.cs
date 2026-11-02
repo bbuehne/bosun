@@ -32,8 +32,15 @@ public sealed class RelayCommand(Action execute) : ICommand
     public void Execute(object? parameter) => execute();
 }
 
-/// <summary>One issue as the banner lists it, for the "N more" expansion.</summary>
-public sealed record HealthBannerIssueItem(string Code, HealthLevel Level, string Title, string Detail, string SinceText);
+/// <summary>One issue as the banner lists it, for the "N more" expansion. <paramref name="Dismiss"/> is
+/// set only for a dismissible notice (bs-mhs); it is one shared instance, so it takes part in equality
+/// without making every refresh look like a change.</summary>
+public sealed record HealthBannerIssueItem(
+    string Code, HealthLevel Level, string Title, string Detail, string SinceText, ICommand? Dismiss = null)
+{
+    /// <summary>Whether this entry shows a Dismiss button.</summary>
+    public bool CanDismiss => Dismiss is not null;
+}
 
 /// <summary>
 /// What the window's health banner and header show (bs-yyg, ADR-020 Decision 4). Plain data plus
@@ -61,6 +68,7 @@ public sealed class HealthBannerViewModel : INotifyPropertyChanged
     private bool isExpanded;
     private IReadOnlyList<HealthBannerIssueItem> otherIssues = [];
     private Func<RepairActionKind, ICommand>? commandFor;
+    private ICommand? dismissCommand;
     private IReadOnlyList<RepairActionKind>? shownActions;
     private string? lastTopIssueCode;
 
@@ -166,6 +174,7 @@ public sealed class HealthBannerViewModel : INotifyPropertyChanged
     {
         ArgumentNullException.ThrowIfNull(commandFor);
         this.commandFor = commandFor;
+        dismissCommand = commandFor(RepairActionKind.DismissNotice);
         shownActions = null; // force a rebuild on the next Update
         RefreshActions(lastTopIssueCode);
     }
@@ -213,7 +222,9 @@ public sealed class HealthBannerViewModel : INotifyPropertyChanged
 
         var others = appHealth.Issues
             .Skip(1)
-            .Select(i => new HealthBannerIssueItem(i.Code, i.Severity, i.Title, i.Detail, BuildSince(i)))
+            .Select(i => new HealthBannerIssueItem(
+                i.Code, i.Severity, i.Title, i.Detail, BuildSince(i),
+                RepairActionPlan.IsDismissible(i.Code) ? dismissCommand : null))
             .ToList();
         if (!others.SequenceEqual(otherIssues))
         {

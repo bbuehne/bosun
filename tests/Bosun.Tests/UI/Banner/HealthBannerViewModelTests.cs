@@ -1,4 +1,5 @@
 using Bosun.Health;
+using Bosun.Repair;
 using Bosun.Status;
 using Bosun.UI.Banner;
 
@@ -178,6 +179,84 @@ public sealed class HealthBannerViewModelTests
 
         Assert.NotNull(vm.Actions);
         Assert.Empty(vm.Actions);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Dismiss from the "N more" expansion (bs-mhs)
+    // ------------------------------------------------------------------------------------------
+
+    private sealed class RecordingCommand(RepairActionKind kind, List<RepairActionKind> executed) : System.Windows.Input.ICommand
+    {
+        public RepairActionKind Kind { get; } = kind;
+
+        public event EventHandler? CanExecuteChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public bool CanExecute(object? parameter) => true;
+
+        public void Execute(object? parameter) => executed.Add(Kind);
+    }
+
+    private static HealthBannerViewModel NewViewModelWithActions(List<RepairActionKind> executed)
+    {
+        var vm = NewViewModel();
+        vm.UseActions(kind => new RecordingCommand(kind, executed));
+        return vm;
+    }
+
+    [Fact]
+    public void A_restart_notice_listed_under_more_can_be_dismissed_from_the_expansion()
+    {
+        var executed = new List<RepairActionKind>();
+        var vm = NewViewModelWithActions(executed);
+        vm.Update(
+            Health(Issue("rclone.port-held"), Issue(HealthIssueCodes.WatchdogRestarted, HealthLevel.Degraded)),
+            AggregateHealth.Healthy);
+
+        var item = Assert.Single(vm.OtherIssues);
+        Assert.True(item.CanDismiss);
+        item.Dismiss!.Execute(null);
+
+        Assert.Equal([RepairActionKind.DismissNotice], executed);
+    }
+
+    [Fact]
+    public void Only_a_dismissible_notice_gets_a_Dismiss_in_the_expansion()
+    {
+        var vm = NewViewModelWithActions([]);
+        vm.Update(
+            Health(Issue("rclone.port-held"), Issue("supervisor.stalled", HealthLevel.Degraded)),
+            AggregateHealth.Healthy);
+
+        Assert.False(Assert.Single(vm.OtherIssues).CanDismiss);
+    }
+
+    [Fact]
+    public void No_Dismiss_is_offered_before_a_command_source_is_supplied()
+    {
+        var vm = NewViewModel();
+        vm.Update(
+            Health(Issue("rclone.port-held"), Issue(HealthIssueCodes.WatchdogRestarted, HealthLevel.Degraded)),
+            AggregateHealth.Healthy);
+
+        Assert.False(Assert.Single(vm.OtherIssues).CanDismiss);
+    }
+
+    [Fact]
+    public void Refreshing_does_not_rebuild_an_expansion_that_has_a_Dismiss()
+    {
+        var vm = NewViewModelWithActions([]);
+        var health = Health(Issue("rclone.port-held"), Issue(HealthIssueCodes.WatchdogRestarted, HealthLevel.Degraded));
+        vm.Update(health, AggregateHealth.Healthy);
+        var raised = new List<string?>();
+        vm.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+
+        vm.Update(health, AggregateHealth.Healthy);
+
+        Assert.Empty(raised);
     }
 
     // ------------------------------------------------------------------------------------------

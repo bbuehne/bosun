@@ -54,6 +54,10 @@ internal sealed class FakeDeleteSupervisor : IMountSupervisor
 
     public Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
+    public void NoteUserRequestedRcloneRestart()
+    {
+    }
+
     public Task RepairAllAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>

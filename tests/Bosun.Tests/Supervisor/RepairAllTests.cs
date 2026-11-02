@@ -271,7 +271,7 @@ public sealed class RepairAllTests
     // -- Suspend, and a failing mount -----------------------------------------------------------
 
     [Fact]
-    public async Task A_repair_while_the_system_is_suspended_does_nothing()
+    public async Task A_repair_while_the_system_is_suspended_is_refused_and_does_nothing()
     {
         var harness = Harness(HostFixtures.Persistent("prod", drive: "P:"));
         await harness.StartAsync();
@@ -279,7 +279,10 @@ public sealed class RepairAllTests
         var unmounts = harness.Rclone.UnmountCalls.Count;
         var mounts = harness.Rclone.MountCalls.Count;
 
-        await harness.RunAsync(() => harness.Supervisor.RepairAllAsync());
+        // bs-mhs: the refusal reaches the caller, so the UI can say so.
+        var refusal = await Assert.ThrowsAsync<RepairRefusedException>(
+            () => harness.RunAsync(() => harness.Supervisor.RepairAllAsync()));
+        Assert.Equal("the system is suspended", refusal.Reason);
 
         Assert.Equal(unmounts, harness.Rclone.UnmountCalls.Count);
         Assert.Equal(mounts, harness.Rclone.MountCalls.Count);

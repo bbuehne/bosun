@@ -97,6 +97,37 @@ public sealed class RepairCommandsTests
         Assert.True(h.LoggedInformation("the repair did not run"));
     }
 
+    // -- bs-z9e: the supervisor is told the restart is the user's, before it happens ------------
+
+    [Fact]
+    public async Task Restart_rclone_tells_the_supervisor_before_the_restart_happens()
+    {
+        var h = new Harness();
+        h.Rclone.OnRestart = () => h.Supervisor.Events.Add("rclone-restart");
+
+        await h.Commands.RestartRcloneAsync();
+
+        Assert.Equal(["note-user-rclone-restart", "rclone-restart"], h.Supervisor.Events);
+    }
+
+    [Fact]
+    public async Task A_restart_that_did_not_happen_does_not_mark_the_supervisor()
+    {
+        var declined = new Harness();
+        declined.Supervisor.Snapshot = [Mounted()];
+        declined.Prompt.Answer = false;
+        await declined.Commands.RestartRcloneAsync();
+        Assert.Equal(0, declined.Supervisor.UserRcloneRestartNotes);
+
+        var unmanaged = new Harness { RcloneAvailable = false };
+        await unmanaged.Commands.RestartRcloneAsync();
+        Assert.Equal(0, unmanaged.Supervisor.UserRcloneRestartNotes);
+
+        var unmountAll = new Harness();
+        await unmountAll.Commands.UnmountAllAsync();
+        Assert.Equal(0, unmountAll.Supervisor.UserRcloneRestartNotes);
+    }
+
     // -- What the log says when a confirmation did not lead to a repair (bs-3hx) ---------------
 
     public static TheoryData<string> AllRepairs() => ["rclone", "unmount", "bosun"];
@@ -308,6 +339,21 @@ public sealed class RepairCommandsTests
     }
 
     [Fact]
+    public async Task A_refused_Unmount_all_is_shown_with_its_reason_and_is_not_a_fault()
+    {
+        var h = new Harness();
+        h.Supervisor.RepairAllException = new RepairRefusedException("the system is suspended");
+
+        await h.Commands.UnmountAllAsync();
+
+        var error = Assert.Single(h.Prompt.Errors);
+        Assert.Equal("Unmount all & re-probe", error.Title);
+        Assert.Equal("Nothing was unmounted: the system is suspended.", error.Message);
+        Assert.DoesNotContain(h.Log.Entries, e => e.Level >= LogLevel.Warning);
+        Assert.False(h.Commands.IsUnmountingAll);
+    }
+
+    [Fact]
     public async Task A_stuck_Unmount_all_does_not_stop_the_user_restarting_Bosun()
     {
         var h = new Harness();
@@ -447,9 +493,13 @@ public sealed class RepairCommandsTests
 
         public Task<bool>? Blocker { get; set; }
 
+        /// <summary>Runs inside <see cref="RestartAsync"/>, to observe what had happened before it.</summary>
+        public Action? OnRestart { get; set; }
+
         public Task<bool> RestartAsync(CancellationToken cancellationToken = default)
         {
             Calls++;
+            OnRestart?.Invoke();
             if (Throws is not null)
             {
                 return Task.FromException<bool>(Throws);

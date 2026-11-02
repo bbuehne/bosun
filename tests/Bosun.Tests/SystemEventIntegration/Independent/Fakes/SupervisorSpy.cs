@@ -130,6 +130,8 @@ internal sealed class SupervisorSpy : IMountSupervisor
         return Task.CompletedTask;
     }
 
+    public void NoteUserRequestedRcloneRestart() => Calls.Add(nameof(NoteUserRequestedRcloneRestart));
+
     public Task RepairAllAsync(CancellationToken cancellationToken = default)
     {
         Calls.Add(nameof(RepairAllAsync));

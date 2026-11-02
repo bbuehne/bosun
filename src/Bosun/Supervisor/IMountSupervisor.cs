@@ -157,7 +157,9 @@ public interface IMountSupervisor
     /// that was unparked becomes parked. A host the user parked earlier is not mounted, so there is
     /// nothing to drain, and it stays parked (still probed): ADR-015 lets only an explicit action on
     /// that host clear a park, and a repair click for some other problem is not one.
-    /// Refused (logged, no effect) while the system is suspended (Invariant I8 in reverse).
+    /// While the system is suspended (Invariant I8 in reverse) nothing is changed and the call throws
+    /// <see cref="RepairRefusedException"/> (bs-mhs), so the caller can tell the user instead of the click
+    /// appearing to succeed.
     /// </remarks>
     Task RepairAllAsync(CancellationToken cancellationToken = default);
 
@@ -170,6 +172,22 @@ public interface IMountSupervisor
     /// <c>core/version</c> gate at resume: the supervisor re-checks <c>core/version</c> itself and, if
     /// rcd answers, re-probes and remounts the waiting hosts.</summary>
     Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Call BEFORE a user-requested "Restart rclone" (bs-z9e). The restart drops every mount by design,
+    /// and the reconciliation that follows would otherwise drain them as <c>DrainCause.Automatic</c> --
+    /// indistinguishable from an rcd crash, and so announced as an unexpected unmount. While the mark is
+    /// held, a reconciliation drain is recorded as <c>DrainCause.Repair</c> instead (silent in the tray,
+    /// still logged and shown in the window), per the maintainer's decision in bs-p97.
+    /// </summary>
+    /// <remarks>
+    /// The mark is bounded two ways, so it can never mute a later crash: it is cleared by the first
+    /// <see cref="OnRcloneRestartedAsync"/> whose reconciliation completes, and it expires on the
+    /// supervisor's injected clock after <c>MountSupervisor.UserRestartMarkLifetime</c> (a restart that
+    /// never became healthy). Safe to call from any thread: it does not post to the command channel, so it
+    /// cannot be ordered after the restart it announces.
+    /// </remarks>
+    void NoteUserRequestedRcloneRestart();
 
     /// <summary>
     /// Gates whether ANY host may enter <see cref="MountState.Mounting"/> (bs-yvw.1). Set by

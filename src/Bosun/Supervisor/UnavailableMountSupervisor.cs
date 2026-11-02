@@ -57,6 +57,10 @@ public sealed class UnavailableMountSupervisor : IMountSupervisor
 
     public Task OnRcloneRestartedAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
+    public void NoteUserRequestedRcloneRestart()
+    {
+    }
+
     public Task SetMountingAvailabilityAsync(MountingAvailability availability, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 
