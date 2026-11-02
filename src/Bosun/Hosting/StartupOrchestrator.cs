@@ -397,8 +397,11 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         // so hosts still show live reachability even when nothing can actually mount yet (deep
         // probes and mount/mount calls simply keep failing gracefully -- MountSupervisor already
         // treats every rc call as fallible).
-        var supervisorStarted = await StartMountSupervisorAsync(rcloneHealthy, Current.RcloneFaultMessage, ct).ConfigureAwait(false);
-        PublishReadiness(Current with { SupervisorRunning = supervisorStarted });
+        var supervisorFault = await StartMountSupervisorAsync(rcloneHealthy, Current.RcloneFaultMessage, ct).ConfigureAwait(false);
+
+        // bs-4js: the failure is published as STATE, not only logged. AppHealthService.ObserveStartup
+        // turns SupervisorFaultMessage into the Faulted issue the tray icon and status window render.
+        PublishReadiness(Current with { SupervisorRunning = supervisorFault is null, SupervisorFaultMessage = supervisorFault });
 
         // Only now -- after the initial sequence has fully finished provisioning once and started
         // the supervisor once -- start reacting to LATER rcd health transitions (a restart after
@@ -412,7 +415,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
 
         // bs-7ck: subscribe the mount supervisor to LATER config reloads -- the initial host set it
         // already built inside StartAsync above covers the config as of THIS load. Gated on
-        // mountSupervisor being non-null, not on supervisorStarted, for the identical reason step 7
+        // mountSupervisor being non-null, not on the start having succeeded, for the identical reason step 7
         // below is: as long as MountSupervisor was constructed and its RunAsync loop launched (see
         // StartMountSupervisorAsync), the command channel this posts to is being pumped, even if
         // the one initial StartAsync call itself happened to fail.
@@ -422,7 +425,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         }
 
         // Step 7: subscribe to system events (bs-ohk). Deliberately the LAST step of the ordered
-        // sequence, and deliberately gated on mountSupervisor -- not on supervisorStarted -- being
+        // sequence, and deliberately gated on mountSupervisor -- not on the start having succeeded -- being
         // non-null: as long as MountSupervisor was constructed and its RunAsync loop was launched
         // (see StartMountSupervisorAsync), the command channel the adapter posts to is being
         // pumped, even if that one initial StartAsync call itself happened to fail. Subscribing
@@ -479,7 +482,9 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
         }
     }
 
-    private async Task<bool> StartMountSupervisorAsync(bool rcloneHealthy, string? rcloneFaultMessage, CancellationToken ct)
+    /// <returns><see langword="null"/> when the supervisor started; otherwise the failure's message
+    /// (never null or empty in that case), which becomes <see cref="StartupReadiness.SupervisorFaultMessage"/>.</returns>
+    private async Task<string?> StartMountSupervisorAsync(bool rcloneHealthy, string? rcloneFaultMessage, CancellationToken ct)
     {
         try
         {
@@ -503,17 +508,12 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
                 ComputeMountingAvailability(winFspInstalled, rcloneHealthy, rcloneFaultMessage), ct).ConfigureAwait(false);
 
             await mountSupervisor.StartAsync(ct).ConfigureAwait(false);
-            return true;
+            return null;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Failed to start the mount supervisor; no host will be probed or mounted this session");
-            health?.ReportIssue(
-                HealthIssueCodes.StartupSupervisorFailed,
-                HealthLevel.Faulted,
-                "Mount supervision could not start",
-                $"No host will be probed or mounted until Bosun is restarted. {ex.Message}");
-            return false;
+            return string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
         }
     }
 

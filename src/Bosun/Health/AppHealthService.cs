@@ -158,6 +158,16 @@ public sealed class AppHealthService : IAppHealth, IAppHealthReporter, IDisposab
                 readiness.WinFspMessage));
         }
 
+        // bs-4js: a supervisor that failed to start is the most degraded state Bosun can be in short
+        // of not running -- every mount guarantee is void -- so it is Faulted and carries the real
+        // reason in the TITLE, which is what the tray tooltip and the banner's headline show. Keyed on
+        // SupervisorStartFailed, never on SupervisorRunning == false: "not started yet" (and "never
+        // attempted because the config is invalid") must not render as a failure.
+        if (readiness.SupervisorStartFailed)
+        {
+            specs.Add(DescribeSupervisorStartFailure(readiness.SupervisorFaultMessage!));
+        }
+
         if (!readiness.TerminalFragmentWritten && readiness.TerminalFragmentFaultMessage is { Length: > 0 } fragmentFault)
         {
             specs.Add(new Spec(
@@ -325,6 +335,22 @@ public sealed class AppHealthService : IAppHealth, IAppHealthReporter, IDisposab
             IsStarting = isStarting,
         };
     }
+
+    /// <summary>The headline every surface shows for a failed supervisor start (bs-4js). The reason is
+    /// collapsed to one line: it lands in a tray tooltip and a banner title, neither of which wants a
+    /// multi-line message.</summary>
+    internal static string SupervisorStartFailureTitle(string reason)
+    {
+        var oneLine = string.Join(' ', reason.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return $"The mount supervisor failed to start: {(oneLine.Length == 0 ? "no reason was reported" : oneLine)}";
+    }
+
+    private static Spec DescribeSupervisorStartFailure(string reason) => new(
+        HealthIssueCodes.StartupSupervisorFailed,
+        HealthLevel.Faulted,
+        SupervisorStartFailureTitle(reason),
+        "No host will be probed or mounted this session, and nothing will retry. Restart Bosun once the "
+        + "cause is fixed; the log has the full exception.");
 
     private static Spec DescribeRcloneFault(RcloneProcessFaultKind kind, string? message)
     {

@@ -199,14 +199,22 @@ public partial class App : Application
     private void InitializeUserInterface(string[] args)
     {
         var services = _host!.Services;
-        var supervisor = services.GetRequiredService<IMountSupervisor>();
-        var configStore = services.GetRequiredService<IHostConfigStore>();
+
+        // bs-4js: nothing that can fail to build may stop the tray icon and window from existing.
+        // The faults that most need reporting (the supervisor could not be built or started, the
+        // config is invalid) are the same ones that make the container throw here, so this used to
+        // leave a Bosun with no UI exactly when it had something to say. A service that cannot be
+        // resolved is replaced by an inert stand-in; the cause reaches the user through IAppHealth,
+        // which the orchestrator fills from the same fault.
+        var dependencies = UserInterfaceDependencyResolver.Resolve(services, _logger!);
+        var supervisor = dependencies.Supervisor;
+        var configStore = dependencies.ConfigStore;
 
         var readModel = new StatusReadModel(
             supervisor,
             configStore,
-            services.GetRequiredService<ISessionMonitor>(),
-            services.GetRequiredService<TimeProvider>(),
+            dependencies.SessionMonitor,
+            dependencies.TimeProvider,
             services.GetRequiredService<ILogger<StatusReadModel>>());
         readModel.Start();
         _statusReadModel = readModel;
@@ -215,7 +223,7 @@ public partial class App : Application
 
         // bs-yyg: the one health model the orchestrator pushes into; the window banner and the tray
         // both read it, so they cannot disagree.
-        var appHealth = services.GetRequiredService<IAppHealth>();
+        var appHealth = dependencies.AppHealth;
 
         // bs-aoz: the repair actions. rclone is resolved on demand, not here: RcloneProcessService
         // reads the config when it is first resolved, and if the config never loaded that throws. A
@@ -242,7 +250,7 @@ public partial class App : Application
                 new MainWindowRepairDialogOwner(() => _mainWindow, () => _mainWindowController),
                 new WpfRepairDialogPresenter(),
                 services.GetRequiredService<ILogger<DispatchedRepairPrompt>>()),
-            services.GetRequiredService<TimeProvider>(),
+            dependencies.TimeProvider,
             appHealth,
             services.GetRequiredService<ILogger<RepairCommands>>());
 
@@ -250,9 +258,9 @@ public partial class App : Application
             supervisor,
             launcher,
             services.GetRequiredService<ILogger<HostActionDispatcher>>(),
-            services.GetRequiredService<Bosun.Diagnostics.CopyDiagnosticsCommand>(),
+            dependencies.Diagnostics,
             repairCommands,
-            services.GetService<IRestartNotice>());
+            dependencies.RestartNotice);
 
         _mainWindow = new MainWindow { Logger = services.GetRequiredService<ILogger<MainWindow>>() };
         _mainWindow.Configure(statusReadModel, actionDispatcher, appHealth);
@@ -264,19 +272,29 @@ public partial class App : Application
         // removed (Invariant I2). Without it, deleting a mounted host leaves a live drive letter
         // with nothing in hosts.toml describing it -- which is what shipped when the writer and the
         // form each assumed the other did the drain.
-        var hostConfigWriter = services.GetRequiredService<IHostConfigWriter>();
-        var hostEditorController = new HostEditorController(
-            hostConfigWriter,
-            configStore,
-            supervisor,
-            services.GetRequiredService<ILogger<HostEditorController>>());
-        _mainWindow.ConfigureHostEditor(
-            hostEditorController,
-            configStore,
-            new Win32IdentityFilePicker(),
-            new Win32DriveLetterInspector(),
-            new Win32BitviseProfilePicker(),
-            new BitviseProfileParser());
+        //
+        // bs-4js: skipped, not faked, when there is no writer (the config did not load): MainWindow
+        // already treats an unconfigured host editor as "no editor", so the buttons that open it do
+        // nothing instead of opening a form that cannot save.
+        if (dependencies.ConfigWriter is { } hostConfigWriter)
+        {
+            var hostEditorController = new HostEditorController(
+                hostConfigWriter,
+                configStore,
+                supervisor,
+                services.GetRequiredService<ILogger<HostEditorController>>());
+            _mainWindow.ConfigureHostEditor(
+                hostEditorController,
+                configStore,
+                new Win32IdentityFilePicker(),
+                new Win32DriveLetterInspector(),
+                new Win32BitviseProfilePicker(),
+                new BitviseProfileParser());
+        }
+        else
+        {
+            _logger?.LogWarning("The host editor is unavailable this session: the host config writer could not be built");
+        }
 
         // ADR-018 rule 3: closing the window hides it to tray, never exits. The only way to exit
         // is the tray's "Exit" item (TrayIconController) or a future explicit Exit command, both
