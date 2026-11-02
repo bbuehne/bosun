@@ -556,6 +556,71 @@ public sealed class ConfigValidatorTests
         Assert.Contains(result.Errors, e => e.Rule == "negative-probe-interval");
     }
 
+    // bs-3ip: the derived rclone remote name (bosun-<key>) must satisfy rclone's
+    // fspath.CheckConfigName. Bare TOML keys always do; quoted keys can be arbitrary text.
+
+    [Theory]
+    [InlineData("example-nas")]
+    [InlineData("nas_2.backup")]
+    [InlineData("a+b@c")]
+    [InlineData("two words")] // an interior space is legal in an rclone config name
+    [InlineData("café")] // Unicode letters are legal
+    [InlineData("trailing-dash-")] // the prefix means a key can never START with '-'
+    public void Validate_HostKeyGivingALegalRcloneRemoteName_IsAccepted(string key)
+    {
+        var config = Build(h => h with { Key = key });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors));
+    }
+
+    [Theory]
+    [InlineData("a:b")]
+    [InlineData("a/b")]
+    [InlineData("a,b")]
+    [InlineData("bang!")]
+    [InlineData("trailing ")] // rclone: must not end with a space
+    [InlineData("new\nline")]
+    [InlineData("tab\there")]
+    public void Validate_HostKeyGivingAnIllegalRcloneRemoteName_IsRejectedAndLocatable(string key)
+    {
+        var config = Build(h => h with { Key = key });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-rclone-remote-name", error.Rule);
+        Assert.Contains($"hosts.{key}", error.Message);
+        Assert.Contains($"bosun-{key}", error.Message);
+    }
+
+    [Fact]
+    public void Validate_EmptyHostKey_IsRejectedRatherThanReachingRemoteNameFor()
+    {
+        var config = Build(h => h with { Key = string.Empty });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("invalid-rclone-remote-name", error.Rule);
+    }
+
+    [Fact]
+    public void Validate_IllegalRemoteNameOnAMountModeNoneHost_IsStillRejected()
+    {
+        // The provisioner creates a remote for every host regardless of mount mode.
+        var config = Build(h => h with
+        {
+            Key = "a:b",
+            Mount = new MountConfig { Mode = MountMode.None },
+        });
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.Contains(result.Errors, e => e.Rule == "invalid-rclone-remote-name");
+    }
+
     // -- fixtures -----------------------------------------------------------------------------
 
     private static BosunConfig Build(

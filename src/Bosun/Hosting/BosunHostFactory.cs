@@ -211,9 +211,9 @@ public static class BosunHostFactory
         // IHostConfigStore, same as before -- what changed (bs-127) is WHO is allowed to trigger
         // that resolution and when: only StartupOrchestrator, and only after it has confirmed
         // config loaded successfully. %APPDATA%-style tokens in global.rclone_config_path are
-        // expanded at the point of use in this factory lambda, the same way
-        // ConfigValidator.ExpandHome expands identity_file's leading `~` at its point of use
-        // rather than at bind time.
+        // expanded by GlobalConfig.ResolveRcloneConfigPath (bs-3ip) -- the config layer's single
+        // expansion point -- at the point of use in this factory lambda, not at bind time, so the
+        // value HostConfigTomlWriter round-trips stays what the user wrote.
         // ADR-020 §1 (bs-772): one Job Object for the whole Bosun process, registered as an
         // INSTANCE so the container never disposes it -- closing the handle is what kills rcd, and
         // that must only ever happen when Bosun exits.
@@ -231,7 +231,7 @@ public static class BosunHostFactory
             var rcloneProcessOptions = new RcloneProcessServiceOptions
             {
                 RcloneRcPort = global.RcloneRcPort,
-                RcloneConfigPath = Environment.ExpandEnvironmentVariables(global.RcloneConfigPath),
+                RcloneConfigPath = global.ResolveRcloneConfigPath(),
             };
 
             return new RcloneProcessService(

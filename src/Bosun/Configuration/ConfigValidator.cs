@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.RegularExpressions;
+using Bosun.Rclone;
 
 namespace Bosun.Configuration;
 
@@ -181,11 +182,39 @@ public static class ConfigValidator
         }
     }
 
+    // bs-3ip: every host gets an rclone remote named bosun-<key> (RcloneRemoteNaming), whatever its
+    // mount mode, because the provisioner runs for all hosts. A bare TOML key is always legal once
+    // prefixed, but a quoted key ([hosts."a:b"], [hosts."trailing "], [hosts.""]) is arbitrary
+    // text. Without this rule that surfaced as an rc error (or, for an empty key, an
+    // ArgumentException from RemoteNameFor) at provisioning time instead of a locatable config
+    // error. An empty key is reported here too rather than allowed to reach RemoteNameFor.
+    private static void ValidateRemoteName(HostConfig host, List<ConfigValidationError> errors)
+    {
+        if (string.IsNullOrEmpty(host.Key))
+        {
+            errors.Add(new ConfigValidationError(
+                "invalid-rclone-remote-name",
+                "hosts.\"\": the host key is empty, so no rclone remote name can be derived for it -- give the [hosts.<key>] table a non-empty key"));
+            return;
+        }
+
+        var remoteName = RcloneRemoteNaming.RemoteNameFor(host.Key);
+        if (!RcloneRemoteNaming.IsLegalRemoteName(remoteName))
+        {
+            errors.Add(new ConfigValidationError(
+                "invalid-rclone-remote-name",
+                $"hosts.{host.Key}: the host key '{host.Key}' makes the rclone remote name '{remoteName}', which rclone rejects " +
+                $"(a remote name {RcloneRemoteNaming.RemoteNameRuleDescription}) -- rename the [hosts.{host.Key}] table"));
+        }
+    }
+
     private static void ValidateHost(
         HostConfig host,
         Func<string, bool> identityFileExists,
         List<ConfigValidationError> errors)
     {
+        ValidateRemoteName(host, errors);
+
         if (host.Mount.Mode != MountMode.None)
         {
             if (string.IsNullOrEmpty(host.Mount.Drive) || string.IsNullOrEmpty(host.Mount.RemotePath))
