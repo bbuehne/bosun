@@ -323,8 +323,9 @@ right before building any UI.
     race rather than a deterministic policy. Never implemented by enumerating
     the drive letter (`DriveInfo`, `Directory.GetFiles`, etc.) — that is
     precisely the call that can hang (the one exception is rule 2a's single
-    `DriveInfo.DriveType` read, taken once right after `mount/mount`, which asks
-    the mount manager for the drive's type and does not touch the volume), and the supervisor's channel is globally
+    `DriveInfo.DriveType` read, taken once right after `mount/mount` succeeded
+    against a host that has just passed its deep probe, never on the recurring
+    probe path), and the supervisor's channel is globally
     serialised (see `MountSupervisor`'s class remarks), so one hung enumeration
     would stall every host, not just this one. See ADR-016.
 4. `Draining` calls `mount/unmount`. If unmount does not confirm within the
