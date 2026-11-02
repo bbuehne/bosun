@@ -435,6 +435,28 @@ right before building any UI.
 5. On suspend, every host in `Mounted` or `Mounting` goes to `Draining`, then
    `Disabled`.
 
+   **Unmount all, then verify** (`bs-5o4`; the maintainer's decision of
+   2026-11-02, recorded in ADR-023's amendment). The suspend moves *every* such
+   host to `Draining` first, with no rc call. It then sends every
+   `mount/unmount` together — all requests are started before any is awaited,
+   each with its own 30 s call timeout — and only afterwards verifies: one
+   `mount/listmounts` covers all hosts, and a host the table no longer lists
+   completes its drain (rule 4: the unmount call's own result is never proof). A
+   host still listed whose budget has run out is escalated, again all together,
+   with one more `mount/listmounts`; one not yet due, or still unconfirmed,
+   retries on its own per-host timer as after any single drain step. Each host
+   keeps its own `Draining` state, escalation flag and deadline; there is no new
+   state or transition. A failed or hung request on one host does not delay or
+   stop the others. The reason: the drain used to be one host's whole step
+   (`mount/unmount`, `mount/listmounts`, forced `mount/unmount`,
+   `mount/listmounts` — up to about 80 s against a stuck `rclone rcd`) before the
+   next host's unmount was even requested, so with a stuck rcd the later hosts
+   were not unmounted before the machine slept (Invariant I8). Now the request
+   to the last host leaves at the same instant as the first host's, and the
+   request phase takes as long as its slowest call, not the sum. This applies to
+   the suspend sweep only; every other drain (probe failure, idle timeout, user
+   unmount, repair, config change) is still one host's step at a time.
+
    A host that is **already `Draining`** for an ordinary reason when suspend
    arrives (a probe-failure threshold, an idle timeout, a user unmount, a repair)
    keeps its drain cause — a user unmount still parks it — but its forced-unmount

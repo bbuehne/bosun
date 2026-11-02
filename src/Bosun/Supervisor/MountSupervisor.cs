@@ -691,6 +691,12 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             .Where(h => h.State == MountState.Draining && !h.DrainEscalated)
             .ToList();
 
+        // bs-5o4 (decided 2026-11-02: "unmount all, then verify"): every host goes to Draining first,
+        // with no rc call, and DrainAllForSuspendAsync then sends every mount/unmount before it
+        // verifies any. Draining one host completely before starting the next let a stuck rcd hold
+        // host N's request behind hosts 1..N-1 (about 80 s each), so later hosts were not unmounted
+        // before the machine slept (I8).
+        var newlyDraining = new List<HostRuntime>();
         foreach (var host in hosts.Values.Where(h => h.State is MountState.Mounting or MountState.Mounted).ToList())
         {
             // ADR-022 decision 1: remember that the user had this on-demand drive up, before the drain
@@ -704,8 +710,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 host.RemountDeadlineUtc = null;
             }
 
-            await BeginDrainAsync(host, "system suspend", DrainCause.Suspend, ct, startedUtc: arrivalUtc).ConfigureAwait(false);
+            if (EnterDraining(host, "system suspend", DrainCause.Suspend, startedUtc: arrivalUtc))
+            {
+                newlyDraining.Add(host);
+            }
         }
+
+        await DrainAllForSuspendAsync(newlyDraining, ct).ConfigureAwait(false);
 
         // bs-u4a item 4: a host already Draining for an ordinary reason keeps its drain cause (so a
         // user unmount still parks it, a removed host is still evicted) but must not keep the 10 s
@@ -2575,12 +2586,29 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     private async Task BeginDrainAsync(
         HostRuntime host, string reason, DrainCause cause, CancellationToken ct, DateTimeOffset? startedUtc = null)
     {
+        if (!EnterDraining(host, reason, cause, startedUtc))
+        {
+            return;
+        }
+
+        await AttemptDrainStepAsync(host, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The synchronous half of beginning a drain: the <c>Mounting|Mounted -&gt; Draining</c> transition
+    /// and the drain's bookkeeping, with no rc call. <see cref="BeginDrainAsync"/> follows it with one
+    /// drain step; the suspend sweep (<see cref="DrainAllForSuspendAsync"/>, bs-5o4) enters every host
+    /// first and drains them together. Returns <see langword="false"/>, changing nothing, when the host
+    /// is not <c>Mounting</c> or <c>Mounted</c>.
+    /// </summary>
+    private bool EnterDraining(HostRuntime host, string reason, DrainCause cause, DateTimeOffset? startedUtc)
+    {
         if (host.State is not (MountState.Mounting or MountState.Mounted))
         {
             logger.LogDebug(
                 "Ignoring drain request for {HostKey}: not Mounting/Mounted (currently {State}); reason was: {Reason}",
                 host.Key, host.State, reason);
-            return;
+            return false;
         }
 
         SetState(host, MountState.Draining, reason, cause);
@@ -2600,7 +2628,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.IdleUnmountTimer = null;
         ResetVfsActivityTracking(host);
 
-        await AttemptDrainStepAsync(host, ct).ConfigureAwait(false);
+        return true;
     }
 
     /// <summary>
@@ -2623,18 +2651,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         var mountPoint = host.Config.Mount.Drive!;
 
-        try
-        {
-            await rcloneClient.UnmountAsync(mountPoint, ct).ConfigureAwait(false);
-            logger.LogFaultRecovered(repeatingFaults, $"drain-unmount:{host.Key}", $"mount/unmount for {host.Key} at {mountPoint}");
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            LogRepeatedRcFault(
-                $"drain-unmount:{host.Key}", ex,
-                $"mount/unmount call failed for {host.Key} at {mountPoint}; will re-verify against listmounts",
-                $"mount/unmount for {host.Key} at {mountPoint}");
-        }
+        LogDrainUnmountOutcome(host, mountPoint, await TryUnmountAsync(mountPoint, ct).ConfigureAwait(false));
 
         if (await IsStillMountedAsync(mountPoint, ct).ConfigureAwait(false) is false)
         {
@@ -2676,6 +2693,16 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 host.Key, mountPoint);
         }
 
+        ArmDrainRetryTimer(host, elapsed, timeout);
+    }
+
+    /// <summary>
+    /// Arms the next drain attempt for a host that is still <c>Draining</c> after a step. Shared by
+    /// <see cref="AttemptDrainStepAsync"/> and the suspend sweep (<see cref="DrainAllForSuspendAsync"/>),
+    /// so a host left unconfirmed by the sweep retries exactly as one left unconfirmed by a single step.
+    /// </summary>
+    private void ArmDrainRetryTimer(HostRuntime host, TimeSpan elapsed, TimeSpan timeout)
+    {
         // bs-fix-e5 defect 4: before escalation, the next check must land AT the escalation
         // deadline, not be rounded up to the next multiple of DrainRetryInterval. Without this, a
         // suspendUnmountTimeoutSeconds anywhere in (0, DrainRetryInterval) x N still only gets
@@ -2719,7 +2746,16 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         return timeout;
     }
 
-    private async Task<bool> IsStillMountedAsync(string mountPoint, CancellationToken ct)
+    private async Task<bool> IsStillMountedAsync(string mountPoint, CancellationToken ct) =>
+        IsListed(await TryListMountsAsync([mountPoint], ct).ConfigureAwait(false), mountPoint);
+
+    /// <summary>One <c>mount/listmounts</c> call verifying <paramref name="mountPoints"/>. Returns
+    /// <see langword="null"/> when the call failed, which <see cref="IsListed"/> reads as "still
+    /// mounted" for every host: per docs/ARCHITECTURE.md §4 rule 4, never assume a drive is gone. If we
+    /// cannot even ask, assume the worst so the caller keeps retrying rather than declaring victory on
+    /// missing information. Fault logging stays keyed per mount point, as for a single check.</summary>
+    private async Task<IReadOnlyList<RcloneMountInfo>?> TryListMountsAsync(
+        IReadOnlyCollection<string> mountPoints, CancellationToken ct)
     {
         IReadOnlyList<RcloneMountInfo> mounts;
         try
@@ -2728,19 +2764,178 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // Per docs/ARCHITECTURE.md §4 rule 4: never assume a drive is gone. If we cannot even
-            // ask, assume the worst (still mounted) so the caller keeps retrying rather than
-            // declaring victory on missing information.
-            LogRepeatedRcFault(
-                $"verify-listmounts:{mountPoint}", ex,
-                $"mount/listmounts failed while verifying unmount of {mountPoint}; assuming still mounted",
-                $"mount/listmounts verifying {mountPoint}");
-            return true;
+            foreach (var mountPoint in mountPoints)
+            {
+                LogRepeatedRcFault(
+                    $"verify-listmounts:{mountPoint}", ex,
+                    $"mount/listmounts failed while verifying unmount of {mountPoint}; assuming still mounted",
+                    $"mount/listmounts verifying {mountPoint}");
+            }
+
+            return null;
         }
 
-        logger.LogFaultRecovered(repeatingFaults, $"verify-listmounts:{mountPoint}", $"mount/listmounts verifying {mountPoint}");
+        foreach (var mountPoint in mountPoints)
+        {
+            logger.LogFaultRecovered(repeatingFaults, $"verify-listmounts:{mountPoint}", $"mount/listmounts verifying {mountPoint}");
+        }
 
-        return mounts.Any(m => string.Equals(m.MountPoint, mountPoint, StringComparison.OrdinalIgnoreCase));
+        return mounts;
+    }
+
+    private static bool IsListed(IReadOnlyList<RcloneMountInfo>? snapshot, string mountPoint) =>
+        snapshot is null ||
+        snapshot.Any(m => string.Equals(m.MountPoint, mountPoint, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Sends <c>mount/unmount</c> for <paramref name="mountPoint"/> and returns the failure instead of
+    /// throwing it (<see langword="null"/> on success), so a caller can start several of these together
+    /// and log their outcomes afterwards, on the supervisor's channel. It deliberately logs nothing and
+    /// touches no supervisor state: the continuation after the rc call runs on a thread-pool thread,
+    /// and with several in flight two of them could otherwise race on the fault-logger's state. A
+    /// cancellation of <paramref name="ct"/> (shutdown) still propagates.
+    /// </summary>
+    private async Task<Exception?> TryUnmountAsync(string mountPoint, CancellationToken ct)
+    {
+        try
+        {
+            await rcloneClient.UnmountAsync(mountPoint, ct).ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            return ex;
+        }
+    }
+
+    private void LogDrainUnmountOutcome(HostRuntime host, string mountPoint, Exception? failure)
+    {
+        if (failure is null)
+        {
+            logger.LogFaultRecovered(repeatingFaults, $"drain-unmount:{host.Key}", $"mount/unmount for {host.Key} at {mountPoint}");
+            return;
+        }
+
+        LogRepeatedRcFault(
+            $"drain-unmount:{host.Key}", failure,
+            $"mount/unmount call failed for {host.Key} at {mountPoint}; will re-verify against listmounts",
+            $"mount/unmount for {host.Key} at {mountPoint}");
+    }
+
+    /// <summary>
+    /// The suspend drain (bs-5o4, the maintainer's decision of 2026-11-02: "unmount all, then verify").
+    /// Drains every host in <paramref name="batch"/>, all already <c>Draining</c> with the suspend
+    /// budget, as ONE step in three phases instead of one full drain step per host in turn:
+    /// <list type="number">
+    /// <item><b>Request.</b> Every host's <c>mount/unmount</c> is started before any is awaited, so each
+    /// request is on the wire at once and the last host's does not wait for the first host's. Each call
+    /// keeps its own timeout (<c>RcloneClient.UnmountTimeout</c>, 30 s), so the whole phase takes as long
+    /// as its slowest call, not the sum. Before this, one stuck rcd made host N's request wait for hosts
+    /// 1..N-1 each running a whole step (about 80 s) and the later hosts were not unmounted before sleep.</item>
+    /// <item><b>Verify.</b> One <c>mount/listmounts</c> covers all hosts. A host the table no longer lists
+    /// completes its drain. Nothing is taken from an unmount call's own outcome (rule 4).</item>
+    /// <item><b>Escalate.</b> A host still listed whose budget (counted from arrival, bs-7d7) has run out
+    /// gets its forced unmount, again all together, then one more <c>mount/listmounts</c>. A host not yet
+    /// due, or still unconfirmed, keeps retrying on the per-host timer exactly as after a single drain
+    /// step (<see cref="ArmDrainRetryTimer"/>).</item>
+    /// </list>
+    /// Each host keeps its own <c>Draining</c> state, escalation flag and deadline; no transition is
+    /// added. A failure on one host's unmount is that host's alone: the others are already in flight and
+    /// are verified regardless. The concurrent part is only the rc calls (<see cref="TryUnmountAsync"/>):
+    /// every state change and every log line happens on the channel, between them.
+    /// </summary>
+    private async Task DrainAllForSuspendAsync(IReadOnlyList<HostRuntime> batch, CancellationToken ct)
+    {
+        var draining = batch.Where(h => h.State == MountState.Draining).ToList();
+        if (draining.Count == 0)
+        {
+            return;
+        }
+
+        // Request. ToList() starts every call; Task.WhenAll then waits for all of them together.
+        var requests = draining
+            .Select(host =>
+            {
+                var mountPoint = host.Config.Mount.Drive!;
+                return (Host: host, MountPoint: mountPoint, Outcome: TryUnmountAsync(mountPoint, ct));
+            })
+            .ToList();
+        await Task.WhenAll(requests.Select(r => r.Outcome)).ConfigureAwait(false);
+        foreach (var request in requests)
+        {
+            LogDrainUnmountOutcome(request.Host, request.MountPoint, request.Outcome.Result);
+        }
+
+        // Verify.
+        var snapshot = await TryListMountsAsync(requests.Select(r => r.MountPoint).ToList(), ct).ConfigureAwait(false);
+        var unconfirmed = new List<(HostRuntime Host, string MountPoint)>();
+        foreach (var (host, mountPoint, _) in requests)
+        {
+            if (IsListed(snapshot, mountPoint))
+            {
+                unconfirmed.Add((host, mountPoint));
+                continue;
+            }
+
+            logger.LogInformation(
+                "Unmount confirmed for {HostKey} at {MountPoint} (reason: {Reason})", host.Key, mountPoint, host.DrainReason);
+            await CompleteDrainAsync(host, ct).ConfigureAwait(false);
+        }
+
+        // Escalate. The same test as AttemptDrainStepAsync's, taken once, after the verification, so a
+        // request phase that ate the budget (a stuck rcd) escalates every host that is still listed.
+        var elapsedNow = timeProvider.GetUtcNow();
+        var escalating = new List<(HostRuntime Host, string MountPoint)>();
+        foreach (var entry in unconfirmed)
+        {
+            var timeout = EffectiveDrainTimeout(entry.Host);
+            if (!entry.Host.DrainEscalated && elapsedNow - entry.Host.DrainStartedUtc!.Value >= timeout)
+            {
+                entry.Host.DrainEscalated = true;
+                logger.LogWarning(
+                    "Unmount for {HostKey} at {MountPoint} did not confirm within {Timeout}; escalating to forced unmount",
+                    entry.Host.Key, entry.MountPoint, timeout);
+                escalating.Add(entry);
+            }
+        }
+
+        if (escalating.Count > 0)
+        {
+            var forced = escalating.Select(e => (e.Host, e.MountPoint, Outcome: TryUnmountAsync(e.MountPoint, ct))).ToList();
+            await Task.WhenAll(forced.Select(f => f.Outcome)).ConfigureAwait(false);
+            foreach (var (host, mountPoint, outcome) in forced)
+            {
+                if (outcome.Result is { } failure)
+                {
+                    logger.LogWarning(failure, "Forced unmount re-attempt failed for {HostKey} at {MountPoint}", host.Key, mountPoint);
+                }
+            }
+
+            var forcedSnapshot = await TryListMountsAsync(forced.Select(f => f.MountPoint).ToList(), ct).ConfigureAwait(false);
+            foreach (var (host, mountPoint, _) in forced)
+            {
+                if (!IsListed(forcedSnapshot, mountPoint))
+                {
+                    logger.LogInformation("Forced unmount confirmed for {HostKey} at {MountPoint}", host.Key, mountPoint);
+                    await CompleteDrainAsync(host, ct).ConfigureAwait(false);
+                    unconfirmed.RemoveAll(u => u.Host == host);
+                    continue;
+                }
+
+                logger.LogError(
+                    "Forced unmount for {HostKey} at {MountPoint} STILL not confirmed by mount/listmounts; the drive " +
+                    "letter may still be present. Retrying rather than declaring the drain complete.",
+                    host.Key, mountPoint);
+            }
+        }
+
+        // Still Draining: retry on the per-host timer, as after any single drain step.
+        // Elapsed is read again here: the forced phase above may have taken a whole unmount timeout.
+        foreach (var (host, _) in unconfirmed)
+        {
+            ArmDrainRetryTimer(
+                host, timeProvider.GetUtcNow() - host.DrainStartedUtc!.Value, EffectiveDrainTimeout(host));
+        }
     }
 
     /// <summary>

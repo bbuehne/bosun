@@ -92,6 +92,11 @@ internal sealed class Hold
     /// report; for an rc call it is ignored and the call proceeds to the in-memory double.</summary>
     public void Release(object? value = null) => outcome.TrySetResult(value);
 
+    /// <summary>Completes the held call by throwing <paramref name="failure"/> from it, as
+    /// <c>RcloneClient</c> does when a call times out (<c>RcloneRcTimeoutException</c>). The call never
+    /// reaches the in-memory double, so the mount table is left as it was (bs-5o4).</summary>
+    public void Fail(Exception failure) => outcome.TrySetException(failure);
+
     internal Task<object?> Begin(string operation, string target, CancellationToken token, Func<object?> cancelledValue)
     {
         Operation = operation;
@@ -343,6 +348,17 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
             await hold.Begin(operation, target ?? string.Empty, token, () => null);
         }
 
-        return await proceed();
+        // The in-memory double is not thread-safe, and released holds resume on pool threads: since
+        // bs-5o4 the supervisor has several rc calls in flight at once, so two of them can be released
+        // together. The double's calls complete synchronously, so the lock covers all of their work.
+        Task<T> result;
+        lock (doubleGate)
+        {
+            result = proceed();
+        }
+
+        return await result;
     }
+
+    private readonly object doubleGate = new();
 }
