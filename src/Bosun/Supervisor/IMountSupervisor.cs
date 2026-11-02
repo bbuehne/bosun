@@ -279,7 +279,7 @@ public sealed record HostMountSnapshot
 
 /// <summary>
 /// One immutable entry in the bounded in-memory transition history
-/// (<see cref="IMountSupervisor.GetTransitionHistory"/>, bs-ww9.2). All five fields are captured
+/// (<see cref="IMountSupervisor.GetTransitionHistory"/>, bs-ww9.2). All six fields are captured
 /// verbatim from what <c>MountSupervisor.SetState</c> already computes for its own log line --
 /// nothing here is derived or inferred.
 /// </summary>
@@ -292,5 +292,24 @@ public sealed record MountTransitionEntry
     public required string HostKey { get; init; }
     public required MountState From { get; init; }
     public required MountState To { get; init; }
+
+    /// <summary>Human-readable text for logs and balloons. NOT a contract: it may be reworded at
+    /// any time, so nothing may classify an entry by matching it -- use <see cref="DrainCause"/>.</summary>
     public required string Trigger { get; init; }
+
+    /// <summary>
+    /// Why the drain this entry belongs to was begun (bs-ynb). Non-null exactly on a transition
+    /// INTO <see cref="MountState.Draining"/>; <see langword="null"/> on every other transition,
+    /// including the <see cref="MountState.Draining"/> -&gt; <see cref="MountState.Disabled"/> entry
+    /// that completes the drain.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not repeated on the completing transition: the cause answers "why did this
+    /// drain begin", the Draining entry already says so, and a second copy could disagree with the
+    /// first (a host removed from config while already draining has its cause upgraded to
+    /// <see cref="Supervisor.DrainCause.ConfigRemoved"/> mid-drain, after the Draining entry was
+    /// recorded). A consumer that wants the cause of a completed drain looks back to the host's
+    /// preceding Draining entry.
+    /// </remarks>
+    public DrainCause? DrainCause { get; init; }
 }
