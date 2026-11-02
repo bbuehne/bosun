@@ -9,8 +9,9 @@ namespace Bosun.Diagnostics;
 /// </summary>
 /// <remarks>
 /// Never throws, so a click handler can fire it and forget it. Call it on the UI thread: the
-/// continuation after the build resumes there, which is what lets the error presenter show a
-/// message box. A second click while a build is running is ignored.
+/// continuation after the build resumes there. The presenter does not show anything inline; it queues
+/// the dialog so it appears after the tray menu has gone (see
+/// <see cref="DispatchedDiagnosticsPresenter"/>). A second click while a build is running is ignored.
 /// </remarks>
 public sealed class CopyDiagnosticsCommand(
     IDiagnosticsBundleBuilder builder,

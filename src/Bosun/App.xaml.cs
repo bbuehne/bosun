@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Threading;
 using Bosun.Configuration;
+using Bosun.Diagnostics;
 using Bosun.Health;
 using Bosun.Hosting;
 using Bosun.Import;
@@ -229,6 +230,17 @@ public partial class App : Application
         // bs-aoz: the repair actions. rclone is resolved on demand, not here: RcloneProcessService
         // reads the config when it is first resolved, and if the config never loaded that throws. A
         // Restart rclone click then reports "nothing to restart" instead of this method failing.
+        var dialogPrompt = new DispatchedRepairPrompt(
+            new WpfUiDispatcher(Dispatcher),
+            new MainWindowRepairDialogOwner(() => _mainWindow, () => _mainWindowController),
+            new WpfRepairDialogPresenter(),
+            services.GetRequiredService<ILogger<DispatchedRepairPrompt>>());
+
+        // bs-6bc: "Copy diagnostics" tells the user a bundle failed through this same prompt (queued, and
+        // owned by the main window) instead of an unowned MessageBox shown from the tray click. The
+        // command is built by the container before this exists, so its presenter is handed the prompt here.
+        services.GetService<DispatchedDiagnosticsPresenter>()?.Attach(dialogPrompt);
+
         var repairCommands = new RepairCommands(
             supervisor,
             () =>
@@ -246,11 +258,7 @@ public partial class App : Application
             () => services.GetService<IAppRestarter>(),
             // bs-3hx: shown later from the dispatcher and owned by the main window, never inline from the
             // menu's Click. The window and its controller do not exist yet, hence the functions.
-            new DispatchedRepairPrompt(
-                new WpfUiDispatcher(Dispatcher),
-                new MainWindowRepairDialogOwner(() => _mainWindow, () => _mainWindowController),
-                new WpfRepairDialogPresenter(),
-                services.GetRequiredService<ILogger<DispatchedRepairPrompt>>()),
+            dialogPrompt,
             dependencies.TimeProvider,
             appHealth,
             services.GetRequiredService<ILogger<RepairCommands>>());
