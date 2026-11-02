@@ -84,6 +84,10 @@ public sealed record HostRowPresentation
                 ? ("Mounted, setup failed", "▲", HostRowTone.Warning)
                 : ("Setup failed", "×", HostRowTone.Error),
 
+            // bs-obf: mounted, but rclone reports files it could not upload; the idle unmount is held
+            // back until they clear, so the drive stays up and is flagged rather than shown as healthy.
+            StatusCategory.UploadsFailing => ("Mounted, uploads failing", "▲", HostRowTone.Warning),
+
             StatusCategory.NotConfigured => ("No mount", "–", HostRowTone.Neutral),
             StatusCategory.Pending => (PendingLabel(row.State), "…", HostRowTone.Neutral),
             _ => throw new ArgumentOutOfRangeException(nameof(row), row.Category, "Unhandled StatusCategory value."),

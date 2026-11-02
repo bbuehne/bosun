@@ -23,6 +23,7 @@ public sealed class HostRowPresentationTests
         { StatusCategory.Unreachable, MountState.Unreachable, "Unreachable", HostRowTone.Warning },
         { StatusCategory.ProvisioningFailed, MountState.Ready, "Setup failed", HostRowTone.Error },
         { StatusCategory.ProvisioningFailed, MountState.Mounted, "Mounted, setup failed", HostRowTone.Warning },
+        { StatusCategory.UploadsFailing, MountState.Mounted, "Mounted, uploads failing", HostRowTone.Warning },
         { StatusCategory.NotConfigured, MountState.Disabled, "No mount", HostRowTone.Neutral },
         { StatusCategory.Pending, MountState.Probing, "Checking", HostRowTone.Neutral },
         { StatusCategory.Pending, MountState.Ready, "Ready", HostRowTone.Neutral },
