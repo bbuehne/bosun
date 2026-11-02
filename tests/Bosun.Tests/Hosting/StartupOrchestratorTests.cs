@@ -874,7 +874,7 @@ public sealed class StartupOrchestratorTests
         Assert.Equal(expectLaunch ? 1 : 0, launcher.Calls.Count);
         if (expectLaunch)
         {
-            Assert.Equal(["-w", "0", "new-tab", "-p", "nas"], launcher.Calls[0]);
+            Assert.Equal(["-w", "0", "new-tab", "-p", TerminalProfileArgument.For("nas")], launcher.Calls[0]);
         }
     }
 
@@ -895,7 +895,11 @@ public sealed class StartupOrchestratorTests
 
         var call = Assert.Single(launcher.Calls);
         Assert.Equal(
-            ["-w", "0", "new-tab", "-p", "alpha", ";", "new-tab", "-p", "bravo", ";", "new-tab", "-p", "delta"],
+            [
+                "-w", "0", "new-tab", "-p", TerminalProfileArgument.For("alpha"),
+                ";", "new-tab", "-p", TerminalProfileArgument.For("bravo"),
+                ";", "new-tab", "-p", TerminalProfileArgument.For("delta"),
+            ],
             call);
     }
 
@@ -1008,7 +1012,7 @@ public sealed class StartupOrchestratorTests
     }
 
     [Fact]
-    public async Task AutostartTabs_ASemicolonInTheHostName_IsEscapedInTheLaunchedArguments()
+    public async Task AutostartTabs_AreSelectedByTheKeyGuid_NotByADisplayNameThatNeedsEscaping()
     {
         var launcher = new FakeTerminalTabLauncher();
         await using var harness = new Harness(
@@ -1018,7 +1022,7 @@ public sealed class StartupOrchestratorTests
 
         await harness.StartAsync();
 
-        Assert.Equal(["-w", "0", "new-tab", "-p", @"Prod\; Web"], Assert.Single(launcher.Calls));
+        Assert.Equal(["-w", "0", "new-tab", "-p", TerminalProfileArgument.For("nas")], Assert.Single(launcher.Calls));
     }
 
     // identity_file is a literal, non-existent path everywhere here -- the harness registers

@@ -26,8 +26,17 @@ public sealed class Win32ExternalLauncher : IExternalLauncher, ITerminalTabLaunc
     public void OpenTerminal(string hostKey)
     {
         ArgumentException.ThrowIfNullOrEmpty(hostKey);
-        Start("wt.exe", ["-w", "0", "new-tab", "-p", hostKey], useShellExecute: true);
+        Start("wt.exe", BuildOpenTerminalArguments(hostKey), useShellExecute: true);
     }
+
+    /// <summary>
+    /// The <c>wt.exe</c> arguments <see cref="OpenTerminal"/> launches: one new tab in the current
+    /// window, selecting the profile by its braced GUID (<see cref="TerminalProfileArgument"/>,
+    /// bs-4ic), not by name. Split out as a pure function so it can be tested without launching
+    /// <c>wt.exe</c>.
+    /// </summary>
+    public static IReadOnlyList<string> BuildOpenTerminalArguments(string hostKey) =>
+        WtAutostartArgumentBuilder.Build([TerminalProfileArgument.For(hostKey)]);
 
     public void RestoreClaudeSessions(IReadOnlyList<string> wtArguments)
     {

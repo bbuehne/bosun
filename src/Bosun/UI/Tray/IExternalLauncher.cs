@@ -10,12 +10,24 @@ namespace Bosun.UI.Tray;
 public interface IExternalLauncher
 {
     /// <summary>
-    /// Opens a new Windows Terminal tab for <paramref name="hostKey"/>, using the exact form
-    /// CLAUDE.md's definition-of-done and ADR-013 specify: <c>wt -w 0 new-tab -p "&lt;host&gt;"</c>,
-    /// where <c>&lt;host&gt;</c> is the host's stable config key (ADR-013 Decision 1) -- the same
-    /// identity the Terminal fragment writer (E7) used to name the profile, so this always opens
-    /// the profile Bosun generated for that host, never a guess built from display name or hostname.
+    /// Opens a new Windows Terminal tab for the host with config key <paramref name="hostKey"/>:
+    /// <c>wt -w 0 new-tab -p "{guid}"</c>, where <c>{guid}</c> is the braced profile GUID the
+    /// fragment writer derived from that key (<c>TerminalProfileArgument</c>, bs-4ic).
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The key is NOT the profile's name: the fragment names each profile after the host's
+    /// <c>display_name</c> and identifies it by a GUID derived from the key (ADR-013 Decision 2).
+    /// Passing the key to <c>-p</c> matched nothing whenever the two differed, and passing the
+    /// display name would break on rename. The GUID is the only stable handle.
+    /// </para>
+    /// <para>
+    /// Evidence that <c>-p</c> accepts a GUID: Microsoft's command-line page documents only names;
+    /// learn.microsoft.com/windows/terminal/customize-settings/actions says the <c>newTab</c>
+    /// action's <c>profile</c> takes a "name or GUID"; and the maintainer verified the braced GUID
+    /// with <c>wt -p</c> on the real machine on 2026-11-02.
+    /// </para>
+    /// </remarks>
     void OpenTerminal(string hostKey);
 
     /// <summary>Opens an Explorer window rooted at <paramref name="drive"/> (e.g. <c>"P:\\"</c>).</summary>
