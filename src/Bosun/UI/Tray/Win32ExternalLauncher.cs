@@ -1,3 +1,4 @@
+using Bosun.Terminal;
 using Microsoft.Extensions.Logging;
 using Diag = System.Diagnostics;
 
@@ -13,7 +14,7 @@ namespace Bosun.UI.Tray;
 /// a real, visible Win32 process, so this is left unverified by an integration test in this
 /// delivery -- flagged as discovered follow-up work rather than silently skipped.
 /// </summary>
-public sealed class Win32ExternalLauncher : IExternalLauncher
+public sealed class Win32ExternalLauncher : IExternalLauncher, ITerminalTabLauncher
 {
     private readonly ILogger<Win32ExternalLauncher> _logger;
 
@@ -29,6 +30,17 @@ public sealed class Win32ExternalLauncher : IExternalLauncher
     }
 
     public void RestoreClaudeSessions(IReadOnlyList<string> wtArguments)
+    {
+        ArgumentNullException.ThrowIfNull(wtArguments);
+        if (wtArguments.Count == 0)
+        {
+            throw new ArgumentException("wt.exe arguments are required.", nameof(wtArguments));
+        }
+
+        Start("wt.exe", wtArguments, useShellExecute: true);
+    }
+
+    public void OpenTabs(IReadOnlyList<string> wtArguments)
     {
         ArgumentNullException.ThrowIfNull(wtArguments);
         if (wtArguments.Count == 0)

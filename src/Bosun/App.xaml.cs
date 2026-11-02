@@ -62,6 +62,11 @@ public partial class App : Application
     // and shared with the host so the watchdog's restart and OnExit use one deadline.
     private readonly ShutdownGuard _shutdownGuard;
 
+    // bs-e28: how this process was started, read from the command line at the top of OnStartup. The
+    // host is built lazily (BootstrapOrchestrator.TryCreateHost) after that, so the factory lambda
+    // above sees the real value; the default (Manual) is the safe one -- it opens no Terminal tabs.
+    private LaunchContext _launchContext = LaunchContext.Manual;
+
     private IHost? _host;
     private ILogger<App>? _logger;
 
@@ -88,7 +93,9 @@ public partial class App : Application
             () => _logger,
             message => _bootstrap?.RecordPreLoggerFailure(message, null));
         _bootstrap = new BootstrapOrchestrator(
-            () => BosunHostFactory.CreateHost(shutdownGuard: _shutdownGuard),
+            () => BosunHostFactory.CreateHost(
+                BosunHostOptions.CreateDefault() with { OpenAutostartTerminalTabs = _launchContext.OpensAutostartTerminalTabs() },
+                shutdownGuard: _shutdownGuard),
             new MessageBoxCatastrophicStartupNotifier(),
             new BootstrapDiagnosticSink(),
             _singleInstanceGuard);
@@ -97,6 +104,8 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        _launchContext = LaunchContextDetector.Detect(e.Args);
 
         // bs-6to / ADR-020 Consequences: a Bosun that the watchdog launched to replace a stalled one
         // starts while the old one still holds the single-instance mutex, so it waits -- boundedly --
@@ -346,7 +355,7 @@ public partial class App : Application
         SingleInstance.ActivationRequested += (_, _) =>
             Dispatcher.BeginInvoke(() => _mainWindowController?.ShowAndActivate());
 
-        _mainWindowController.Initialize(LaunchContextDetector.Detect(args));
+        _mainWindowController.Initialize(_launchContext);
     }
 
     protected override void OnExit(ExitEventArgs e)

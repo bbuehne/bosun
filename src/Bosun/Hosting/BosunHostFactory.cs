@@ -12,6 +12,7 @@ using Bosun.Supervisor;
 using Bosun.SystemEventIntegration;
 using Bosun.Terminal;
 using Bosun.UI;
+using Bosun.UI.Tray;
 using Bosun.Watchdog;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -295,6 +296,12 @@ public static class BosunHostFactory
         builder.Services.AddSingleton<IDiagnosticsPresenter>(sp => sp.GetRequiredService<DispatchedDiagnosticsPresenter>());
         builder.Services.AddDiagnosticsBundle(
             options.LogDirectory, options.ConfigPath, BootstrapDiagnosticSink.DefaultFallbackFilePath);
+
+        // bs-e28: the seam StartupOrchestrator uses to open the autostart Terminal tabs. Constructing
+        // it starts nothing; it is only called when options.OpenAutostartTerminalTabs is set, which
+        // App does for the Run-key launch alone. Tests that build a host leave the flag false.
+        builder.Services.AddSingleton<ITerminalTabLauncher>(sp =>
+            new Win32ExternalLauncher(sp.GetRequiredService<ILogger<Win32ExternalLauncher>>()));
 
         // ADR-012 Decision 1/bs-6f9: the one hosted service that owns the ordered startup
         // sequence. Gated by registerStartupOrchestrator so tests can build/start a host without

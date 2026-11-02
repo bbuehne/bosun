@@ -105,6 +105,7 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
     private readonly IAppHealthReporter? health;
     private StartupReadiness current = StartupReadiness.Initial;
     private bool stopped;
+    private bool autostartTabsAttempted;
 
     /// <summary>Set once, in step 2 of <see cref="RunSequenceAsync"/>, and read afterwards by
     /// every later push of <see cref="MountingAvailability"/> (bs-yvw.1) -- WinFsp presence is
@@ -335,6 +336,12 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
             }
         }
 
+        // Step 1c (bs-e28): open the session.autostart Terminal tabs, once, only for a Run-key launch.
+        // Directly after the fragment write because the tabs open profiles that file defines, and
+        // before rclone because tabs are independent of mounting (ADR-008): nothing here waits for
+        // rcd, a probe or a mount, and a failure here never reaches them.
+        OpenAutostartTerminalTabs(fragmentWritten);
+
         // Step 2: detect WinFsp. Independent of config -- always runs, always reported accurately,
         // regardless of what step 1 produced (ADR-012's fail-soft principle: a failed step
         // disables what depends on it and leaves everything else running). Wrapped for the same
@@ -453,6 +460,54 @@ public sealed class StartupOrchestrator : IHostedService, IAsyncDisposable
                     ex, "Failed to subscribe to system power/network/session events; suspend/resume/network-change " +
                     "reactions are disabled this session");
             }
+        }
+    }
+
+    /// <summary>
+    /// bs-e28: <c>session.autostart</c> opens a tab only when Bosun starts from the Run key at Windows
+    /// login (<see cref="BosunHostOptions.OpenAutostartTerminalTabs"/>). Not on a manual start, a
+    /// watchdog restart or a user restart; not on a config reload (this is called from
+    /// <see cref="RunSequenceAsync"/> only, never from a ConfigChanged handler); and only if the
+    /// fragment write succeeded, because the tabs open profiles that file defines. Never throws.
+    /// </summary>
+    private void OpenAutostartTerminalTabs(bool fragmentWritten)
+    {
+        if (!options.OpenAutostartTerminalTabs)
+        {
+            return;
+        }
+
+        // Once per process. The sequence runs once, so this is belt and braces: a second tab set
+        // would be a visible duplicate the user has to close by hand.
+        if (autostartTabsAttempted)
+        {
+            return;
+        }
+
+        autostartTabsAttempted = true;
+
+        if (!fragmentWritten)
+        {
+            logger.LogWarning(
+                "Skipping the session.autostart Terminal tabs: the Terminal fragment was not written, so the " +
+                "profiles they would open may not exist");
+            return;
+        }
+
+        try
+        {
+            var launcher = services.GetService<ITerminalTabLauncher>();
+            if (launcher is null)
+            {
+                logger.LogWarning("Skipping the session.autostart Terminal tabs: no Terminal launcher is registered");
+                return;
+            }
+
+            new AutostartTerminalTabs(launcher, logger).Open(configStore!.Current);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Could not open the session.autostart Terminal tabs; continuing without them");
         }
     }
 

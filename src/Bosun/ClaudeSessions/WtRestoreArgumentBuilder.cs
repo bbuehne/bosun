@@ -167,5 +167,5 @@ public static class WtRestoreArgumentBuilder
         return trimmed[(trimmed.LastIndexOfAny(['\\', '/']) + 1)..];
     }
 
-    private static string EscapeSemicolons(string value) => value.Replace(";", "\\;", StringComparison.Ordinal);
+    internal static string EscapeSemicolons(string value) => value.Replace(";", "\\;", StringComparison.Ordinal);
 }

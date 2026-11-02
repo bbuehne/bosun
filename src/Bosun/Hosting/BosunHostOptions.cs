@@ -38,6 +38,16 @@ public sealed record BosunHostOptions
     public string? LogLevel { get; init; }
 
     /// <summary>
+    /// True when this process was started from the Run key at Windows login, which is the only time
+    /// <c>hosts.&lt;key&gt;.session.autostart</c> opens a Terminal tab (bs-e28). False by default, so
+    /// a manual start, a watchdog restart and a user restart open nothing, and so does every test
+    /// that builds options without saying otherwise. Set by <c>App</c> from
+    /// <c>LaunchContext.OpensAutostartTerminalTabs()</c>; it is a plain flag, not the launch context
+    /// itself, so this layer does not depend on the UI layer.
+    /// </summary>
+    public bool OpenAutostartTerminalTabs { get; init; }
+
+    /// <summary>
     /// The options Bosun uses at real runtime: both logs and config under
     /// <c>%LOCALAPPDATA%\Bosun</c> (ADR-012 Decision 4; docs/OPERATIONS.md "Logs" and
     /// "Configuration").
