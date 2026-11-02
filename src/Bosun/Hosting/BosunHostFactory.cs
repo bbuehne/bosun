@@ -81,6 +81,11 @@ public static class BosunHostFactory
         {
             serilogLogger.Warning("{Problem}", logLevelProblem);
         }
+#if DEBUG
+        // bs-uzk: first thing in the log after the level, so a reader never mistakes an injected
+        // fault for a real one. One Warning per active fault; nothing when none is.
+        options.DebugFaults.LogActive(serilogLogger);
+#endif
 
         var builder = Host.CreateApplicationBuilder();
 
@@ -166,7 +171,21 @@ public static class BosunHostFactory
                 // TaskCanceledException -- the exception that silently killed the supervisor loop.
                 Timeout = Timeout.InfiniteTimeSpan,
             };
-            return new RcloneClient(httpClient, sp.GetRequiredService<RcloneRcCredential>());
+            IRcloneClient client = new RcloneClient(httpClient, sp.GetRequiredService<RcloneRcCredential>());
+#if DEBUG
+            // bs-uzk: Debug builds only, and only when BOSUN_FAULT named it. Decorates the client the
+            // supervisor, the rcd process service and the diagnostics all share; see the class remarks.
+            if (options.DebugFaults.Has(Bosun.Diagnostics.FaultInjection.DebugFault.RcdUnavailableAtResume))
+            {
+                client = new Bosun.Diagnostics.FaultInjection.FaultInjectingRcloneClient(
+                    client,
+                    sp.GetRequiredService<ISystemEventSource>(),
+                    TimeProvider.System,
+                    options.DebugFaults.RcdUnavailableDuration,
+                    sp.GetRequiredService<ILogger<Bosun.Diagnostics.FaultInjection.FaultInjectingRcloneClient>>());
+            }
+#endif
+            return client;
         });
 
         builder.Services.AddSingleton<IRcloneRemoteProvisioner, RcloneRemoteProvisioner>();
@@ -251,13 +270,25 @@ public static class BosunHostFactory
         // type (StartupOrchestrator needs RunAsync, which is deliberately not on IMountSupervisor
         // -- see its class remarks) and the interface (for future consumers, e.g. the tray UI,
         // that only need commands/snapshots and should not see RunAsync at all).
-        builder.Services.AddSingleton(sp => new MountSupervisor(
-            sp.GetRequiredService<IHostConfigStore>(),
-            sp.GetRequiredService<IRcloneClient>(),
-            sp.GetRequiredService<IProbe>(),
-            new DriveInfoDriveTypeReader(),
-            TimeProvider.System,
-            sp.GetRequiredService<ILogger<MountSupervisor>>()));
+        builder.Services.AddSingleton(sp =>
+        {
+#if DEBUG
+            // bs-uzk (T12): fails where StartupOrchestrator resolves the supervisor, AND where the UI's
+            // dependency resolver does, so the real bs-4js path runs: red tray, the failure banner, an
+            // empty host list, and a diagnostics bundle whose hosts section reads "unavailable".
+            if (options.DebugFaults.Has(Bosun.Diagnostics.FaultInjection.DebugFault.SupervisorStart))
+            {
+                throw Bosun.Diagnostics.FaultInjection.DebugFaultSettings.CreateSupervisorStartException();
+            }
+#endif
+            return new MountSupervisor(
+                sp.GetRequiredService<IHostConfigStore>(),
+                sp.GetRequiredService<IRcloneClient>(),
+                sp.GetRequiredService<IProbe>(),
+                new DriveInfoDriveTypeReader(),
+                TimeProvider.System,
+                sp.GetRequiredService<ILogger<MountSupervisor>>());
+        });
         builder.Services.AddSingleton<IMountSupervisor>(sp => sp.GetRequiredService<MountSupervisor>());
 
         // E6 (bs-0wz/bs-ohk): constructing a Win32SystemEventSource does no I/O and subscribes to
