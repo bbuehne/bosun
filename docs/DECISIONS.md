@@ -1920,7 +1920,7 @@ retried. The maintainer decided on 2026-11-01 that both keep the record.
    system is suspended (rule 5, `bs-bv0`); a suspension with a record waiting keeps the record
    and resume resolves it.
 
-**How it is detected, and what I chose.** The supervisor keeps no new state machine edge. The
+**How it is detected.** The supervisor keeps no new state machine edge. The
 record stays on the host's runtime; one flag, `rcdAnswering`, remembers whether the last
 `core/version` call succeeded. The gate "has cleared" when any of these happens:
 
