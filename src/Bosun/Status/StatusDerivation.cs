@@ -218,6 +218,15 @@ public static class StatusDerivation
     /// unmount-on-failure machinery is already handling it without the user needing to act.
     /// </para>
     /// <para>
+    /// <b>A mounted host with files that failed to upload
+    /// (<see cref="StatusCategory.UploadsFailing"/>, rclone <c>erroredFiles &gt; 0</c>) is
+    /// <see cref="AggregateHealth.Degraded"/>.</b> Maintainer decision 2026-11-02 (bs-t12), reversing
+    /// the original bs-obf reading that kept this on the row alone: the drive works, but data the user
+    /// believes is saved is not reaching the host, and a row nobody has the window open to read is
+    /// easy to miss. Degraded, not Error -- the mount is healthy and the supervisor holds the drive up
+    /// so the files are not lost. The tray tooltip names the host; there is no toast.
+    /// </para>
+    /// <para>
     /// <b><see cref="StatusCategory.Parked"/> and <see cref="StatusCategory.OnDemandIdle"/> never
     /// contribute anything.</b> ADR-015 and rule 6 are explicit that neither is a fault; an icon
     /// that turned amber because the user parked a drive on purpose would be exactly the
@@ -289,6 +298,13 @@ public static class StatusDerivation
         }
 
         if (row.State == MountState.Mounted && (row.ConsecutiveMountedFailures > 0 || row.ConsecutiveDeepProbeFailures > 0))
+        {
+            return AggregateHealth.Degraded;
+        }
+
+        // bs-t12 (maintainer decision 2026-11-02): rclone reports erroredFiles > 0, so data the user
+        // thinks is saved is not reaching the host. Amber, and TrayStatus names the host from this.
+        if (row.Category == StatusCategory.UploadsFailing)
         {
             return AggregateHealth.Degraded;
         }

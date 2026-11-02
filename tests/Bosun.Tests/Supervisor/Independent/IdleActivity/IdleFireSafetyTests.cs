@@ -241,12 +241,14 @@ public sealed class IdleFireSafetyTests
     }
 
     /// <summary>
-    /// "It is host-specific, so it is on the row, not in the app-wide banner, and it does not change
-    /// the tray icon." Bug: the new row category given a Degraded or Error contribution, turning
-    /// the tray icon amber for a condition rule 7 says belongs only on the row.
+    /// "It is host-specific, so it is on the row, not in the app-wide banner." The original bs-obf
+    /// text also said it "does not change the tray icon"; the maintainer reversed that on 2026-11-02
+    /// (bs-t12): failed uploads contribute Degraded, so the icon goes amber and the tooltip names the
+    /// host. Bug: the category given an Error contribution (red is for a drive the user is not
+    /// getting), or left at Healthy (data silently not reaching the host, nothing on the icon).
     /// </summary>
     [Fact]
-    public async Task Failed_uploads_do_not_change_the_aggregate_health()
+    public async Task Failed_uploads_make_the_aggregate_health_Degraded()
     {
         var harness = IdleActivityHarness.OnDemand(idleUnmountSeconds: 3600, mountedProbeIntervalSeconds: Interval);
         harness.Rclone.SetStats("Q:", Vfs.Stats(erroredFiles: 1));
@@ -257,7 +259,7 @@ public sealed class IdleFireSafetyTests
         var hostConfig = harness.Store.Current.Hosts["archive"];
         var row = StatusDerivation.DeriveRow(harness.Snapshot("archive"), hostConfig, sessionCount: 0);
         Assert.Contains("1 file failed to upload", row.StatusText, StringComparison.Ordinal);
-        Assert.Equal(AggregateHealth.Healthy, StatusDerivation.ContributionOf(row));
+        Assert.Equal(AggregateHealth.Degraded, StatusDerivation.ContributionOf(row));
     }
 
     /// <summary>

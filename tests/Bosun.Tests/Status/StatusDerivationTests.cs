@@ -390,6 +390,20 @@ public sealed class StatusDerivationTests
     }
 
     [Fact]
+    public void Aggregate_Error_still_wins_over_a_host_with_failed_uploads()
+    {
+        var rows = new[]
+        {
+            StatusDerivation.DeriveRow(MountedWithUploadFailures(2), OnDemandHost, 0),
+            StatusDerivation.DeriveRow(
+                Snapshot(state: MountState.Disabled, consecutiveMountFailures: 5, lastMountFailureReason: "x"),
+                PersistentHost, 0),
+        };
+
+        Assert.Equal(AggregateHealth.Error, StatusDerivation.DeriveAggregateHealth(rows));
+    }
+
+    [Fact]
     public void Aggregate_Degraded_for_a_persistent_host_merely_Unreachable()
     {
         var rows = new[]
@@ -619,11 +633,14 @@ public sealed class StatusDerivationTests
     }
 
     [Fact]
-    public void Upload_failures_do_not_make_the_aggregate_health_worse()
+    public void Upload_failures_make_the_aggregate_health_Degraded()
     {
-        // Host-specific, row-only (bs-obf): not a banner issue and not an icon change.
+        // Was "do not make the aggregate health worse" (bs-obf: row-only, no icon change). Reversed by
+        // the maintainer on 2026-11-02 (bs-t12): erroredFiles > 0 turns the icon amber. Still not a
+        // banner issue; that is the app-health model's, not the roll-up's.
         var rows = new[] { StatusDerivation.DeriveRow(MountedWithUploadFailures(2), OnDemandHost, 0) };
 
-        Assert.Equal(AggregateHealth.Healthy, StatusDerivation.DeriveAggregateHealth(rows));
+        Assert.Equal(StatusCategory.UploadsFailing, rows[0].Category);
+        Assert.Equal(AggregateHealth.Degraded, StatusDerivation.DeriveAggregateHealth(rows));
     }
 }

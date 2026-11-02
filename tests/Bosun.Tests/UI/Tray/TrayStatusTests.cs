@@ -1,3 +1,4 @@
+using Bosun.Configuration;
 using Bosun.Health;
 using Bosun.Status;
 using Bosun.Supervisor;
@@ -107,6 +108,40 @@ public sealed class TrayStatusTests
 
         Assert.Equal(AggregateHealth.Degraded, status.IconHealth);
         Assert.Equal("Bosun — Q: is not mounted -- host unreachable after 3 consecutive failed probes", status.Tooltip);
+    }
+
+    private static HostStatusRow UploadsFailing(string key = "archive", string drive = "Q:", int count = 2) =>
+        HostRowFactory.Row(
+            StatusCategory.UploadsFailing,
+            key,
+            displayName: char.ToUpperInvariant(key[0]) + key[1..],
+            drive,
+            state: MountState.Mounted,
+            mode: MountMode.OnDemand,
+            statusText: $"{drive} is mounted, but {count} files failed to upload");
+
+    [Fact]
+    public void A_host_with_failed_uploads_turns_the_icon_amber_and_the_tooltip_names_it()
+    {
+        // Maintainer decision 2026-11-02 (bs-t12). The roll-up the caller passes is derived from
+        // the same rows, so derive it here rather than hard-coding the expected level.
+        HostStatusRow[] rows = [HostRowFactory.Mounted(), UploadsFailing()];
+
+        var status = TrayStatus.Compose(StatusDerivation.DeriveAggregateHealth(rows), AppHealth.Healthy, rows);
+
+        Assert.Equal(AggregateHealth.Degraded, status.IconHealth);
+        Assert.Equal("Bosun — Q: is mounted, but 2 files failed to upload", status.Tooltip);
+    }
+
+    [Fact]
+    public void A_host_Error_outranks_failed_uploads_in_both_the_icon_and_the_tooltip()
+    {
+        HostStatusRow[] rows = [UploadsFailing(), HostRowFactory.MountFailing(times: 3, lastError: "x")];
+
+        var status = TrayStatus.Compose(StatusDerivation.DeriveAggregateHealth(rows), AppHealth.Healthy, rows);
+
+        Assert.Equal(AggregateHealth.Error, status.IconHealth);
+        Assert.Equal("Bosun — P: is not mounted -- mount failed 3 times; last error: x (+1 more)", status.Tooltip);
     }
 
     [Fact]

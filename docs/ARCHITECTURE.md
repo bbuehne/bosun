@@ -494,7 +494,10 @@ right before building any UI.
 
    **Failed uploads.** `diskCache.erroredFiles > 0` keeps the drive up (above) and is shown on
    that host's status row as "N files failed to upload". It is host-specific, so it is on
-   the row, not in the app-wide banner, and it does not change the tray icon.
+   the row, not in the app-wide banner. It does turn the tray icon amber (maintainer
+   decision 2026-11-02, bs-t12): the row contributes `Degraded` to the roll-up, and the tray
+   tooltip names the host through the same worst-row cause as any other contributor. It never
+   outranks an `Error` row, and there is no toast.
 
    **Known limit.** Re-browsing content rclone has cached, and re-reading files it has
    cached, do not touch any counter above and are invisible to rclone rc. They do **not**

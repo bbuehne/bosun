@@ -293,7 +293,9 @@ A healthy Bosun mount reads `Network` (`P:\ Network`). `Fixed` is a bug (Invaria
 `P: is mounted`, `P: unmounting...`, `P: is not mounted -- host unreachable after 3
 consecutive failed probes`, or `P: is not mounted -- on-demand; mount it from the
 tray when you need it`. The tray icon is green when healthy, amber when degraded,
-red when something is faulted. After a mounted drive is lost without anyone asking for
+red when something is faulted. A mounted drive with files that failed to upload
+(`Q: is mounted, but 2 files failed to upload`) is degraded: the icon is amber and
+its tooltip names the host. After a mounted drive is lost without anyone asking for
 it (the host failed its shallow or deep probe, or reconciliation found the mount gone
 and you did not cause that), the tray shows a notification that starts
 `<display name> was unmounted` and ends with the reason (the transition's trigger text).
