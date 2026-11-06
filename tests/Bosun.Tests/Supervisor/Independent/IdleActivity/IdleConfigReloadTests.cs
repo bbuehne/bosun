@@ -425,30 +425,23 @@ public sealed class IdleConfigReloadTests
         AssertTierChangeToOnDemandDrainsAt(reloadAt: 500, idle: 150, expected: 650);
 
     /// <summary>
-    /// Rule 7, reload bullet 3, short period: "... or reload + 2N when N is no longer than the
-    /// mounted-probe interval." N = 45 &lt;= 60, edit at +500: the doc says +590.
-    /// <para>
-    /// SKIPPED: the code drains at +545 (reload + N). The tier-change path re-arms only the idle
-    /// clock, not the mounted-probe timer, so the persistent mount's own probe tick at +540 takes
-    /// the baseline before the clock fires at +545. That is not a blind unmount (a baseline exists),
-    /// but it contradicts the doc's unconditional "reload + 2N". The 0 -&gt; N bullet earns its
-    /// reload + 2N by saying "the reload also re-arms the mounted-probe timer"; this bullet says
-    /// "the same no-baseline reading applies" without saying so. Which one is wrong -- the doc's
-    /// timing or the missing re-arm -- is for the orchestrator to decide (bs-05b report).
-    /// </para>
+    /// Rule 7, reload bullet 3, short period, probe first (bs-2t1): "this reload does not re-arm
+    /// the mounted-probe timer ... If that probe comes before the clock fires, an idle drive
+    /// unmounts at reload + N." N = 45 &lt;= 60, edit at +500: the persistent mount's own probe at
+    /// +540 takes the baseline before the clock fires at +545, so the drain is at +545. Bugs: the
+    /// tier change re-arms the probe timer (first probe +560, drain +590); the fire ignores the
+    /// baseline the +540 probe took.
     /// </summary>
-    [Fact(Skip = "bs-2t1 (needs-decision: fix code or doc), found by bs-05b: docs/ARCHITECTURE.md §4 rule 7, reload bullet 'persistent to on-demand' (\"an idle drive unmounts at reload + N, or reload + 2N when N is no longer than the mounted-probe interval\") expects +590 here; the code drains at +545 because a tier-change reload does not re-arm the mounted-probe timer, so the old cadence's +540 probe takes the baseline first.")]
-    public Task Changing_to_on_demand_with_a_period_no_longer_than_the_probe_interval_unmounts_at_reload_plus_2N() =>
-        AssertTierChangeToOnDemandDrainsAt(reloadAt: 500, idle: 45, expected: 590);
+    [Fact]
+    public Task Changing_to_on_demand_with_a_period_no_longer_than_the_probe_interval_unmounts_at_reload_plus_N_when_a_probe_comes_first() =>
+        AssertTierChangeToOnDemandDrainsAt(reloadAt: 500, idle: 45, expected: 545);
 
     /// <summary>
-    /// Rule 7, "Safety when the clock fires", on the persistent -&gt; on-demand path: "A clock that
-    /// fires with no earlier sample to compare against ... takes one and waits one more period."
-    /// N = 45, edit at +541: the clock fires at +586, and the first mounted probe after the reload
-    /// is at +600 (the persistent mount's own cadence) or +601 (a re-armed one) -- after the fire
-    /// either way, so the fire has no baseline and the drain is at +631 under both readings of the
-    /// question the skipped test above raises. Bug: the persistent mount brings no baseline into the
-    /// new tier and the first fire unmounts it blind.
+    /// Rule 7, reload bullet 3, short period, clock first: "If the clock fires first, it finds
+    /// nothing to compare with, records a baseline and waits one more period, and the drive
+    /// unmounts at reload + 2N." N = 45, edit at +541: the clock fires at +586, before the persistent
+    /// mount's next probe at +600, so the fire has no baseline and the drain is at +631. Bug: the
+    /// persistent mount brings no baseline into the new tier and the first fire unmounts it blind.
     /// </summary>
     [Fact]
     public Task Changing_to_on_demand_does_not_unmount_blind_when_the_clock_fires_before_any_sample() =>

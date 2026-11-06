@@ -620,10 +620,18 @@ right before building any UI.
    - *`persistent` to `on-demand`.* The mount is kept, not drained, and the idle clock is armed
      for the new tier at once, from the reload, when the new entry has `idle_unmount_seconds > 0`.
      A drive the user thought of as always-on can therefore unmount itself N seconds after the
-     reload. A persistent mount was never sampled, so the same no-baseline reading applies:
-     the first passing mounted probe takes the baseline, and an idle drive unmounts at
-     reload + N, or reload + 2N when N is no longer than the mounted-probe interval. (The
-     reverse, `on-demand` to `persistent`, disarms the clock.)
+     reload. A persistent mount was never sampled, so at the reload it has no baseline, and
+     the first passing mounted probe takes one. Unlike the `0` to N case, this reload does
+     **not** re-arm the mounted-probe timer (`bs-2t1`, decided 2026-11-06): the mount keeps
+     the probe cadence it already had, so the first probe after the reload comes anywhere from
+     just after it to one mounted-probe interval later. If that probe comes before the clock
+     fires, an idle drive unmounts at reload + N. If the clock fires first, it finds nothing to
+     compare with, records a baseline and waits one more period, and the drive unmounts at
+     reload + 2N. When N is longer than the interval, a probe always comes first, so it is
+     always reload + N; when N is no longer than the interval, which of the two happens
+     depends on where the probe cycle was at the reload. Either way the drive is never
+     unmounted without a baseline. (The reverse, `on-demand` to `persistent`, disarms the
+     clock.)
    - *An adopted mount.* A mount Bosun finds already running at startup is sampled and
      idle-unmounted like one it made itself. Adoption only accepts a mount whose `fs` equals
      `bosun-<key>:<remote_path>` for the current config, and the poll builds that same string

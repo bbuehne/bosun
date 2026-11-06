@@ -3616,6 +3616,11 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 // persistent needs any existing one disarmed (a persistent host must never
                 // auto-unmount on an idle timeout). ArmIdleUnmountTimer disposes whatever is
                 // already there before deciding, so one call is correct for both directions.
+                //
+                // The mounted-probe timer is deliberately NOT re-armed here (bs-2t1, decided
+                // 2026-11-06): the mount keeps its existing probe cadence, so a short idle period
+                // drains at reload + N or reload + 2N depending on probe phase (ARCHITECTURE §4
+                // rule 7). Re-arming would push the next dead-host check up to one interval later.
                 ArmIdleUnmountTimer(host);
             }
 
