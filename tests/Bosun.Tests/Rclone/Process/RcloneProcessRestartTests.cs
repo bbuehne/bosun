@@ -99,7 +99,7 @@ public sealed class RcloneProcessRestartTests
         newest.SimulateExit(1);
         await PumpAsync();
         Assert.Equal(RcloneProcessFaultKind.ProcessExitedUnexpectedly, h.Service.FaultKind);
-        await AdvanceAndWaitUntilAsync(h.Time, TimeSpan.FromSeconds(2), () => h.Service.Status == RcloneProcessStatus.Healthy);
+        await h.Time.AdvanceAndWaitUntilAsync(TimeSpan.FromSeconds(2), () => h.Service.Status == RcloneProcessStatus.Healthy);
 
         Assert.Equal(3, h.Launcher.StartCalls.Count);
         Assert.Equal(RcloneProcessStatus.Healthy, h.Service.Status);
@@ -118,7 +118,7 @@ public sealed class RcloneProcessRestartTests
         Assert.Equal(RcloneProcessFaultKind.LaunchFailed, h.Service.FaultKind);
 
         // The launcher then hands out a healthy handle: the loop's retry is what recovers.
-        await AdvanceAndWaitUntilAsync(h.Time, TimeSpan.FromSeconds(5), () => h.Service.Status == RcloneProcessStatus.Healthy);
+        await h.Time.AdvanceAndWaitUntilAsync(TimeSpan.FromSeconds(5), () => h.Service.Status == RcloneProcessStatus.Healthy);
         Assert.Equal(RcloneProcessStatus.Healthy, h.Service.Status);
         Assert.Equal(3, h.Launcher.StartCalls.Count);
     }
@@ -303,17 +303,6 @@ public sealed class RcloneProcessRestartTests
         for (var i = 0; i < 64; i++)
         {
             await Task.Yield();
-        }
-    }
-
-    private static async Task AdvanceAndWaitUntilAsync(FakeTimeProvider time, TimeSpan delta, Func<bool> condition)
-    {
-        time.Advance(delta);
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        while (!condition() && DateTime.UtcNow < deadline)
-        {
-            await Task.Delay(5).ConfigureAwait(false);
         }
     }
 }

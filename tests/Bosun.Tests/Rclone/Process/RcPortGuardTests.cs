@@ -75,12 +75,12 @@ public sealed class RcPortGuardTests
         var task = h.Guard.EnsureFreeAsync(CancellationToken.None);
 
         // Still not exited: the guard must be waiting on the injected clock, not returning.
-        await AdvanceUntilCompleteAsync(task, h.Time, TimeSpan.FromMilliseconds(100), maxAdvance: TimeSpan.FromSeconds(2));
+        await h.Time.AdvanceStepsAsync(TimeSpan.FromMilliseconds(100), steps: 20);
         Assert.False(task.IsCompleted);
 
         // Now it exits; the next poll sees it.
         h.Terminator.ExitsAfterKill = true;
-        await AdvanceUntilCompleteAsync(task, h.Time, TimeSpan.FromMilliseconds(100), maxAdvance: TimeSpan.FromSeconds(5));
+        await h.Time.AdvanceUntilCompleteAsync(task, TimeSpan.FromMilliseconds(100));
         Assert.Equal(RcPortCheckOutcome.StaleRcdKilled, (await task.WaitAsync(TimeSpan.FromSeconds(5))).Outcome);
     }
 
@@ -93,11 +93,16 @@ public sealed class RcPortGuardTests
         h.Terminator.ExitsAfterKill = false;
 
         var task = h.Guard.EnsureFreeAsync(CancellationToken.None);
-        await AdvanceUntilCompleteAsync(task, h.Time, TimeSpan.FromMilliseconds(100), maxAdvance: TimeSpan.FromSeconds(10));
+        await h.Time.AdvanceUntilCompleteAsync(task, TimeSpan.FromMilliseconds(100));
         var result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(RcPortCheckOutcome.HeldByOtherProcess, result.Outcome);
         Assert.Contains(StalePid.ToString(), result.Message);
+
+        // Exits are checked at t = 0, 100 ms ... 1.0 s on the fake clock; the check at 1.0 s finds
+        // no room for another poll and gives up. Exact because the driver steps only when the
+        // guard's delay timer is armed (bs-pfc).
+        Assert.Equal(11, h.Terminator.HasExitedCalls);
     }
 
     [Fact]
@@ -218,21 +223,6 @@ public sealed class RcPortGuardTests
 
         var text = h.Guard.DescribeHolder();
         Assert.Equal(@"port 5572 is held by PID 4242 (C:\x\rclone.exe)", text);
-    }
-
-    /// <summary>Same shape as <c>RcloneProcessServiceTests.AdvanceUntilCompleteAsync</c>: offers the
-    /// injected clock repeatedly (bounded) until the task finishes. The brief real-time yield is
-    /// harness synchronisation for the thread-pool hop after a timer fires, not simulated timing.</summary>
-    private static async Task AdvanceUntilCompleteAsync(Task task, FakeTimeProvider time, TimeSpan step, TimeSpan maxAdvance)
-    {
-        var advanced = TimeSpan.Zero;
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        while (!task.IsCompleted && advanced < maxAdvance && DateTime.UtcNow < deadline)
-        {
-            time.Advance(step);
-            advanced += step;
-            await Task.Delay(5).ConfigureAwait(false);
-        }
     }
 
     private sealed class Harness
