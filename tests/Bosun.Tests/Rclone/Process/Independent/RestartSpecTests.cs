@@ -391,31 +391,32 @@ public sealed class RestartSpecTests
         Assert.True(condition(), $"{failure}.{Environment.NewLine}{f.Log.Dump(mark)}");
     }
 
-    /// <summary>Advances the fake clock one <see cref="RestartDelay"/> at a time until the
-    /// condition holds. The delay timer may be registered after any given advance, so a single
-    /// advance is not enough (see RcloneProcessServiceTests.AdvanceUntilCompleteAsync).</summary>
+    /// <summary>Steps the fake clock one second at a time, each step only once the supervise loop
+    /// has armed its delay timer (see <see cref="FakeTimeDriver"/>), until the condition holds.</summary>
     private static async Task AdvanceUntilAsync(Fixture f, Func<bool> condition, string failure, int mark)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (!condition())
+        try
         {
-            if (DateTime.UtcNow > deadline)
-            {
-                Assert.Fail($"{failure}.{Environment.NewLine}{f.Log.Dump(mark)}");
-            }
-
-            f.Time.Advance(TimeSpan.FromSeconds(1));
-            await Task.Delay(5);
+            await f.Time.AdvanceUntilAsync(condition, TimeSpan.FromSeconds(1));
+        }
+        catch (TimeoutException)
+        {
+            Assert.Fail($"{failure}.{Environment.NewLine}{f.Log.Dump(mark)}");
         }
     }
 
+    /// <summary>Steps the fake clock 500 ms at a time, each step only once a timer is armed, until
+    /// <paramref name="task"/> completes. A task that completes with no timer (the old rcd exits
+    /// at once) ends the drive immediately.</summary>
     private static async Task AdvanceUntilCompleteAsync(Fixture f, Task task)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (!task.IsCompleted && DateTime.UtcNow < deadline)
+        try
         {
-            f.Time.Advance(TimeSpan.FromMilliseconds(500));
-            await Task.Delay(5);
+            await f.Time.AdvanceUntilCompleteAsync(task, TimeSpan.FromMilliseconds(500));
+        }
+        catch (TimeoutException)
+        {
+            // The caller's assertions report that the task did not complete, with the log.
         }
     }
 }

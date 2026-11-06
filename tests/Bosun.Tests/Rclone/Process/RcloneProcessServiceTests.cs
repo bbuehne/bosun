@@ -121,7 +121,7 @@ public sealed class RcloneProcessServiceTests
         await service.StartAsync(CancellationToken.None);
         Assert.Equal(RcloneProcessFaultKind.LaunchFailed, service.FaultKind);
 
-        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(1), () => service.Status == RcloneProcessStatus.Healthy);
+        await time.AdvanceAndWaitUntilAsync(TimeSpan.FromSeconds(1), () => service.Status == RcloneProcessStatus.Healthy);
         Assert.Equal(RcloneProcessStatus.Healthy, service.Status);
 
         neverHealthyHandle.SimulateExit(1);
@@ -131,7 +131,7 @@ public sealed class RcloneProcessServiceTests
         Assert.Equal(3, launcher.StartCalls.Count);
 
         var stopTask = service.StopAsync(CancellationToken.None);
-        await AdvanceUntilCompleteAsync(stopTask, time, TimeSpan.FromMilliseconds(50));
+        await time.AdvanceUntilCompleteAsync(stopTask, TimeSpan.FromMilliseconds(50));
         await stopTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.NotEmpty(logger.CapturedText);
@@ -169,7 +169,7 @@ public sealed class RcloneProcessServiceTests
         Assert.Equal(RcloneProcessFaultKind.LaunchFailed, service.FaultKind);
         Assert.Single(launcher.StartCalls);
 
-        await AdvanceAndWaitUntilAsync(time, TimeSpan.FromSeconds(5), () => service.Status == RcloneProcessStatus.Healthy);
+        await time.AdvanceAndWaitUntilAsync(TimeSpan.FromSeconds(5), () => service.Status == RcloneProcessStatus.Healthy);
 
         Assert.Equal(2, launcher.StartCalls.Count);
         Assert.Equal(RcloneProcessStatus.Healthy, service.Status);
@@ -251,66 +251,11 @@ public sealed class RcloneProcessServiceTests
         // Must return (not hang) even though the handle never confirms HasExited -- StopAsync's
         // own TimeProvider-driven timer (in KillAndConfirmExitAsync) bounds the wait.
         var stopTask = service.StopAsync(CancellationToken.None);
-        await AdvanceUntilCompleteAsync(stopTask, time, TimeSpan.FromMilliseconds(50));
+        await time.AdvanceUntilCompleteAsync(stopTask, TimeSpan.FromMilliseconds(50));
         await stopTask.WaitAsync(TimeSpan.FromSeconds(1));
 
         Assert.Equal(1, handle.KillCallCount);
         Assert.Equal(RcloneProcessStatus.Stopped, service.Status);
-    }
-
-    /// <summary>
-    /// Repeatedly advances <paramref name="time"/> by <paramref name="step"/>, ceding real
-    /// thread-scheduling time between attempts, until <paramref name="task"/> completes or a
-    /// bounded real-time budget expires.
-    /// </summary>
-    /// <remarks>
-    /// Exists for exactly one reason: <c>RcloneProcessService.KillAndConfirmExitAsync</c>'s
-    /// TimeProvider-driven timeout timer is registered on whichever thread eventually resumes
-    /// <c>StopAsync</c>'s wait for the supervise loop to unwind, and that resumption is not
-    /// guaranteed to have happened on the calling thread before a single, immediate
-    /// <c>Advance()</c> call -- reliable when this test runs in isolation, intermittent under a
-    /// contended ThreadPool (observed empirically running the full 234-test suite in parallel).
-    /// A single premature <c>Advance()</c> can never retroactively catch a timer that did not
-    /// exist yet: <c>FakeTimeProvider</c> computes a new timer's due time from its clock AT
-    /// REGISTRATION, so advancing before registration only pushes that future due time further
-    /// out. The <c>Task.Delay</c> here is test-harness synchronization for that BCL scheduling
-    /// detail, not simulated business timing -- the production timeout duration itself remains
-    /// entirely driven by <paramref name="time"/>; this loop's only job is to keep offering the
-    /// timer a chance to fire once it exists.
-    /// </remarks>
-    /// <summary>
-    /// Advances <paramref name="time"/> by <paramref name="delta"/>, then waits -- on a bounded
-    /// real-time budget, polling the actual asserted condition rather than guessing how long to
-    /// wait -- until <paramref name="condition"/> is true.
-    /// </summary>
-    /// <remarks>
-    /// Exists for the same underlying reason as <see cref="AdvanceUntilCompleteAsync"/>, but for
-    /// state driven off <c>RcloneProcessService.SuperviseAsync</c>'s
-    /// <c>Task.Delay(TimeSpan, TimeProvider, CancellationToken)</c> await, which has no
-    /// caller-visible <see cref="Task"/> to await directly (<c>SuperviseAsync</c> is a detached
-    /// background loop). The BCL's TimeProvider-flavoured <c>Task.Delay</c> promise does not
-    /// guarantee its continuation resumes inline on the thread that fires the timer: firing the
-    /// timer synchronously inside <see cref="FakeTimeProvider.Advance"/> (as this test's
-    /// <c>Advance</c> call does) only queues the awaiting method's continuation onto the
-    /// <see cref="ThreadPool"/> -- it does not guarantee that continuation has actually run by the
-    /// time <c>Advance</c> returns. A fixed count of <c>Task.Yield()</c>s (the old
-    /// <c>PumpAsync</c>-based pattern this replaced) is a bet on how quickly the pool schedules
-    /// that already-queued work item, and loses that bet under a cold or contended pool --
-    /// reproduced empirically on the very first isolated run of
-    /// <see cref="LaunchFailed_retries_after_RestartDelay_and_can_then_become_Healthy"/> while
-    /// diagnosing bs-6oz. Polling the real asserted condition removes the bet without weakening
-    /// what is asserted: the assertions after this call are unchanged, only how long the test is
-    /// willing to wait for them to become true before failing on its own.
-    /// </remarks>
-    private static async Task AdvanceAndWaitUntilAsync(FakeTimeProvider time, TimeSpan delta, Func<bool> condition)
-    {
-        time.Advance(delta);
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        while (!condition() && DateTime.UtcNow < deadline)
-        {
-            await Task.Delay(5).ConfigureAwait(false);
-        }
     }
 
     /// <summary>
@@ -371,16 +316,6 @@ public sealed class RcloneProcessServiceTests
         var healthyAgain = WhenNextStatusAsync(service, RcloneProcessStatus.Healthy);
         time.Advance(restartDelay);
         await healthyAgain;
-    }
-
-    private static async Task AdvanceUntilCompleteAsync(Task task, FakeTimeProvider time, TimeSpan step)
-    {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        while (!task.IsCompleted && DateTime.UtcNow < deadline)
-        {
-            time.Advance(step);
-            await Task.Delay(5).ConfigureAwait(false);
-        }
     }
 
     private static (RcloneProcessService Service, FakeRcloneProcessLauncher Launcher, FakeRcloneClient Client, FakeTimeProvider Time, List<RcloneProcessStatus> StatusHistory) Create(

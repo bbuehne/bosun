@@ -32,7 +32,7 @@ public sealed class RcloneProcessFaultMessageTests
         }
 
         var start = f.Service.StartAsync(CancellationToken.None);
-        await f.AdvanceUntilCompleteAsync(start, TimeSpan.FromMilliseconds(250), HealthTimeout + TimeSpan.FromSeconds(5));
+        await f.Time.AdvanceUntilCompleteAsync(start, TimeSpan.FromMilliseconds(250));
         await start.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(RcloneProcessStatus.Faulted, f.Service.Status);
@@ -42,6 +42,10 @@ public sealed class RcloneProcessFaultMessageTests
         Assert.Contains("another rclone", f.Service.LastFaultMessage);
         Assert.DoesNotContain("did not respond", f.Service.LastFaultMessage);
         Assert.Equal(1, handle.KillCallCount);
+
+        // Polls land at t = 0, 250 ms ... 15.0 s on the fake clock; the one at 15.0 s ends the wait.
+        // The driver steps only when a delay timer is armed, so the count is exact (bs-pfc).
+        Assert.Equal(61, f.Client.GetVersionCalls.Count);
     }
 
     [Fact]
@@ -135,7 +139,8 @@ public sealed class RcloneProcessFaultMessageTests
 
         var start = f.Service.StartAsync(CancellationToken.None);
         // The first poll has failed and the service is now sleeping in its 250 ms poll delay.
-        await WaitUntilAsync(() => f.Client.GetVersionCalls.Count == 1);
+        await f.Time.WhenActiveTimerCountAtLeastAsync(1).WaitAsync(FakeTimeDriver.HangGuard);
+        Assert.Single(f.Client.GetVersionCalls);
         Assert.False(start.IsCompleted);
 
         handle.SimulateExit(3);
@@ -172,7 +177,7 @@ public sealed class RcloneProcessFaultMessageTests
         await f.Service.StartAsync(CancellationToken.None);
         Assert.Equal(RcloneProcessFaultKind.ProcessExitedBeforeHealthy, f.Service.FaultKind);
 
-        await f.AdvanceAndWaitUntilAsync(TimeSpan.FromSeconds(5), () => f.Service.Status == RcloneProcessStatus.Healthy);
+        await f.Time.AdvanceAndWaitUntilAsync(TimeSpan.FromSeconds(5), () => f.Service.Status == RcloneProcessStatus.Healthy);
 
         Assert.Equal(RcloneProcessStatus.Healthy, f.Service.Status);
         Assert.Equal(RcloneProcessFaultKind.None, f.Service.FaultKind);
@@ -213,7 +218,7 @@ public sealed class RcloneProcessFaultMessageTests
         Assert.Equal(1, f.Guard.EnsureFreeCalls);
         Assert.Empty(f.Launcher.StartCalls);
 
-        await f.AdvanceAndWaitUntilAsync(TimeSpan.FromSeconds(1), () => f.Service.Status == RcloneProcessStatus.Healthy);
+        await f.Time.AdvanceAndWaitUntilAsync(TimeSpan.FromSeconds(1), () => f.Service.Status == RcloneProcessStatus.Healthy);
 
         Assert.Equal(2, f.Guard.EnsureFreeCalls);
         Assert.Single(f.Launcher.StartCalls);
@@ -293,15 +298,6 @@ public sealed class RcloneProcessFaultMessageTests
         Assert.Equal(1, f.Guard.EnsureFreeCalls);
     }
 
-    private static async Task WaitUntilAsync(Func<bool> condition)
-    {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        while (!condition() && DateTime.UtcNow < deadline)
-        {
-            await Task.Delay(5).ConfigureAwait(false);
-        }
-    }
-
     private sealed class OrderRecordingLauncher(List<string> order) : IRcloneProcessLauncher
     {
         public IRcloneProcessHandle Start(RcloneProcessStartInfo startInfo)
@@ -335,23 +331,5 @@ public sealed class RcloneProcessFaultMessageTests
         public FakeTimeProvider Time { get; } = new();
         public FakeRcPortGuard Guard { get; } = new();
         public RcloneProcessService Service { get; }
-
-        public async Task AdvanceUntilCompleteAsync(Task task, TimeSpan step, TimeSpan maxAdvance)
-        {
-            var advanced = TimeSpan.Zero;
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-            while (!task.IsCompleted && advanced < maxAdvance && DateTime.UtcNow < deadline)
-            {
-                Time.Advance(step);
-                advanced += step;
-                await Task.Delay(1).ConfigureAwait(false);
-            }
-        }
-
-        public async Task AdvanceAndWaitUntilAsync(TimeSpan delta, Func<bool> condition)
-        {
-            Time.Advance(delta);
-            await WaitUntilAsync(condition).ConfigureAwait(false);
-        }
     }
 }

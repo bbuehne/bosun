@@ -31,7 +31,7 @@ public sealed class RcloneProcessLogVolumeTests
         }
 
         var start = f.Service.StartAsync(CancellationToken.None);
-        await AdvanceUntilCompleteAsync(f.Time, start, TimeSpan.FromMilliseconds(250));
+        await f.Time.AdvanceUntilCompleteAsync(start, TimeSpan.FromMilliseconds(250));
         await start.WaitAsync(TimeSpan.FromSeconds(5));
 
         // Polls land at t = 0, 250 ms, ... 15.0 s on the fake clock; the one at 15.0 s finds no room
@@ -63,7 +63,7 @@ public sealed class RcloneProcessLogVolumeTests
         // Then the queue is empty and the next poll succeeds.
 
         var start = f.Service.StartAsync(CancellationToken.None);
-        await AdvanceUntilCompleteAsync(f.Time, start, TimeSpan.FromMilliseconds(250));
+        await f.Time.AdvanceUntilCompleteAsync(start, TimeSpan.FromMilliseconds(250));
         await start.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(RcloneProcessStatus.Healthy, f.Service.Status);
@@ -179,28 +179,6 @@ public sealed class RcloneProcessLogVolumeTests
         Assert.Equal(3, warnings.Count); // the message, then reminders at attempts 41 and 81
         Assert.Equal(held, warnings[0].Message);
         Assert.Contains("still failing", warnings[1].Message, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// Steps the fake clock one poll interval at a time, but only once the code under test has armed
-    /// its next delay timer. Advancing before the timer exists moves the clock past a poll that has
-    /// not happened yet (bs-3gc: the old fixed-rate loop did that under load and lost polls from a
-    /// 15 s wait). The completion race is the other way round: the final poll may end the wait
-    /// without arming another timer, so each step waits for either.
-    /// </summary>
-    private static async Task AdvanceUntilCompleteAsync(FakeTimeProvider time, Task task, TimeSpan step)
-    {
-        while (!task.IsCompleted)
-        {
-            var armed = time.WhenActiveTimerCountAtLeastAsync(1);
-            var first = await Task.WhenAny(task, armed).WaitAsync(TimeSpan.FromSeconds(10));
-            if (first == task)
-            {
-                return;
-            }
-
-            time.Advance(step);
-        }
     }
 
     private sealed class Fixture
