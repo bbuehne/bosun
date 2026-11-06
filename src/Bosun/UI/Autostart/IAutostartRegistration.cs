@@ -48,13 +48,18 @@ public enum AutostartResult
 /// </remarks>
 public interface IAutostartRegistration
 {
-    /// <summary>Whether Bosun is currently registered to launch at login. Always derived from the
-    /// real registration state at call time -- see the interface remarks.</summary>
+    /// <summary>Whether Windows will actually launch Bosun at login: registered AND not disabled
+    /// by the user in Task Manager's "Startup apps" / Settings > Startup (bs-ojc.2). Always
+    /// derived from the real registration state at call time -- see the interface remarks.
+    /// </summary>
     bool IsEnabled();
 
     /// <summary>Registers Bosun to launch at login with
     /// <see cref="Bosun.UI.LaunchContextDetector.AutostartArgument"/>, targeting the currently
-    /// running executable's own path. Idempotent and self-healing -- see the interface remarks.
+    /// running executable's own path, and clears any Task Manager / Settings "disabled" override
+    /// (bs-ojc.2: this is an explicit user action in Bosun, so startup is genuinely on
+    /// afterwards; returns <see cref="AutostartResult.Failed"/> if the override cannot be
+    /// cleared). Idempotent and self-healing -- see the interface remarks.
     /// </summary>
     AutostartResult Enable();
 

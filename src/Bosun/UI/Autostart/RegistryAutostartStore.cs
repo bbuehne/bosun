@@ -43,6 +43,16 @@ namespace Bosun.UI.Autostart;
 /// met either way; only the OS mechanism underneath differs.
 /// </para>
 /// <para>
+/// <b>The Run value is not the whole story (bs-ojc.2).</b> Task Manager's "Startup apps" tab and
+/// Settings > Apps > Startup disable an entry WITHOUT removing it, by writing a <c>REG_BINARY</c>
+/// value of the same name under
+/// <c>HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run</c>. This class
+/// exposes that value (<see cref="GetStartupApprovedData"/>, <see cref="ClearStartupApproved"/>)
+/// so <see cref="AutostartRegistration"/> can report a disabled entry as not enabled, and so an
+/// explicit enable from Bosun's tray can undo it. It only reads and deletes that one value; it
+/// never writes an enabled/disabled marker itself.
+/// </para>
+/// <para>
 /// Never exercised by the default test suite: it is the one thing in this feature that reaches a
 /// real, persistent piece of OS state, matching every other "real implementation of an injectable
 /// seam" in this codebase (<c>Win32ExternalLauncher</c>, <c>Win32TcpConnectionReader</c>). A
@@ -53,6 +63,12 @@ namespace Bosun.UI.Autostart;
 public sealed class RegistryAutostartStore : IAutostartStore
 {
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    // Where Task Manager / Settings record a user's Enable/Disable of a Run entry (bs-ojc.2). Same
+    // value name as the Run value, REG_BINARY. Shell-startup shortcuts have an analogous
+    // StartupApproved\StartupFolder key; that is not used because Bosun registers under Run.
+    private const string StartupApprovedRunKeyPath =
+        @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 
     /// <summary>The default value name a real Bosun install registers under.</summary>
     public const string DefaultValueName = "Bosun";
@@ -81,6 +97,24 @@ public sealed class RegistryAutostartStore : IAutostartStore
     public void DeleteValue()
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+        key?.DeleteValue(_valueName, throwOnMissingValue: false);
+    }
+
+    public byte[]? GetStartupApprovedData()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(StartupApprovedRunKeyPath, writable: false);
+        return key?.GetValue(_valueName) switch
+        {
+            null => null,
+            byte[] bytes => bytes,
+            // Present but not REG_BINARY: not something Windows wrote. Report "present, unusable".
+            _ => [],
+        };
+    }
+
+    public void ClearStartupApproved()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(StartupApprovedRunKeyPath, writable: true);
         key?.DeleteValue(_valueName, throwOnMissingValue: false);
     }
 }
