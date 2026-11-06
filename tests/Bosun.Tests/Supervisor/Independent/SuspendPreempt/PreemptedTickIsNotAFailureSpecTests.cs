@@ -63,7 +63,7 @@ public sealed class PreemptedTickIsNotAFailureSpecTests
         if (onCancel == OnCancel.Ignore)
         {
             // The probe returns a real failure, but only after the suspend cancelled its token.
-            await WaitForAsync(() => hold.TokenCancelled, "the suspend never cancelled the running tick's token");
+            await PreemptSpecHarness.WaitForAsync(() => hold.TokenCancelled, "the suspend never cancelled the running tick's token");
             hold.Release(ShallowProbeOutcome.ConnectionRefused);
         }
 
@@ -201,15 +201,5 @@ public sealed class PreemptedTickIsNotAFailureSpecTests
         Assert.False(
             hold.CancelCallbackRanInsideSuspendCall,
             "the running tick's cancellation callbacks ran inline on the thread that called SuspendAsync (Cancel, not CancelAsync)");
-    }
-
-    private static async Task WaitForAsync(Func<bool> condition, string message)
-    {
-        var deadline = DateTime.UtcNow + PreemptSpecHarness.Guard;
-        while (!condition())
-        {
-            Assert.True(DateTime.UtcNow < deadline, message);
-            await Task.Yield();
-        }
     }
 }

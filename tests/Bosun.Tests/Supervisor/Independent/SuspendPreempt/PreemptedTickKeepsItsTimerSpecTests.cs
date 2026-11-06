@@ -31,6 +31,10 @@ public sealed class PreemptedTickKeepsItsTimerSpecTests
         var suspend = SuspendCaller.Call(h.Supervisor);
         if (hold.OnCancel == OnCancel.Ignore)
         {
+            // Ignore's case is a real outcome AFTER cancellation, so release only once the
+            // cancellation has reached the held call's token. Releasing earlier let the tick finish
+            // and dispose that token's source first, after which it is never cancelled (bs-3jd).
+            await PreemptSpecHarness.WaitForAsync(() => hold.TokenCancelled, $"the suspend never cancelled the token of {what}");
             hold.Release();
         }
 

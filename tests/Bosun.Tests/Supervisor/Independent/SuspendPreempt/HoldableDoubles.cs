@@ -81,7 +81,14 @@ internal sealed class Hold
 
     public bool IsPending => HasArrived && !outcome.Task.IsCompleted;
 
-    /// <summary>True if the token handed to the held call has been cancelled -- by anyone.</summary>
+    /// <summary>
+    /// True if the token handed to the held call has been cancelled -- by anyone. It becomes true
+    /// asynchronously after a suspend (the held call's token is linked to the tick's, and
+    /// <c>CancelAsync</c> runs the link's callback on the thread pool), and it stays false for good
+    /// if the call is released and its linked source disposed first. Wait for it with
+    /// <see cref="PreemptSpecHarness.WaitForAsync"/> before releasing an <see cref="OnCancel.Ignore"/>
+    /// hold (bs-3jd).
+    /// </summary>
     public bool TokenCancelled => HasArrived && Token.IsCancellationRequested;
 
     /// <summary>True if a cancellation callback on the held call's token ran synchronously inside a
