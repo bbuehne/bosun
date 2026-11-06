@@ -2,6 +2,7 @@ using Bosun.Probe;
 using Bosun.Rclone;
 using Bosun.Supervisor;
 using Bosun.Tests.Supervisor.Independent.Fakes;
+using Bosun.Tests.Supervisor.Support;
 
 namespace Bosun.Tests.Supervisor.Independent.SuspendPreempt;
 
@@ -87,9 +88,21 @@ internal sealed class Hold
     /// <c>CancelAsync</c> runs the link's callback on the thread pool), and it stays false for good
     /// if the call is released and its linked source disposed first. Wait for it with
     /// <see cref="PreemptSpecHarness.WaitForAsync"/> before releasing an <see cref="OnCancel.Ignore"/>
-    /// hold (bs-3jd).
+    /// hold (bs-3jd). For a check that the call was NOT cancelled, use
+    /// <see cref="CancellationRequested"/>: "still false" here proves nothing (bs-s30).
     /// </summary>
     public bool TokenCancelled => HasArrived && Token.IsCancellationRequested;
+
+    /// <summary>
+    /// True if cancellation has been REQUESTED for the held call: on its token, or on any source that
+    /// token is linked to (<see cref="TokenLineage"/>). Unlike <see cref="TokenCancelled"/>, this does
+    /// not wait for the thread pool. Once <c>SuspendAsync</c> has returned, a suspend that preempted
+    /// this call has already set it. Use it for NEGATIVE checks ("the suspend did not cancel this
+    /// call"), and read it while the call is still held: releasing the call lets the supervisor
+    /// dispose the linked source. <see cref="TokenCancelled"/> can pass such a check vacuously
+    /// (bs-s30).
+    /// </summary>
+    public bool CancellationRequested => HasArrived && TokenLineage.CancellationRequested(Token);
 
     /// <summary>True if a cancellation callback on the held call's token ran synchronously inside a
     /// <see cref="SuspendCaller.Call"/>.</summary>

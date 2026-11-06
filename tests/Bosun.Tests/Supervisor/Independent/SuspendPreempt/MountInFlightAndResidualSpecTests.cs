@@ -43,6 +43,9 @@ public sealed class MountInFlightAndResidualSpecTests
         Assert.Equal(MountState.Mounting, h.State("od"));
 
         var suspend = SuspendCaller.Call(h.Supervisor);
+
+        // Checked while the probe is still held: see Hold.CancellationRequested (bs-s30).
+        Assert.False(deep.CancellationRequested, "rule 5: the deep probe of rule 2 was preempted by a suspend");
         deep.Release(DeepProbeOutcome.Success);
         await h.FinishAsync(pump, "the mount command never finished", request, suspend);
 
@@ -80,6 +83,9 @@ public sealed class MountInFlightAndResidualSpecTests
         Assert.Equal(MountState.Mounting, h.State("pz"));
 
         var suspend = SuspendCaller.Call(h.Supervisor);
+
+        // Checked while the probe is still held: see Hold.CancellationRequested (bs-s30).
+        Assert.False(deep.CancellationRequested, "rule 5: the deep probe of rule 2 was preempted by a suspend, through the idle tick that began the mount");
         deep.Release(DeepProbeOutcome.Success);
         await h.FinishAsync(pump, "the idle tick never finished", suspend);
 
@@ -142,6 +148,9 @@ public sealed class MountInFlightAndResidualSpecTests
         await PreemptSpecHarness.ArrivedAsync(mount, "mount/mount");
 
         var suspend = SuspendCaller.Call(h.Supervisor);
+
+        // Checked while the call is still held: see Hold.CancellationRequested (bs-s30).
+        Assert.False(mount.CancellationRequested, "the suspend preempted a mount/mount that was already sent");
         mount.Release();
         await h.FinishAsync(pump, "the mount command never finished", request, suspend);
 
@@ -178,6 +187,9 @@ public sealed class MountInFlightAndResidualSpecTests
         Assert.Equal(MountState.Probing, h.State("nw"));
 
         var suspend = SuspendCaller.Call(h.Supervisor);
+
+        // Checked while the probe is still held: see Hold.CancellationRequested (bs-s30).
+        Assert.False(probe.CancellationRequested, "the suspend preempted an enable's probe");
         probe.Release(ShallowProbeOutcome.Success);
         await h.FinishAsync(pump, "the config change never finished", change, suspend);
 
@@ -207,6 +219,9 @@ public sealed class MountInFlightAndResidualSpecTests
         await PreemptSpecHarness.ArrivedAsync(probe, "the network change's forced shallow probe");
 
         var suspend = SuspendCaller.Call(h.Supervisor);
+
+        // Checked while the probe is still held: see Hold.CancellationRequested (bs-s30).
+        Assert.False(probe.CancellationRequested, "the suspend preempted a command's probe");
         probe.Release(ShallowProbeOutcome.Success);
         await h.FinishAsync(pump, "the network change never finished", change, suspend);
 

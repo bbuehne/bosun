@@ -660,7 +660,9 @@ public sealed class RemountAfterResumeTests
         Assert.Equal(MountState.Mounting, h.State(Key));
 
         var suspendTask = h.Supervisor.SuspendAsync();
-        Assert.False(h.TimedRclone.MountToken.IsCancellationRequested, "a suspend must not cancel mount/mount");
+        // TokenLineage, not the token's own flag: the suspend's CancelAsync reaches a linked token only
+        // when the thread pool runs the link, so "not cancelled yet" would prove nothing (bs-s30).
+        Assert.False(TokenLineage.CancellationRequested(h.TimedRclone.MountToken), "a suspend must not cancel mount/mount");
         h.TimedRclone.ReleaseMount();
 
         await pump;
