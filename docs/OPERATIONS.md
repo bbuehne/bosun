@@ -514,9 +514,11 @@ possibly kill the SSH channel under the mount. Use **30 s**. Run both variants.
    **Expected:** at most `Mounted probe failed for <key> (...): 1/3 consecutive failures`
    (or 2/3, never 3/3 if the interruption was under `U`), and no drain from the
    shallow probe. The mount then either kept working (pass) or has a dead channel
-   under it, which only the deep probe can find: T7's rule applies, so it must be
-   drained within `2D` of the link returning. Do not browse the drive while you wait.
-6. Five minutes after the link returned: window row, then the drive check, then the marker.
+   under it, which only the deep probe can find: T7's rule applies, so its
+   `Mounted -> Draining` line must come within `2D + 2P` of the link returning (610 s
+   with defaults; ADR-016's 2026-11-02 amendment). Do not browse the drive while you wait.
+6. Five minutes after the link returned (route A2 with a drain: once the remount that
+   follows the drain has happened): window row, then the drive check, then the marker.
    **Expected:** the row reads `P: is mounted`, the drive check prints `ANSWERED`,
    `t2a-before.txt` reads back intact.
 
@@ -528,19 +530,20 @@ desktop's link never drops.
    **Expected:** no `network address changed` line (the desktop saw nothing). The
    shallow probe sees at most a failure or two: `Mounted probe failed for <key>
    (...): 1/3 consecutive failures`, then silence once the host answers again.
-8. After the cable is back, wait up to `2D` (10 minutes by default), watching only
+8. After the cable is back, wait up to `2D + 2P` (610 s with defaults), watching only
    the window row and the log. Then the drive check and the marker.
    **Expected, either of:** the mount kept working, so no further warnings and the drive check
    prints `ANSWERED`; **or** the channel died, so warnings
    `Deep probe failed for mounted host <key> (...): 1/2 consecutive deep-probe
    failures`, then `2/2`, then `Mounted -> Draining (trigger: 2 consecutive
-   deep-probe failures while mounted ...)`, then a remount, all within `2D` of the
-   cable coming back.
+   deep-probe failures while mounted ...)` within `2D + 2P` of the cable coming back,
+   then a remount.
 
 **PASS** when, for both variants: Explorer stayed responsive wherever you tested it;
-no present-but-unanswering drive outlasted `2D` after the link returned; and five
-minutes after the link returned (ten for variant B if a drain was needed) the host
-was `Mounted`, the drive check `ANSWERED` and the marker intact. **FAIL** otherwise. Which of A1
+no present-but-unanswering drive outlasted `2D + 2P` after the link returned; and five
+minutes after the link returned (if a drain was needed, once the remount that follows it
+has happened) the host was `Mounted`, the drive check `ANSWERED` and the marker intact.
+**FAIL** otherwise. Which of A1
 or A2 happened, and whether B's mount survived, go in the notes: they are findings
 about your network, not pass or fail.
 

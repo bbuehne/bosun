@@ -14,17 +14,16 @@ public sealed class SuspendResumeAcceptanceTests
     /// <summary>
     /// Automated end to end, the T1 resume side where the network is not up at wake (docs/OPERATIONS.md
     /// T1 step 6): a LAN host is mounted, the machine suspends, wakes with the host unreachable, and
-    /// the network later returns. The test name keeps the retired laptop framing (a different network
-    /// at wake); the behaviour pinned is the same.
+    /// the network later returns.
     /// </summary>
     /// <remarks>
     /// Three separate ways to fail this, each a real bug: remounting on resume without re-probing
-    /// (a wedged drive letter on the new network); leaving the host parked so that returning to the
-    /// LAN needs manual intervention; and waiting out the backoff ladder after the network address
-    /// changes instead of probing immediately.
+    /// (a wedged drive letter pointing at a host that does not answer); leaving the host parked so
+    /// that the network coming back needs manual intervention; and waiting out the backoff ladder
+    /// after the network address changes instead of probing immediately.
     /// </remarks>
     [Fact]
-    public async Task T2_lid_closed_on_one_network_and_opened_on_another_leaves_no_mount_and_recovers_on_return()
+    public async Task T1_wake_before_the_network_is_up_leaves_no_mount_and_recovers_when_it_returns()
     {
         var lan = HostFixtures.Persistent("lan-nas", probeIntervalSeconds: 0, drive: "L:");
         var harness = new IndependentHarness(HostFixtures.Build(HostFixtures.Global(), lan));
@@ -32,12 +31,12 @@ public sealed class SuspendResumeAcceptanceTests
         await harness.StartAsync();
         Assert.Equal(MountState.Mounted, harness.State("lan-nas"));
 
-        // Lid closes.
+        // The machine suspends.
         await harness.RunAsync(() => harness.Supervisor.SuspendAsync());
         Assert.Equal(MountState.Disabled, harness.State("lan-nas"));
         Assert.Equal(1, harness.Rclone.UnmountCount("L:"));
 
-        // Opened somewhere else: the LAN host does not answer.
+        // It wakes before the network is up: the host does not answer.
         harness.Probe.DefaultShallow = ShallowProbeOutcome.ConnectionRefused;
         await harness.RunAsync(() => harness.Supervisor.ResumeAsync());
 
@@ -45,7 +44,7 @@ public sealed class SuspendResumeAcceptanceTests
         Assert.Equal(1, harness.Rclone.TotalMountCalls); // no remount attempt at all
         Assert.Equal(1, harness.Probe.DeepCount("lan-nas")); // exactly the one from the original mount
 
-        // Time passes on the foreign network; the ladder retries and keeps failing, and at no point
+        // Time passes with the network still down; the ladder retries and keeps failing, and at no point
         // does a drive letter come back.
         for (var i = 0; i < 10; i++)
         {
@@ -55,7 +54,7 @@ public sealed class SuspendResumeAcceptanceTests
 
         Assert.Equal(1, harness.Rclone.TotalMountCalls);
 
-        // Back on the LAN. The address change must not wait out the 300s rung.
+        // The network comes up. The address change must not wait out the 300s rung.
         harness.Probe.DefaultShallow = ShallowProbeOutcome.Success;
         await harness.RunAsync(() => harness.Supervisor.NetworkChangedAsync());
 

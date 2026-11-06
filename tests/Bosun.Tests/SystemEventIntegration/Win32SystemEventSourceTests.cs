@@ -253,7 +253,7 @@ public sealed class Win32SystemEventSourceTests
         var fireCount = 0;
         source.NetworkAddressChanged += (_, _) => fireCount++;
 
-        // Simulates docking a laptop: adapter down, DHCP, adapter up -- three raw notifications
+        // Simulates one link flap (cable out and back in): adapter down, DHCP, adapter up -- three raw notifications
         // for one physical transition, each well inside the debounce window of the previous one.
         registrar.RaiseNetworkAddressChanged();
         time.Advance(TimeSpan.FromMilliseconds(200));

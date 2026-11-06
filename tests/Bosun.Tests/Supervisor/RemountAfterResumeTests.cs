@@ -274,7 +274,7 @@ public sealed class RemountAfterResumeTests
     public async Task The_idle_unmount_timer_starts_fresh_on_the_remount()
     {
         var h = await UserMountedAsync(idleUnmountSeconds: 600);
-        await h.AdvanceSecondsAsync(500); // 100 s from expiring when the lid closes
+        await h.AdvanceSecondsAsync(500); // 100 s from expiring when the machine suspends
         await h.SuspendAsync();
         await h.AdvanceAsync(TimeSpan.FromHours(1));
         await h.ResumeAsync();
