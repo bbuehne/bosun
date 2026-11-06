@@ -406,7 +406,9 @@ public sealed class SuspendPreemptionTests
         Assert.Equal(MountState.Draining, h.State("archive"));
 
         var suspend = h.Supervisor.SuspendAsync();
-        Assert.False(held.Token.IsCancellationRequested, "a suspend must not cancel a drain's mount/unmount");
+        // TokenLineage, not the token's own flag: the suspend's CancelAsync reaches a linked token only
+        // when the thread pool runs the link, so "not cancelled yet" would prove nothing (bs-s30).
+        Assert.False(TokenLineage.CancellationRequested(held.Token), "a suspend must not cancel a drain's mount/unmount");
         held.Release();
         await pump.WaitAsync(PreemptionHarness.Guard);
         await h.Pump();
@@ -414,7 +416,7 @@ public sealed class SuspendPreemptionTests
 
         Assert.Equal(MountState.Disabled, h.State("archive"));
         Assert.Equal(Causes(DrainCause.IdleTimeout), h.DrainCauses("archive"));
-        Assert.All(h.Rclone.UnmountTokens, token => Assert.False(token.IsCancellationRequested));
+        Assert.All(h.Rclone.UnmountTokens, token => Assert.False(TokenLineage.CancellationRequested(token)));
         Assert.Equal(1, h.RcloneFake.UnmountCallCountFor("Q:"));
     }
 
@@ -439,7 +441,8 @@ public sealed class SuspendPreemptionTests
         Assert.Equal(MountState.Mounting, h.State("dark"));
 
         var suspend = h.Supervisor.SuspendAsync();
-        Assert.False(held.Token.IsCancellationRequested, "a suspend must not cancel the deep probe of a mount");
+        // TokenLineage, not the token's own flag: see the drain test above (bs-s30).
+        Assert.False(TokenLineage.CancellationRequested(held.Token), "a suspend must not cancel the deep probe of a mount");
         held.Release();
         await pump.WaitAsync(PreemptionHarness.Guard);
         await h.Pump();

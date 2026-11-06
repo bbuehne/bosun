@@ -58,6 +58,9 @@ public sealed class MountGateWhilePendingSpecTests
 
         var route = queueRoute();
         var suspend = SuspendCaller.Call(h.Supervisor);
+
+        // Checked while the probe is still held: see Hold.CancellationRequested (bs-s30).
+        Assert.False(hold.CancellationRequested, "a command's probe was preempted by the suspend (ADR-023 decision 4: commands are not preempted)");
         hold.Release(ShallowProbeOutcome.ConnectionRefused);
 
         await h.FinishAsync(pump, "the blocker never finished", blocker, route, suspend);
@@ -339,6 +342,7 @@ public sealed class MountGateWhilePendingSpecTests
         Assert.Equal(MountState.Draining, h.State("m1"));
 
         var suspend = SuspendCaller.Call(h.Supervisor);
+        Assert.False(unmount.CancellationRequested, "the suspend preempted a drain's mount/unmount (ADR-023 decision 4: drains are not preempted)");
         h.Probe.SetShallow(PreemptSpecHarness.HostnameOf("m1"), ShallowProbeOutcome.Success);
         var probesBefore = h.ShallowCalls("m1");
         unmount.Release();

@@ -139,7 +139,7 @@ public sealed class AdapterEndToEndSpecTests
             await Task.WhenAny(handled, Task.Delay(PreemptSpecHarness.Guard));
             Assert.True(handled.IsCompleted, "the budget did not bound the suspend handler");
             Assert.False(await handled, "the handler claimed the drain confirmed while the drain ahead of it was hung");
-            Assert.False(unmount.TokenCancelled, "the suspend cancelled a drain");
+            Assert.False(unmount.CancellationRequested, "the suspend cancelled a drain"); // pool-independent: bs-s30
 
             unmount.Release();
             await Task.WhenAny(userUnmount, Task.Delay(PreemptSpecHarness.Guard));

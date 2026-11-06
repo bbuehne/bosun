@@ -73,6 +73,9 @@ public sealed class RapidSuspendResumeSpecTests
 
         var s2 = SuspendCaller.Call(h.Supervisor);
         var r2 = h.Supervisor.ResumeAsync();
+
+        // Checked while the probe is still held: see Hold.CancellationRequested (bs-s30).
+        Assert.False(hold.CancellationRequested, "a resume (a command) had its probe preempted by the suspend");
         hold.Release(ShallowProbeOutcome.Success);
         await h.FinishAsync(pump, "resume #1 never finished", r1, s2, r2);
 
