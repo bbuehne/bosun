@@ -135,6 +135,22 @@ internal sealed class PreemptSpecHarness
     }
 
     /// <summary>Waits (guarded) for a held call to be reached.</summary>
+    /// <summary>
+    /// Yields until <paramref name="condition"/> holds, failing with <paramref name="message"/> after
+    /// <see cref="Guard"/>. For a held call's <see cref="Hold.TokenCancelled"/>: <c>CancelAsync</c>
+    /// (ADR-023 decision 2) cancels the tick's own token at once but reaches the token linked into
+    /// the held call only when the thread pool runs its callbacks (bs-3jd).
+    /// </summary>
+    public static async Task WaitForAsync(Func<bool> condition, string message)
+    {
+        var deadline = DateTime.UtcNow + Guard;
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, message);
+            await Task.Yield();
+        }
+    }
+
     public static async Task ArrivedAsync(Hold hold, string what)
     {
         try
