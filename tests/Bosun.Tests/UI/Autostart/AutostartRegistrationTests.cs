@@ -188,6 +188,168 @@ public sealed class AutostartRegistrationTests
         Assert.False(sut.IsEnabled());
     }
 
+    // ---- bs-ojc.2: Task Manager's StartupApproved\Run override ----
+
+    private const string RunValue = "\"C:\\Program Files\\Bosun\\Bosun.exe\" --autostart";
+
+    [Fact]
+    public void IsEnabled_ReturnsTrue_WhenRunValueExists_AndThereIsNoOverride()
+    {
+        var store = new FakeAutostartStore { Value = RunValue, StartupApprovedData = null };
+
+        Assert.True(CreateSut(store).IsEnabled());
+    }
+
+    [Theory]
+    [InlineData((byte)0x03)] // what Task Manager writes when the user disables an entry
+    [InlineData((byte)0x01)]
+    [InlineData((byte)0x07)]
+    public void IsEnabled_ReturnsFalse_WhenRunValueExists_ButOverrideMarksItDisabled(byte firstByte)
+    {
+        var store = new FakeAutostartStore
+        {
+            Value = RunValue,
+            StartupApprovedData = FakeAutostartStore.OverrideBytes(firstByte),
+        };
+
+        Assert.False(CreateSut(store).IsEnabled());
+    }
+
+    [Theory]
+    [InlineData((byte)0x02)]
+    [InlineData((byte)0x06)] // written when the user re-enables an entry in Settings
+    public void IsEnabled_ReturnsTrue_WhenRunValueExists_AndOverrideMarksItEnabled(byte firstByte)
+    {
+        var store = new FakeAutostartStore
+        {
+            Value = RunValue,
+            StartupApprovedData = FakeAutostartStore.OverrideBytes(firstByte),
+        };
+
+        Assert.True(CreateSut(store).IsEnabled());
+    }
+
+    [Fact]
+    public void IsEnabled_ReturnsFalse_WhenThereIsNoRunValue_EvenIfAnEnabledOverrideRemains()
+    {
+        var store = new FakeAutostartStore
+        {
+            Value = null,
+            StartupApprovedData = FakeAutostartStore.OverrideBytes(0x02),
+        };
+
+        Assert.False(CreateSut(store).IsEnabled());
+    }
+
+    [Fact]
+    public void IsEnabled_ReturnsFalse_WhenThereIsNoRunValue_AndOverrideIsDisabled()
+    {
+        var store = new FakeAutostartStore
+        {
+            Value = null,
+            StartupApprovedData = FakeAutostartStore.OverrideBytes(0x03),
+        };
+
+        Assert.False(CreateSut(store).IsEnabled());
+    }
+
+    [Fact]
+    public void IsEnabled_TreatsAnEmptyOverrideAsNoUsableOverride_AndStaysEnabled()
+    {
+        // Chosen rule for malformed data: no first byte (or a non-binary value, which the real
+        // store reports as an empty array) is not a user decision we can honour; Windows' default
+        // with no usable override is enabled.
+        var store = new FakeAutostartStore { Value = RunValue, StartupApprovedData = [] };
+
+        Assert.True(CreateSut(store).IsEnabled());
+    }
+
+    [Fact]
+    public void IsEnabled_ReadsFirstByteOnly_ForAShortButNonEmptyOverride()
+    {
+        var disabled = new FakeAutostartStore { Value = RunValue, StartupApprovedData = [0x03] };
+        var enabled = new FakeAutostartStore { Value = RunValue, StartupApprovedData = [0x02] };
+
+        Assert.False(CreateSut(disabled).IsEnabled());
+        Assert.True(CreateSut(enabled).IsEnabled());
+    }
+
+    [Fact]
+    public void IsEnabled_ReturnsFalse_WithoutThrowing_WhenReadingTheOverrideThrows()
+    {
+        var store = new FakeAutostartStore
+        {
+            Value = RunValue,
+            ThrowOnStartupApprovedAccess = new InvalidOperationException("access denied"),
+        };
+        var sut = CreateSut(store);
+
+        var exception = Record.Exception(() => sut.IsEnabled());
+
+        Assert.Null(exception);
+        Assert.False(sut.IsEnabled());
+    }
+
+    [Fact]
+    public void IsEnabled_DoesNotConsultTheOverride_WhenThereIsNoRunValue()
+    {
+        var store = new FakeAutostartStore { Value = null };
+
+        CreateSut(store).IsEnabled();
+
+        Assert.Equal(0, store.GetStartupApprovedCallCount);
+    }
+
+    [Fact]
+    public void Enable_ClearsATaskManagerDisabledOverride_SoStartupIsGenuinelyOn()
+    {
+        var store = new FakeAutostartStore
+        {
+            Value = RunValue,
+            StartupApprovedData = FakeAutostartStore.OverrideBytes(0x03),
+        };
+        var sut = CreateSut(store);
+        Assert.False(sut.IsEnabled());
+
+        var result = sut.Enable();
+
+        Assert.Equal(AutostartResult.Success, result);
+        Assert.Null(store.StartupApprovedData);
+        Assert.True(sut.IsEnabled());
+    }
+
+    [Fact]
+    public void Enable_ReturnsFailed_WhenClearingTheOverrideFails_NeverSuccessWhileDisabled()
+    {
+        var store = new FakeAutostartStore
+        {
+            StartupApprovedData = FakeAutostartStore.OverrideBytes(0x03),
+            ThrowOnStartupApprovedAccess = new UnauthorizedAccessException("denied"),
+        };
+        var sut = CreateSut(store);
+
+        AutostartResult result = default;
+        var exception = Record.Exception(() => result = sut.Enable());
+
+        Assert.Null(exception);
+        Assert.Equal(AutostartResult.Failed, result);
+        Assert.False(sut.IsEnabled());
+    }
+
+    [Fact]
+    public void Disable_RemovesTheRunValue_ButLeavesAnOverrideAlone()
+    {
+        var overrideBytes = FakeAutostartStore.OverrideBytes(0x03);
+        var store = new FakeAutostartStore { Value = RunValue, StartupApprovedData = overrideBytes };
+
+        var result = CreateSut(store).Disable();
+
+        Assert.Equal(AutostartResult.Success, result);
+        Assert.Null(store.Value);
+        Assert.Equal(0, store.ClearStartupApprovedCallCount);
+        Assert.Same(overrideBytes, store.StartupApprovedData);
+    }
+
     [Fact]
     public void Constructor_Throws_WhenStoreIsNull()
     {

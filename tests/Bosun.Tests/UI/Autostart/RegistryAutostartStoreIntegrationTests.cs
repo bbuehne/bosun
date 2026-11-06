@@ -57,6 +57,37 @@ public sealed class RegistryAutostartStoreIntegrationTests
         Assert.Null(exception);
     }
 
+    private const string StartupApprovedKeyPath =
+        @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+    [Fact]
+    public void GetStartupApprovedData_and_ClearStartupApproved_round_trip_a_binary_override()
+    {
+        // bs-ojc.2. Seeds the override the way Task Manager does (REG_BINARY, same value name as
+        // the Run value) -- under the throwaway TestValueName only -- then reads and clears it.
+        var store = new RegistryAutostartStore(TestValueName);
+        byte[] disabled = [0x03, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+        try
+        {
+            using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(StartupApprovedKeyPath, writable: true))
+            {
+                key.SetValue(TestValueName, disabled, Microsoft.Win32.RegistryValueKind.Binary);
+            }
+
+            Assert.Equal(disabled, store.GetStartupApprovedData());
+
+            store.ClearStartupApproved();
+            Assert.Null(store.GetStartupApprovedData());
+
+            // Clearing again with nothing present must not throw.
+            Assert.Null(Record.Exception(store.ClearStartupApproved));
+        }
+        finally
+        {
+            store.ClearStartupApproved();
+        }
+    }
+
     [Fact]
     public void SetValue_overwrites_an_existing_registration()
     {
