@@ -34,7 +34,10 @@ public sealed class RcloneProcessLogVolumeTests
         await AdvanceUntilCompleteAsync(f.Time, start, TimeSpan.FromMilliseconds(250));
         await start.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.True(f.Client.GetVersionCalls.Count >= 59, $"expected about 60 polls, saw {f.Client.GetVersionCalls.Count}");
+        // Polls land at t = 0, 250 ms, ... 15.0 s on the fake clock; the one at 15.0 s finds no room
+        // for another and ends the wait. The clock is stepped only when a delay timer is armed, so
+        // the count is exact (bs-3gc) -- a changed interval or timeout changes it.
+        Assert.Equal(61, f.Client.GetVersionCalls.Count);
         Assert.Equal(RcloneProcessFaultKind.HealthCheckUnauthorized, f.Service.FaultKind);
 
         var entries = f.Log.Entries;
@@ -178,13 +181,25 @@ public sealed class RcloneProcessLogVolumeTests
         Assert.Contains("still failing", warnings[1].Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Steps the fake clock one poll interval at a time, but only once the code under test has armed
+    /// its next delay timer. Advancing before the timer exists moves the clock past a poll that has
+    /// not happened yet (bs-3gc: the old fixed-rate loop did that under load and lost polls from a
+    /// 15 s wait). The completion race is the other way round: the final poll may end the wait
+    /// without arming another timer, so each step waits for either.
+    /// </summary>
     private static async Task AdvanceUntilCompleteAsync(FakeTimeProvider time, Task task, TimeSpan step)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (!task.IsCompleted && DateTime.UtcNow < deadline)
+        while (!task.IsCompleted)
         {
+            var armed = time.WhenActiveTimerCountAtLeastAsync(1);
+            var first = await Task.WhenAny(task, armed).WaitAsync(TimeSpan.FromSeconds(10));
+            if (first == task)
+            {
+                return;
+            }
+
             time.Advance(step);
-            await Task.Delay(1).ConfigureAwait(false);
         }
     }
 
