@@ -437,7 +437,7 @@ public sealed class IdleConfigReloadTests
     /// timing or the missing re-arm -- is for the orchestrator to decide (bs-05b report).
     /// </para>
     /// </summary>
-    [Fact(Skip = "bs-05b spec/code disagreement: docs/ARCHITECTURE.md §4 rule 7, reload bullet 'persistent to on-demand' (\"an idle drive unmounts at reload + N, or reload + 2N when N is no longer than the mounted-probe interval\") expects +590 here; the code drains at +545 because a tier-change reload does not re-arm the mounted-probe timer, so the old cadence's +540 probe takes the baseline first.")]
+    [Fact(Skip = "bs-2t1 (needs-decision: fix code or doc), found by bs-05b: docs/ARCHITECTURE.md §4 rule 7, reload bullet 'persistent to on-demand' (\"an idle drive unmounts at reload + N, or reload + 2N when N is no longer than the mounted-probe interval\") expects +590 here; the code drains at +545 because a tier-change reload does not re-arm the mounted-probe timer, so the old cadence's +540 probe takes the baseline first.")]
     public Task Changing_to_on_demand_with_a_period_no_longer_than_the_probe_interval_unmounts_at_reload_plus_2N() =>
         AssertTierChangeToOnDemandDrainsAt(reloadAt: 500, idle: 45, expected: 590);
 

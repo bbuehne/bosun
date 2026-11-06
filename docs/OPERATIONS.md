@@ -517,8 +517,8 @@ possibly kill the SSH channel under the mount. Use **30 s**. Run both variants.
    under it, which only the deep probe can find: T7's rule applies, so its
    `Mounted -> Draining` line must come within `2D + 2P` of the link returning (610 s
    with defaults; ADR-016's 2026-11-02 amendment). Do not browse the drive while you wait.
-6. Five minutes after the link returned (route A2 with a drain: once the remount that
-   follows the drain has happened): window row, then the drive check, then the marker.
+6. Five minutes after the link returned (route A2 with a drain: five minutes after its
+   `Mounted -> Draining` line): window row, then the drive check, then the marker.
    **Expected:** the row reads `P: is mounted`, the drive check prints `ANSWERED`,
    `t2a-before.txt` reads back intact.
 
@@ -541,8 +541,8 @@ desktop's link never drops.
 
 **PASS** when, for both variants: Explorer stayed responsive wherever you tested it;
 no present-but-unanswering drive outlasted `2D + 2P` after the link returned; and five
-minutes after the link returned (if a drain was needed, once the remount that follows it
-has happened) the host was `Mounted`, the drive check `ANSWERED` and the marker intact.
+minutes after the link returned (if a drain was needed, five minutes after its
+`Mounted -> Draining` line) the host was `Mounted`, the drive check `ANSWERED` and the marker intact.
 **FAIL** otherwise. Which of A1
 or A2 happened, and whether B's mount survived, go in the notes: they are findings
 about your network, not pass or fail.
