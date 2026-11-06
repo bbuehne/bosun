@@ -57,8 +57,9 @@ public sealed class BackoffStateTests
     [Fact]
     public void Resetting_after_many_failures_returns_to_zero_delay_immediately()
     {
-        // docs/ARCHITECTURE.md §4: reset is what makes dock/undock feel immediate. A laptop that
-        // failed five times at the office must not sit on the 300s rung after arriving home.
+        // docs/ARCHITECTURE.md, Backoff: the reset is what makes recovery after a resume or a network
+        // interruption feel immediate. A host that failed five times while the link was down must
+        // not sit on the 300s rung once the link is back.
         var state = BackoffState.Initial;
         for (var i = 0; i < 5; i++)
         {
