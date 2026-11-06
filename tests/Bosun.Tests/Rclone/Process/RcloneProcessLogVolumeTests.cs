@@ -21,7 +21,7 @@ public sealed class RcloneProcessLogVolumeTests
         new("core/version", 401, "rc call to 'core/version' failed: unauthorized");
 
     [Fact]
-    public async Task A_15_second_health_wait_of_60_polls_that_all_get_401_logs_two_entries_and_none_carries_the_exception()
+    public async Task A_15_second_health_wait_of_61_polls_that_all_get_401_logs_two_entries_and_none_carries_the_exception()
     {
         var f = new Fixture();
         f.Launcher.EnqueueSuccess(new FakeRcloneProcessHandle());
