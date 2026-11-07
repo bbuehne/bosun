@@ -972,7 +972,10 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// bs-5ga.2: the exception a repair stopped by a pending suspend ends with. Built AFTER
     /// <see cref="StopForPendingSuspend"/> has logged why and before anything else is touched, so the work
     /// already done stays done and nothing the repair did not reach is changed. Logged as "stopped partway",
-    /// apart from "refused" (before the first host).
+    /// apart from "refused" (before the first host). bs-5ga.5: also the exception for a repair that reached
+    /// its end with a suspend pending and a drained host left waiting for its re-enable; that caller has
+    /// no <see cref="StopForPendingSuspend"/> line before it, so the host named is the first drained host
+    /// that will not be re-probed.
     /// </summary>
     private RepairStoppedException RepairStopped(string firstHostNotReached)
     {
@@ -1049,6 +1052,36 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                     // Draining (started before this command): owns its own re-enable. Probing and
                     // Mounting/Mounted cannot be observed between channel continuations.
                     break;
+            }
+        }
+
+        // 3. bs-5ga.5 (maintainer decision A): the last step. Nothing is left to skip, but the repair is
+        //    not finished if a host it drained cannot be re-enabled because a suspend is pending: the
+        //    drain's completion (CompleteDrainAsync) and the queued re-enable (EnableHostAsync) both
+        //    refuse while one is pending (ADR-023 decision 1), so that host rests Disabled until resume
+        //    and the re-probe half of "unmount all and re-probe" did not happen for it. Report it as a
+        //    repair stopped partway, through the same helper. Only the caller's answer changes: no host
+        //    state, counter, timer or the suspend's handling is touched here.
+        //
+        //    The test is "a drained host awaits its re-enable AND a suspend is pending", not a bare
+        //    "a suspend is pending". A suspend is pending here only if it arrived during this command (a
+        //    command is not started under one, and the suspend action cannot run in the middle of this
+        //    one), and it stays pending until after every re-enable queued by this command has run and
+        //    been refused. So for a repair that drained something the two readings agree. They differ only
+        //    when nothing was drained: a suspend that arrives during the last re-probe of a repair that
+        //    drained nothing finds every host already probed, so nothing was skipped and nothing is
+        //    waiting on a re-enable; the bare reading would report "stopped" for a repair that did all
+        //    of its work. A host still Draining counts: its drain completes later, under the suspend,
+        //    and the same gate then withholds its re-enable.
+        if (SuspendPending)
+        {
+            var awaitingReEnable = mounted.FirstOrDefault(h =>
+                drained.Contains(h)
+                && h.AdministrativelyEnabled
+                && h.State is MountState.Disabled or MountState.Draining);
+            if (awaitingReEnable is not null)
+            {
+                throw RepairStopped(awaitingReEnable.Key);
             }
         }
     }, cancellationToken);
