@@ -56,7 +56,8 @@ namespace Bosun.Supervisor;
 /// <see cref="CancellationTokenSource.CancelAsync"/> on the recurring tick in flight. That is ALL it
 /// does -- it touches no host, no timer, no counter and no state, so the single-writer discipline
 /// above still holds. Only the five recurring timer callbacks are preemptible (see
-/// <see cref="RunTickAsync"/>); commands, drains and the probe of an enable are not.
+/// <see cref="RunTickAsync"/>), plus the post-mount VFS baseline sample (bs-5ga.3,
+/// <see cref="SampleBaselineAfterMountAsync"/>); commands, drains and the probe of an enable are not.
 /// </para>
 /// </remarks>
 public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAsyncDisposable
@@ -181,6 +182,18 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// both sides is what guarantees that, of a tick starting and a suspend arriving at the same
     /// moment, at least one of them sees the other.</summary>
     private CancellationTokenSource? runningTick;
+
+    /// <summary>
+    /// ADR-023 amendment (bs-5ga.3): the cancellation source of the post-mount VFS baseline sample
+    /// that is in flight right now, or null. The sample is the tail of a mount COMMAND (or of an idle
+    /// tick that began the mount), so it has no tick source of its own that <see cref="runningTick"/>
+    /// could name. It is the one other thing a suspend cancels, and the only mechanism for it:
+    /// <see cref="SampleBaselineAfterMountAsync"/> publishes the source here and unpublishes it before
+    /// disposing it, and <see cref="PreemptRunningTick"/> cancels it beside <see cref="runningTick"/>.
+    /// Accessed only through <see cref="Interlocked"/>/<see cref="Volatile"/>, for the same reason as
+    /// <see cref="runningTick"/>.
+    /// </summary>
+    private CancellationTokenSource? runningBaselineSample;
 
     private bool loggedFailuresBeforeUnmountClamp;
 
@@ -665,35 +678,65 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// <c>IsCancellationRequested</c> synchronously and queues the callbacks to the thread pool.
     /// The returned task is observed, not awaited: a throwing callback faults it, and that is logged.
     /// </summary>
+    /// <remarks>
+    /// Also cancels the post-mount VFS baseline sample, if one is in flight
+    /// (<see cref="runningBaselineSample"/>, ADR-023 amendment bs-5ga.3). Each source is cancelled on
+    /// its own, so one that is already gone cannot stop the other.
+    /// </remarks>
     private void PreemptRunningTick()
     {
+        CancelForSuspend(Volatile.Read(ref runningTick), "running tick");
+        CancelForSuspend(Volatile.Read(ref runningBaselineSample), "post-mount VFS baseline sample");
+    }
+
+    /// <summary>
+    /// Cancels one source for <see cref="PreemptRunningTick"/>. Never throws and never runs callbacks
+    /// inline (see there). A source disposed between the read and the cancel is work that already
+    /// finished, which is what the cancel was for.
+    /// <para>Whoever consumes the cancellation decides by the source's OWN
+    /// <c>Token.IsCancellationRequested</c>, which flips synchronously, and never by the flag of a
+    /// source linked to it: a linked source is cancelled by a thread-pool callback, and not at all if
+    /// it is disposed first.</para>
+    /// </summary>
+    private void CancelForSuspend(CancellationTokenSource? source, string what)
+    {
+        if (source is null)
+        {
+            return;
+        }
+
         try
         {
-            var tick = Volatile.Read(ref runningTick);
-            if (tick is null)
-            {
-                return;
-            }
-
-            var cancellation = tick.CancelAsync();
+            var cancellation = source.CancelAsync();
             _ = cancellation.ContinueWith(
-                faulted => logger.LogWarning(
-                    faulted.Exception?.GetBaseException(),
-                    "Cancelling the running tick for a pending suspend faulted in a cancellation callback; " +
-                    "the suspend proceeds regardless (ADR-023)"),
+                faulted =>
+                {
+                    // CancelAsync on a source that is already disposed returns a faulted task with an
+                    // ObjectDisposedException rather than throwing. That is the benign race described
+                    // below (the work finished first), not a callback fault.
+                    if (faulted.Exception?.GetBaseException() is ObjectDisposedException)
+                    {
+                        return;
+                    }
+
+                    logger.LogWarning(
+                        faulted.Exception?.GetBaseException(),
+                        "Cancelling the {What} for a pending suspend faulted in a cancellation callback; " +
+                        "the suspend proceeds regardless (ADR-023)",
+                        what);
+                },
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
         }
         catch (ObjectDisposedException)
         {
-            // The tick finished and disposed its source between the read and the cancel: it is
-            // already over, which is what the cancel was for.
+            // The work finished and disposed its source between the read and the cancel.
         }
         catch (Exception ex)
         {
             logger.LogWarning(
-                ex, "Preempting the running tick for a pending suspend failed; the suspend proceeds regardless (ADR-023)");
+                ex, "Preempting the {What} for a pending suspend failed; the suspend proceeds regardless (ADR-023)", what);
         }
     }
 
@@ -2111,14 +2154,42 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         // bs-obf: the baseline for activity detection is the VFS as it stands at mount, so even an
         // idle period shorter than the probe interval compares against something real.
-        //
-        // Skipped while a suspend is pending (ADR-023 D1): this mount raced it and is about to be
-        // drained, so the baseline would be thrown away, and a hung rcd would hold the channel for a
-        // probe timeout that the suspend budget cannot afford. The poll is not preemptible here (this
-        // is the tail of a mount command, not a tick), so not starting it is the only protection.
-        if (!SuspendPending)
+        await SampleBaselineAfterMountAsync(host, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The post-mount VFS baseline sample (bs-obf), preemptible by a suspend (ADR-023 amendment,
+    /// bs-5ga.3). The sample is the tail of a mount command, not a tick, so it runs under a source of
+    /// its own, published in <see cref="runningBaselineSample"/> where <see cref="PreemptRunningTick"/>
+    /// finds it. A suspend that arrives while <c>vfs/list</c> or <c>vfs/stats</c> is in flight cancels
+    /// it; the sample then returns having taken NO baseline, which is not a failed poll
+    /// (<see cref="SampleVfsActivityAsync"/> discards it before any bookkeeping). The host is already
+    /// <c>Mounted</c> and stays so; the suspend drains it.
+    /// </summary>
+    /// <remarks>
+    /// Not started at all while a suspend is already pending (ADR-023 D1): this mount raced it and is
+    /// about to be drained, so there is nothing to learn from a baseline. That check comes AFTER the
+    /// source is published, pairing with <see cref="SuspendAsync"/>'s increment-then-read: of a sample
+    /// starting and a suspend arriving at once, one sees the other, never neither. The source is
+    /// unpublished before it is disposed, and <see cref="CancelForSuspend"/> tolerates one disposed in
+    /// the gap.
+    /// </remarks>
+    private async Task SampleBaselineAfterMountAsync(HostRuntime host, CancellationToken ct)
+    {
+        using var sample = new CancellationTokenSource();
+        Interlocked.Exchange(ref runningBaselineSample, sample);
+        try
         {
-            await SampleVfsActivityAsync(host, ct).ConfigureAwait(false);
+            if (SuspendPending)
+            {
+                return;
+            }
+
+            await SampleVfsActivityAsync(host, ct, sample.Token, postMountBaseline: true).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref runningBaselineSample, null, sample);
         }
     }
 
@@ -2514,26 +2585,52 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     }
 
     /// <summary>
+    /// <see cref="TickPreempted"/> for <see cref="SampleVfsActivityAsync"/>. The post-mount baseline has no
+    /// timer to re-arm, so it logs a line of its own; the periodic sample is a tick and logs the tick line.
+    /// Either way the decision is the preemption token's alone.
+    /// </summary>
+    private bool SamplePreempted(CancellationToken preemption, string hostKey, bool postMountBaseline)
+    {
+        if (!postMountBaseline)
+        {
+            return TickPreempted(preemption, "mounted VFS sample", hostKey);
+        }
+
+        if (!preemption.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        logger.LogInformation(
+            "The post-mount VFS baseline sample for {HostKey} was preempted by a pending suspend (Invariant I8, " +
+            "ADR-023 amendment bs-5ga.3): no baseline was taken, which is not a failed poll -- no counter, flag or " +
+            "idle-clock change. The host stays Mounted and the suspend drains it",
+            hostKey);
+        return true;
+    }
+
+    /// <summary>
     /// The periodic activity sample (bs-obf). The first sample after a mount only sets the baseline;
     /// after that, any change in <see cref="VfsCounters"/> is activity and does what
     /// <see cref="RecordActivityAsync"/> does: restarts the idle clock. A failed sample records
     /// nothing, so it can only ever let the idle timer run on -- and the fire-time check
     /// (<see cref="HandleIdleUnmountDueAsync"/>) refuses to unmount on a failed poll.
     /// </summary>
-    private async Task SampleVfsActivityAsync(HostRuntime host, CancellationToken ct, CancellationToken preemption = default)
+    private async Task SampleVfsActivityAsync(
+        HostRuntime host, CancellationToken ct, CancellationToken preemption = default, bool postMountBaseline = false)
     {
         if (host.State != MountState.Mounted || !UsesIdleUnmount(host))
         {
             return;
         }
 
-        if (TickPreempted(preemption, "mounted VFS sample", host.Key))
+        if (SamplePreempted(preemption, host.Key, postMountBaseline))
         {
             return;
         }
 
         var poll = await PollVfsAsync(host, includeQueue: false, ct, preemption).ConfigureAwait(false);
-        if (TickPreempted(preemption, "mounted VFS sample", host.Key))
+        if (SamplePreempted(preemption, host.Key, postMountBaseline))
         {
             // Before any bookkeeping: no baseline, no UploadFailureCount, no fault-logged flag, no
             // idle-clock restart. A hung sample that a suspend released is not a failed sample.
