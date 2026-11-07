@@ -2458,3 +2458,45 @@ how to resume them with `claude --resume <id>`. That makes it the natural owner.
 the service and the MCP layer, and it must not reference WPF (the same rule as `Bosun.ClaudeHook`).
 Default-suite tests must not launch `wt.exe`, start Claude Code, or touch the tunnel. The work is
 filed as Beads issues from this ADR; no `TODO.md` or plan file is added.
+
+### Addendum (2026-11-07): two candidate shapes, A under investigation, B the fallback
+
+The maintainer asked for the simpler shape below to be investigated, and for the shape in Decision 2
+to be kept as the fallback. The maintainer is sceptical that A will give the functionality wanted. Neither is
+chosen; the status stays Proposed.
+
+**Shape B, the fallback (Decision 2 as written above).** A local service owned by Bosun, a thin MCP
+layer, a Cloudflare Tunnel with Access. It stays the plan of record if A falls short, and is not to be
+dropped because A is being looked at. Two findings from the 2026-11-07 research apply to it whichever
+way A goes: a claude.ai custom connector on a Pro/Max account authenticates by OAuth (dynamic client
+registration or a client ID metadata document) or not at all, so Cloudflare Access service tokens are
+not an option; and the authorisation server's metadata must be reachable from Anthropic's egress range,
+so an Access policy has to let those requests through.
+
+**Shape A, under investigation: Claude Code's own Remote Control server mode.** `claude
+remote-control` (present in the installed Claude Code 2.1.319) is a long-running process that keeps a
+directory reachable from the Claude app; the app can start new sessions on it (`--spawn
+same-dir|worktree|session`, `--capacity`). The connection is outbound only, so nothing is exposed to the
+internet and there is no tunnel, OAuth or MCP layer to build. Bosun's part would be to keep such a server
+running in the development area (it already runs all day, I3) and to restart it when it dies. A session
+started from the phone on that server would then do the work of the ten tools itself: create a project,
+or open a Windows Terminal tab in another project with `claude --remote-control` (or `claude --resume
+<id> --remote-control`) and report how to reach it.
+
+Known gaps in A, to be settled by the investigation (`bs-` issue filed 2026-11-07):
+
+- The first run of `claude remote-control` asks "Enable Remote Control? (y/n)" once, and a directory
+  not yet trusted asks "Trust <directory>?"; without a terminal the trust prompt fails. A brand-new
+  project folder would meet it with nobody at the keyboard.
+- Choosing the folder from the phone is not documented: a server serves the directory it was started
+  in.
+- `--continue` and `--session-id` reattach only for about four hours after the server stops; older
+  conversations need `claude --resume` in a new terminal.
+- No documented service mode; the process must stay running. Windows is not named explicitly in the
+  Remote Control documentation.
+- Whether a session can find out the URL or name of a session it launched, so it can hand it back.
+- Peek at a running session has the same Windows Terminal limit as in B.
+
+Sources: code.claude.com/docs/en/remote-control.md, settings-reference.md (`remoteControlAtStartup`),
+cli-reference.md; claude.com/docs/connectors/building/authentication; support.claude.com article
+11175166.
