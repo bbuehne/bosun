@@ -2224,6 +2224,19 @@ legitimately run while the system is suspended (a network change) keep probing. 
 
 A single-host command (`RequestRetryNowAsync`, a mount or unmount click) has no next host and is unchanged.
 
+*Note (2026-11-07, `bs-5ga.2`, maintainer decision A): a repair that stops reports it.* "Unmount all &
+re-probe" used to stop between hosts and then return normally, so the click reported success for a repair that
+only partly ran. It now throws `RepairStoppedException` (reason "the computer is going to sleep") from either
+loop, the drain step or the re-probe step, and `RepairCommands` shows that in the same dialog, with the same
+fail-soft path, as a refused repair (`RepairRefusedException`, `bs-mhs`), worded so it does not say "nothing was
+unmounted" (some of it ran). The two stay distinct: refused means nothing started (the system was suspended or
+a suspend was already pending when the command was dequeued), stopped means partway. The outcome is otherwise
+unchanged: work already done stays done, hosts the repair did not reach are left for the suspend (drained as
+`DrainCause.Suspend`, so an on-demand one gets its ADR-022 record and returns at wake, rule 9a; a completed
+repair would have left it `Ready`), and no counter or backoff is touched. A repair that completes before any
+suspend is pending still returns normally. The other stopped commands (resume, network change, the sweep) are
+background work with no caller to tell and are unchanged.
+
 *The bound.* A suspend now waits behind **one call in flight**, not one per remaining host: `core/version`
 (client timeout 5 s), a forced probe (`probe_timeout_seconds`, default 5 s), or `mount/listmounts` (client
 timeout 10 s). Two caveats, stated so the bound is not read as tighter than it is:

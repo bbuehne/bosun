@@ -69,6 +69,7 @@ public sealed class RepairAndSweepStopsSpecTests
         holds.ReleaseNotArrived(_ => null);
         holds[inFlight].Release();
         await h.FinishAsync(pump, "the repair or the suspend never finished", repair, suspend);
+        await StopSpec.AssertRepairReportedStopAsync(repair);
 
         Assert.Equal([DrainCause.Repair], h.DrainCauses(inFlight));
         foreach (var key in MountedDrives.Keys.Where(k => k != inFlight))
@@ -136,6 +137,7 @@ public sealed class RepairAndSweepStopsSpecTests
         holds.ReleaseNotArrived(_ => ShallowProbeOutcome.Success);
         holds[inFlight].Release(inFlight == "u" ? ShallowProbeOutcome.Timeout : ShallowProbeOutcome.Success);
         await h.FinishAsync(pump, "the repair or the suspend never finished", repair, suspend);
+        await StopSpec.AssertRepairReportedStopAsync(repair);
 
         foreach (var key in idle.Where(k => k != inFlight))
         {

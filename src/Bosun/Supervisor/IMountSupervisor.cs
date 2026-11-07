@@ -168,6 +168,14 @@ public interface IMountSupervisor
     /// While the system is suspended (Invariant I8 in reverse) nothing is changed and the call throws
     /// <see cref="RepairRefusedException"/> (bs-mhs), so the caller can tell the user instead of the click
     /// appearing to succeed.
+    /// <para><b>Stopped by a pending suspend (bs-5ga.2, ADR-023 amendment bs-5ga.1).</b> Once started, the
+    /// repair stops before the next drain, or before the next host of its re-probe step, when a suspend
+    /// becomes pending, and then throws <see cref="RepairStoppedException"/> rather than returning: a repair
+    /// that only partly ran must not report success. Work already done stays done, the hosts it did not reach
+    /// are left untouched for the suspend (drained as <c>DrainCause.Suspend</c>; an on-demand one gets its
+    /// ADR-022 remount record and returns at wake), and no counter or backoff is changed. That is distinct
+    /// from <see cref="RepairRefusedException"/>, which means nothing was started. A repair that completes
+    /// before any suspend is pending returns normally.</para>
     /// </remarks>
     Task RepairAllAsync(CancellationToken cancellationToken = default);
 

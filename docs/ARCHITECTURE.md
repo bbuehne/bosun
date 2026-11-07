@@ -618,6 +618,15 @@ right before building any UI.
    suspend (a `Mounted` host is drained) and by the resume after it, which visits
    every enabled host. A single-host command (`retry now`) is unaffected. Not covered:
    config reload, and the drains inside `ReconcileAsync` (`bs-5ga` item 4).
+   *(Added 2026-11-07, `bs-5ga.2`, maintainer decision A.)* A repair that stops this
+   way does not return as if it had finished: `RepairAllAsync` throws
+   `RepairStoppedException` and the click shows "stopped: the computer is going to
+   sleep", as a refused repair shows its reason. "Refused" (nothing started: the
+   system is suspended, or a suspend was already pending when the repair was
+   dequeued) and "stopped" (partway) stay distinct. Nothing else changes: the hosts
+   it did not reach are drained by the suspend as `Suspend`, so an on-demand one gets
+   its ADR-022 record and returns at wake (rule 9a), which a completed repair would
+   not have done.
 
    At resume the flag is cleared and the held-back hosts are picked up through the
    re-probe above, not around it. A persistent, non-parked host found `Ready` is

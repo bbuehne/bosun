@@ -354,6 +354,54 @@ public sealed class RepairCommandsTests
     }
 
     [Fact]
+    public async Task An_Unmount_all_stopped_by_a_suspend_says_so_and_is_not_reported_as_nothing_unmounted_or_as_a_fault()
+    {
+        var h = new Harness();
+        h.Supervisor.RepairAllException = new RepairStoppedException("the computer is going to sleep");
+
+        await h.Commands.UnmountAllAsync();
+
+        var error = Assert.Single(h.Prompt.Errors);
+        Assert.Equal("Unmount all & re-probe", error.Title);
+        Assert.StartsWith("Unmount all & re-probe was stopped: the computer is going to sleep.", error.Message, StringComparison.Ordinal);
+        // Part of the repair ran, so the refusal's wording ("Nothing was unmounted") would be false.
+        Assert.DoesNotContain("Nothing was unmounted", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(h.Log.Entries, e => e.Level >= LogLevel.Warning);
+        // Logged as stopped partway, distinct from a refusal and from the accepted-success line.
+        Assert.True(h.LoggedInformation("stopped partway"));
+        Assert.False(h.LoggedInformation("was refused"));
+        Assert.False(h.LoggedInformation("was accepted"));
+        Assert.False(h.Commands.IsUnmountingAll);
+    }
+
+    [Fact]
+    public async Task A_stopped_Unmount_all_whose_dialog_cannot_be_shown_does_not_throw()
+    {
+        var h = new Harness();
+        h.Supervisor.RepairAllException = new RepairStoppedException("the computer is going to sleep");
+        h.Prompt.ShowErrorThrows = new InvalidOperationException("the dispatcher has shut down");
+
+        await h.Commands.UnmountAllAsync(); // must not throw out of the click handler
+
+        Assert.Single(h.Prompt.Errors);
+        Assert.Contains(h.Log.Entries, e => e.Level == LogLevel.Error
+            && e.Message.Contains("Could not show the refusal", StringComparison.Ordinal));
+        Assert.False(h.Commands.IsUnmountingAll);
+    }
+
+    [Fact]
+    public async Task A_completed_Unmount_all_shows_nothing_to_the_user()
+    {
+        var h = new Harness();
+
+        await h.Commands.UnmountAllAsync();
+
+        Assert.Empty(h.Prompt.Errors);
+        Assert.True(h.LoggedInformation("was accepted"));
+        Assert.False(h.Commands.IsUnmountingAll);
+    }
+
+    [Fact]
     public async Task A_stuck_Unmount_all_does_not_stop_the_user_restarting_Bosun()
     {
         var h = new Harness();
@@ -540,6 +588,17 @@ public sealed class RepairCommandsTests
             return Task.FromResult(Result);
         }
 
-        public void ShowError(string title, string message) => Errors.Add((title, message));
+        /// <summary>When set, <see cref="ShowError"/> throws it after recording -- a dialog that cannot be
+        /// shown (the shell is going away, the UI thread is gone).</summary>
+        public Exception? ShowErrorThrows { get; set; }
+
+        public void ShowError(string title, string message)
+        {
+            Errors.Add((title, message));
+            if (ShowErrorThrows is not null)
+            {
+                throw ShowErrorThrows;
+            }
+        }
     }
 }

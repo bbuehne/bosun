@@ -32,6 +32,15 @@ namespace Bosun.Tests.Supervisor.Independent.SuspendStopsCommands;
 /// </remarks>
 internal static class StopSpec
 {
+    /// <summary>bs-5ga.2 (maintainer decision A): a repair a pending suspend stopped must tell its caller,
+    /// not complete as if it had finished. Awaits the already-finished repair task and checks it faulted with
+    /// the stop report, whose reason is the one the user is shown.</summary>
+    public static async Task AssertRepairReportedStopAsync(Task repair)
+    {
+        var stopped = await Assert.ThrowsAsync<RepairStoppedException>(() => repair);
+        Assert.Equal("the computer is going to sleep", stopped.Reason);
+    }
+
     public static PreemptSpecHarness NewHarness(params HostConfig[] hosts) => NewHarness([], hosts);
 
     /// <summary>A harness whose <paramref name="unreachable"/> hosts' shallow probes always fail (until a
