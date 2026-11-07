@@ -2267,6 +2267,23 @@ repair would have left it `Ready`), and no counter or backoff is touched. A repa
 suspend is pending still returns normally. The other stopped commands (resume, network change, the sweep) are
 background work with no caller to tell and are unchanged.
 
+*Note (2026-11-07, `bs-5ga.5`, maintainer decision A): a repair whose suspend arrives in its last step reports
+it too.* `bs-5ga.2` covered a suspend that stops the repair before the next host. A suspend that becomes pending
+during the last drain, or during the last re-probe, leaves nothing to skip, so the repair returned normally,
+yet a host it drained ended `Disabled`: decision 1 does not re-enable a drain that completes while a suspend is
+pending (the drain's completion and the queued re-enable both refuse), so the "then re-probe" half did not
+happen for it. The repair now throws `RepairStoppedException`, same reason and same log path, when it reaches
+its end with a suspend pending **and** a host it drained still waiting for that re-enable (`Disabled`, or
+`Draining` whose drain will complete under the suspend). It is not a bare "a suspend is pending at the end",
+because the two differ in one case: a repair that drained nothing and had already re-probed every host when
+the suspend arrived did all of its work, and still returns normally. When something was drained the two agree,
+since the suspend stays pending until after every re-enable this command queued has been refused. Only what the
+caller is told changes: no host state, counter, timer or the suspend's handling. A repair that completes with
+no suspend pending returns normally, and one refused before it starts is unchanged (`RepairRefusedException`).
+One window remains by construction: the re-enables run in continuations queued behind the command, so a
+suspend that arrives after the command has returned and before one of them runs leaves that host `Disabled`
+with the repair already reported complete. Resume re-enables it, as for any `Disabled` host.
+
 *The bound.* A suspend now waits behind **one call in flight**, not one per remaining host: `core/version`
 (client timeout 5 s), a forced probe (`probe_timeout_seconds`, default 5 s), or `mount/listmounts` (client
 timeout 10 s). Two caveats, stated so the bound is not read as tighter than it is:

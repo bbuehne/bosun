@@ -225,6 +225,46 @@ public sealed class RepairStoppedReportSpecTests
         Assert.False(h.IsMountedInRclone("R:"));
     }
 
+    /// <summary>
+    /// <b>Protects:</b> bs-5ga.5, end to end: a suspend that arrives during the repair's LAST drain, with no idle host
+    /// and so nothing to skip, still makes the click show the stop (the repair's drained hosts are not re-probed
+    /// because a suspend is pending). Same dialog and wording as a repair stopped partway.
+    /// <b>Catches:</b> the supervisor returning normally in the last step, so the click shows nothing for a repair
+    /// whose re-probe half did not happen.
+    /// </summary>
+    [Fact]
+    public async Task A_real_supervisor_with_a_suspend_during_the_last_drain_makes_the_click_show_the_stop()
+    {
+        var drives = new Dictionary<string, string> { ["od1"] = "Q:", ["od2"] = "R:" };
+        var h = new PreemptSpecHarness(HostFixtures.Build(
+            HostFixtures.Global(suspendUnmountTimeoutSeconds: 3),
+            HostFixtures.OnDemand("od1", drive: "Q:"),
+            HostFixtures.OnDemand("od2", drive: "R:")));
+        await h.StartAsync();
+        await h.RunAsync(() => h.Supervisor.RequestMountAsync("od1"));
+        await h.RunAsync(() => h.Supervisor.RequestMountAsync("od2"));
+
+        var prompt = new RecordingRepairPrompt();
+        var commands = new RepairCommands(h.Supervisor, () => null, () => null, prompt, h.Time);
+        var unmounts = HoldSet.Unmount(h, drives);
+
+        var click = commands.UnmountAllAsync();
+        var pump = h.StartPump();
+        var last = await unmounts.InFlightAtArrivalAsync(2, _ => null);
+        var suspend = SuspendCaller.Call(h.Supervisor);
+        unmounts[last].Release();
+        await h.FinishAsync(pump, "the repair or the suspend never finished", suspend, click);
+        await click;
+
+        var shown = Assert.Single(prompt.Errors);
+        Assert.Equal(Title, shown.Title);
+        Assert.Contains(SleepReason, shown.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("nothing was unmounted", shown.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("could not", shown.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(h.IsMountedInRclone("Q:"));
+        Assert.False(h.IsMountedInRclone("R:"));
+    }
+
     private sealed record ShownError(string Title, string Message);
 
     private sealed class RecordingRepairPrompt : IRepairPrompt

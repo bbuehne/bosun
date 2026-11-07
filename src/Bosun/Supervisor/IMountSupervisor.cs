@@ -176,6 +176,18 @@ public interface IMountSupervisor
     /// ADR-022 remount record and returns at wake), and no counter or backoff is changed. That is distinct
     /// from <see cref="RepairRefusedException"/>, which means nothing was started. A repair that completes
     /// before any suspend is pending returns normally.</para>
+    /// <para><b>Stopped at the end (bs-5ga.5, maintainer decision A).</b> A suspend can also become pending
+    /// during the LAST drain or the LAST re-probe, when nothing is left to skip. The drained hosts are
+    /// re-enabled by a continuation queued behind this call, and both that continuation and the drain's
+    /// completion refuse while a suspend is pending (ADR-023 decision 1), so such a host rests
+    /// <see cref="MountState.Disabled"/> until resume and its re-probe did not happen. When the repair
+    /// reaches its end with a suspend pending and a host it drained still waiting for its re-enable, it
+    /// throws <see cref="RepairStoppedException"/> with the same reason, exactly as one stopped partway.
+    /// The condition is that, not a bare "a suspend is pending": a repair that drained nothing and had every
+    /// host re-probed before the suspend arrived did all of its work, and returns normally. Only what the
+    /// caller is told changes; no state, counter or timer does. One window is not covered: a suspend that
+    /// arrives after the call has returned but before the queued re-enable runs finds the repair already
+    /// reported as complete.</para>
     /// </remarks>
     Task RepairAllAsync(CancellationToken cancellationToken = default);
 

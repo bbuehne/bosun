@@ -633,6 +633,15 @@ right before building any UI.
    it did not reach are drained by the suspend as `Suspend`, so an on-demand one gets
    its ADR-022 record and returns at wake (rule 9a), which a completed repair would
    not have done.
+   *(Added 2026-11-07, `bs-5ga.5`, maintainer decision A.)* The same report when the
+   suspend arrives in the repair's last step, with nothing left to skip: if the repair
+   reaches its end with a suspend pending and a host it drained still waiting for its
+   re-enable (that re-enable, and the drain's completion, refuse while a suspend is
+   pending, so the host rests `Disabled` until resume), it throws
+   `RepairStoppedException` as above. A repair that drained nothing and had already
+   re-probed every host before the suspend arrived did all its work and returns
+   normally. A suspend that arrives after the call has returned, before the queued
+   re-enable runs, is not covered.
 
    At resume the flag is cleared and the held-back hosts are picked up through the
    re-probe above, not around it. A persistent, non-parked host found `Ready` is
