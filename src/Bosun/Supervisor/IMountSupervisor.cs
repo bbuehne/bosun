@@ -10,9 +10,8 @@ namespace Bosun.Supervisor;
 /// <para>
 /// <b>One instance of the machine per configured host.</b> <see cref="StartAsync"/> builds the
 /// host set from <see cref="Configuration.IHostConfigStore.Current"/> at the moment it is called;
-/// config reloads while running are not yet handled (a new/removed/changed host requires an app
-/// restart to take effect) -- flagged as discovered work, not silently guessed at. See the
-/// delivery report.
+/// config reloads while running are applied by <c>ConfigChangedAsync</c> (bs-7ck), host by host,
+/// without restarting the app.
 /// </para>
 /// <para>
 /// <b>System-event entry points.</b> <see cref="SuspendAsync"/>, <see cref="ResumeAsync"/>, and
@@ -308,7 +307,8 @@ public sealed record HostMountSnapshot
     public string? LastTransitionTrigger { get; init; }
 
     /// <summary>True if the user explicitly unmounted this host and it has not since been
-    /// explicitly remounted, had its config reloaded, or restarted with the app (bs-fix-e5). A
+    /// explicitly remounted, had its mode changed from on-demand to persistent (bs-uzy), or
+    /// restarted with the app (bs-fix-e5). Any other config reload leaves it set (ADR-015). A
     /// persistent host can be <see cref="MountState.Ready"/> (or cycling through
     /// <see cref="MountState.Unreachable"/>/<see cref="MountState.Probing"/>) with this <c>true</c>
     /// -- that is deliberate parking, not a fault, and the tray UI should render it as such rather
