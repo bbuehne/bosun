@@ -925,6 +925,21 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         await SweepDeferredRemountsAsync("network change", ct).ConfigureAwait(false);
     }, cancellationToken);
 
+    /// <summary>
+    /// bs-5ga.2: the exception a repair stopped by a pending suspend ends with. Built AFTER
+    /// <see cref="StopForPendingSuspend"/> has logged why and before anything else is touched, so the work
+    /// already done stays done and nothing the repair did not reach is changed. Logged as "stopped partway",
+    /// apart from "refused" (before the first host).
+    /// </summary>
+    private RepairStoppedException RepairStopped(string firstHostNotReached)
+    {
+        logger.LogInformation(
+            "Repair (unmount all and re-probe) stopped partway at {Host}: a suspend is pending. Work already done " +
+            "stays done and the rest is left for the suspend (bs-5ga.2); the caller is told, not given a success",
+            firstHostNotReached);
+        return new RepairStoppedException("the computer is going to sleep");
+    }
+
     public Task RepairAllAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
     {
         if (MountingSuspended)
@@ -946,10 +961,11 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         foreach (var host in mounted)
         {
             // bs-5ga.1: a host not drained here stays Mounted and the suspend drains it, as it would any
-            // mounted host. Step 2 below stops at once too, so it does not touch such a host either.
+            // mounted host. The stop is reported to the caller (bs-5ga.2: RepairStoppedException), which
+            // also ends the command, so step 2 does not touch such a host either.
             if (StopForPendingSuspend("Repair", $"draining {host.Key} and the hosts after it"))
             {
-                break;
+                throw RepairStopped(host.Key);
             }
 
             await BeginDrainAsync(host, "repair: unmount all and re-probe", DrainCause.Repair, ct).ConfigureAwait(false);
@@ -963,7 +979,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         {
             if (StopForPendingSuspend("Repair", $"re-probing {host.Key} and the hosts after it"))
             {
-                break;
+                throw RepairStopped(host.Key);
             }
 
             switch (host.State)

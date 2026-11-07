@@ -60,7 +60,7 @@ public sealed class SuspendStopsMultiHostCommandsTests
     /// <paramref name="held"/>, checks the suspend did not cancel the held call, releases it, and runs
     /// everything to completion.</summary>
     private static async Task SuspendWhileHeldAsync(
-        PreemptionHarness h, Task pump, Task command, HeldCall held, string what)
+        PreemptionHarness h, Task pump, Task command, HeldCall held, string what, bool commandReportsStop = false)
     {
         var suspend = h.Supervisor.SuspendAsync();
         // TokenLineage, not the token's own flag: see SuspendPreemptionTests (bs-s30).
@@ -69,6 +69,14 @@ public sealed class SuspendStopsMultiHostCommandsTests
         await pump.WaitAsync(PreemptionHarness.Guard);
         await h.Pump();
         await suspend.WaitAsync(PreemptionHarness.Guard);
+        if (commandReportsStop)
+        {
+            // bs-5ga.2: a repair that a pending suspend stopped tells its caller, instead of completing.
+            var stopped = await Assert.ThrowsAsync<RepairStoppedException>(() => command.WaitAsync(PreemptionHarness.Guard));
+            Assert.Equal("the computer is going to sleep", stopped.Reason);
+            return;
+        }
+
         await command.WaitAsync(PreemptionHarness.Guard);
     }
 
@@ -385,7 +393,7 @@ public sealed class SuspendStopsMultiHostCommandsTests
         var repair = h.Supervisor.RepairAllAsync(); // nothing is mounted: straight to the re-probe step
         var pump = h.Pump();
         await held.Entered.WaitAsync(PreemptionHarness.Guard);
-        await SuspendWhileHeldAsync(h, pump, repair, held, "host a's repair re-probe");
+        await SuspendWhileHeldAsync(h, pump, repair, held, "host a's repair re-probe", commandReportsStop: true);
 
         Assert.Equal(shallow["b"], Shallow(h, "b"));
         Assert.Equal(shallow["c"], Shallow(h, "c"));
@@ -415,7 +423,13 @@ public sealed class SuspendStopsMultiHostCommandsTests
         var repair = h.Supervisor.RepairAllAsync();
         var pump = h.Pump();
         await held.Entered.WaitAsync(PreemptionHarness.Guard);
-        await SuspendWhileHeldAsync(h, pump, repair, held, "host a's repair unmount");
+        await SuspendWhileHeldAsync(h, pump, repair, held, "host a's repair unmount", commandReportsStop: true);
+
+        // One stop, reported once, at the drain step: the command ends there (bs-5ga.2) rather than
+        // falling through to the re-probe step to stop a second time.
+        Assert.Single(h.Log.Entries, e => e.Message.Contains("Repair stops before", StringComparison.Ordinal));
+        Assert.Contains(h.Log.Entries, e => e.Message.Contains("Repair stops before draining", StringComparison.Ordinal));
+        Assert.Single(h.Log.Entries, e => e.Message.Contains("stopped partway", StringComparison.Ordinal));
 
         Assert.Equal(Causes(DrainCause.Repair), h.DrainCauses("a"));
         Assert.Equal(Causes(DrainCause.Suspend), h.DrainCauses("b"));

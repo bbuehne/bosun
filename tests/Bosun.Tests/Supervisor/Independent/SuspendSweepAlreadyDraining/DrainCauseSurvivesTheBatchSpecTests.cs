@@ -177,6 +177,10 @@ public sealed class DrainCauseSurvivesTheBatchSpecTests
         repairCall.Release();
         await h.FinishAsync(pump, "the repair or the suspend never finished", repair, suspend);
 
+        // bs-5ga.2: a repair cut short by the suspend reports the stop instead of success.
+        var stopped = await Assert.ThrowsAsync<RepairStoppedException>(() => repair);
+        Assert.Equal("the computer is going to sleep", stopped.Reason);
+
         Assert.Equal([DrainCause.Repair], h.DrainCauses(firstKey));
         Assert.Equal([DrainCause.Suspend], h.DrainCauses(otherKey));
         Assert.Equal([otherDrive, first], UnmountTargetsSince(h, mark));

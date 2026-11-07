@@ -225,6 +225,17 @@ public sealed class RepairCommands
             logger?.LogInformation("Repair: unmount all and re-probe was refused: {Reason}", ex.Reason);
             ShowRefusal("Unmount all & re-probe", $"Nothing was unmounted: {ex.Reason.Trim().TrimEnd('.')}.");
         }
+        catch (RepairStoppedException ex)
+        {
+            // bs-5ga.2: the supervisor began the repair and a suspend cut it short. Unlike a refusal, some
+            // of it ran, so the message must not say "nothing was unmounted". Same dialog, same fail-soft
+            // path (ShowRefusal never throws), so a click that lands as the machine goes to sleep is safe.
+            logger?.LogInformation("Repair: unmount all and re-probe was stopped partway: {Reason}", ex.Reason);
+            ShowRefusal(
+                "Unmount all & re-probe",
+                $"Unmount all & re-probe was stopped: {ex.Reason.Trim().TrimEnd('.')}. " +
+                "Drives still mounted are disconnected for the sleep, and Bosun checks every host again when the computer wakes.");
+        }
         catch (SupervisorStoppedException ex)
         {
             Fail("Unmount all & re-probe", "Bosun's mount supervisor has stopped, so nothing was unmounted. Use Restart Bosun.", ex);
