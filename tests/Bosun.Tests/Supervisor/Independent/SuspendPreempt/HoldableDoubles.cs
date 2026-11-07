@@ -62,6 +62,8 @@ internal sealed class Hold
 {
     private readonly TaskCompletionSource arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<object?> outcome = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource executing = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource rcdWorkDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int cancelCallbackRanInsideSuspendCall;
 
     public Hold(OnCancel onCancel) => OnCancel = onCancel;
@@ -79,6 +81,18 @@ internal sealed class Hold
     public Task WhenArrived => arrived.Task;
 
     public bool HasArrived => arrived.Task.IsCompleted;
+
+    /// <summary>
+    /// Completes when the call has taken <c>rclone rcd</c>'s mount lock and its (simulated) work has
+    /// begun (bs-6lu). For a call on <c>mount/mount</c>, <c>mount/unmount</c> or <c>mount/listmounts</c>
+    /// that is later than <see cref="WhenArrived"/> whenever another such call is running: the request
+    /// has left Bosun, but rcd is not executing it yet. Never completes for a call that does not take the
+    /// lock (<c>core/version</c>, <c>vfs/*</c>, probes).
+    /// </summary>
+    public Task WhenExecuting => executing.Task;
+
+    /// <summary>True once the call is running inside rcd (see <see cref="WhenExecuting"/>).</summary>
+    public bool IsExecuting => executing.Task.IsCompleted;
 
     public bool IsPending => HasArrived && !outcome.Task.IsCompleted;
 
@@ -109,13 +123,62 @@ internal sealed class Hold
     public bool CancelCallbackRanInsideSuspendCall => Volatile.Read(ref cancelCallbackRanInsideSuspendCall) == 1;
 
     /// <summary>Completes the held call. For a probe, <paramref name="value"/> is the outcome to
-    /// report; for an rc call it is ignored and the call proceeds to the in-memory double.</summary>
-    public void Release(object? value = null) => outcome.TrySetResult(value);
+    /// report; for an rc call it is ignored and the call proceeds to the in-memory double.
+    /// For a call that takes rcd's mount lock (bs-6lu), rcd's work for it is finished; the call still
+    /// returns only once it has actually got the lock, so releasing a call that is queued behind
+    /// another does not run it early.</summary>
+    public void Release(object? value = null)
+    {
+        outcome.TrySetResult(value);
+        rcdWorkDone.TrySetResult();
+    }
 
     /// <summary>Completes the held call by throwing <paramref name="failure"/> from it, as
-    /// <c>RcloneClient</c> does when a call times out (<c>RcloneRcTimeoutException</c>). The call never
-    /// reaches the in-memory double, so the mount table is left as it was (bs-5o4).</summary>
-    public void Fail(Exception failure) => outcome.TrySetException(failure);
+    /// <c>RcloneClient</c> does when rcd ANSWERS with an error. The call never reaches the in-memory
+    /// double, so the mount table is left as it was (bs-5o4), and rcd's mount lock (bs-6lu) is free again
+    /// at once: an error response means rcd's handler has returned. To model a call Bosun gave up on
+    /// while rcd keeps running it (the 30 s call timeout), use <see cref="Abandon"/>.</summary>
+    public void Fail(Exception failure)
+    {
+        outcome.TrySetException(failure);
+        rcdWorkDone.TrySetResult();
+    }
+
+    /// <summary>
+    /// The CLIENT gives up (<c>RcloneClient</c>'s 30 s call timeout, <c>RcloneRcTimeoutException</c>)
+    /// but rcd does not: the call throws <paramref name="failure"/> to the caller now, and rcd's mount
+    /// lock (bs-6lu) stays held until <see cref="FinishInRcd"/>. The unmount and listmounts handlers
+    /// ignore their context, so a call Bosun abandons keeps running inside rcd and keeps the lock. Unlike
+    /// <see cref="Fail"/>, rcd's work still happens: when <see cref="FinishInRcd"/> ends it, the call takes
+    /// effect on the in-memory mount table (the abandoned unmount does unmount the drive, late), with nobody
+    /// listening for the answer. A call abandoned while still queued behind another runs, and takes effect,
+    /// when its turn comes and the test finishes it.
+    /// </summary>
+    public void Abandon(Exception failure)
+    {
+        Volatile.Write(ref abandoned, 1);
+        outcome.TrySetException(failure);
+    }
+
+    /// <summary>rcd's work for this call ends: the mount lock is released (the next queued call runs).
+    /// For an <see cref="Abandon"/>ed call that is the only way it ends. For a call that is not abandoned
+    /// it is the same as <see cref="Release"/> as far as rcd is concerned.</summary>
+    public void FinishInRcd() => rcdWorkDone.TrySetResult();
+
+    private int abandoned;
+
+    /// <summary>True if the call was <see cref="Abandon"/>ed (rcd's work survives the client giving up).</summary>
+    internal bool Abandoned => Volatile.Read(ref abandoned) == 1;
+
+    /// <summary>True once the caller has been given a failure for this call (<see cref="Fail"/>,
+    /// <see cref="Abandon"/>, or a cancellation that threw).</summary>
+    internal bool ClientFailed => outcome.Task.IsFaulted || outcome.Task.IsCanceled;
+
+    internal Task<object?> ClientView => outcome.Task;
+
+    internal void MarkExecuting() => executing.TrySetResult();
+
+    internal Task RcdWorkDone => rcdWorkDone.Task;
 
     internal Task<object?> Begin(string operation, string target, CancellationToken token, Func<object?> cancelledValue)
     {
@@ -139,7 +202,11 @@ internal sealed class Hold
                     break;
                 case OnCancel.LikeProduction:
                 case OnCancel.Throw:
+                    // Ends the call, and with it rcd's mount lock (bs-6lu). This does NOT model rcd
+                    // carrying on with an unmount or listmounts whose caller cancelled; a test that needs
+                    // that uses OnCancel.Ignore plus Abandon.
                     outcome.TrySetException(new OperationCanceledException(token));
+                    rcdWorkDone.TrySetResult();
                     break;
             }
         });
@@ -263,6 +330,40 @@ internal sealed record RcCall(DateTimeOffset At, string Operation, string? Targe
 /// cancelled first it throws <see cref="OperationCanceledException"/>, as <c>RcloneClient</c> does.
 /// Every call is timestamped on the fake clock. Never reaches a real rclone.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>rcd's mount lock (bs-6lu).</b> <c>rclone rcd</c> holds one package-level mutex (<c>mountMu</c>,
+/// <c>cmd/mountlib/rc.go</c>, verified at v1.75.0) for the whole of <c>mount/mount</c>,
+/// <c>mount/unmount</c> and <c>mount/listmounts</c> (the real lock also covers <c>mount/types</c> and
+/// <c>mount/unmountall</c>, which <see cref="IRcloneClient"/> does not expose). This fake models it: those
+/// three calls run inside rcd one at a time, whatever order they arrive in. <c>core/version</c>,
+/// <c>operations/list</c> and <c>vfs/*</c> do not take it and run in parallel with anything.
+/// </para>
+/// <para>
+/// The request still <i>leaves Bosun at arrival</i>: <see cref="Calls"/>, <see cref="Count"/> and
+/// <see cref="Times"/> record it the moment it is made, and <see cref="Hold.WhenArrived"/> fires then.
+/// What waits is rcd's execution: a call that finds the lock taken queues (<see cref="Hold.IsExecuting"/>
+/// stays false, the mount table is unchanged) and runs, in the order the semaphore grants, when the lock is
+/// released. So with one unmount hung, the other hosts' requests are on the wire but their drives stay
+/// mounted. Hold arrival order is therefore not execution order; a test must not depend on which of
+/// several queued calls goes next.
+/// </para>
+/// <para>
+/// <b>What leaves the lock.</b> A call releases it when rcd's work for it ends: it ran to completion
+/// (unheld calls run at once; a held call when the test calls <see cref="Hold.Release"/>), or rcd answered
+/// with an error (<see cref="Hold.Fail"/>). A call the CLIENT abandons keeps the lock if the test says so
+/// with <see cref="Hold.Abandon"/> (the 30 s timeout: the unmount and listmounts handlers ignore their
+/// context, so rcd keeps running them) until <see cref="Hold.FinishInRcd"/>. The one deliberate gap: a
+/// held call whose token is cancelled under <see cref="OnCancel.LikeProduction"/> or
+/// <see cref="OnCancel.Throw"/> ends and frees the lock, because in those modes the hang itself ends on
+/// cancellation; a held call under <see cref="OnCancel.Ignore"/> keeps it until released, which is the
+/// faithful case. A client-side failure never applies the call to the mount table (bs-5o4), as before.
+/// </para>
+/// <para>
+/// Not modelled: how long rcd's work takes (a test chooses by when it calls Release or FinishInRcd), and
+/// the real handler's own timing (up to a 10 s drive-letter poll inside <c>mount/unmount</c>).
+/// </para>
+/// </remarks>
 internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IRcloneClient
 {
     private readonly object gate = new();
@@ -340,17 +441,20 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
         inner.GetConfigAsync(remoteName, cancellationToken);
 
     public Task<RcloneMountResult> MountAsync(RcloneMountRequest request, CancellationToken cancellationToken) =>
-        Through("mount", request.MountPoint, cancellationToken, () => inner.MountAsync(request, cancellationToken));
+        ThroughRcdLock("mount", request.MountPoint, cancellationToken, () => inner.MountAsync(request, cancellationToken));
 
     public Task UnmountAsync(string mountPoint, CancellationToken cancellationToken) =>
-        Through<object?>("unmount", mountPoint, cancellationToken, async () =>
+        ThroughRcdLock<object?>("unmount", mountPoint, cancellationToken, async () =>
         {
             await inner.UnmountAsync(mountPoint, cancellationToken);
             return null;
         });
 
     public Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken cancellationToken) =>
-        Through("listmounts", null, cancellationToken, () => inner.ListMountsAsync(cancellationToken));
+        ThroughRcdLock("listmounts", null, cancellationToken, () => inner.ListMountsAsync(cancellationToken));
+
+    /// <summary>True while a mount/* call is running inside rcd (holding its mount lock).</summary>
+    public bool RcdMountLockHeld => rcdMountLock.CurrentCount == 0;
 
     public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken) =>
         inner.ListAsync(fs, remote, cancellationToken);
@@ -364,20 +468,93 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
     public Task<IReadOnlyList<RcloneVfsQueueItem>> GetVfsQueueAsync(string fs, CancellationToken cancellationToken) =>
         Through("vfsqueue", fs, cancellationToken, () => inner.GetVfsQueueAsync(fs, cancellationToken));
 
-    private async Task<T> Through<T>(string operation, string? target, CancellationToken token, Func<Task<T>> proceed)
+    private Hold? RecordAndTake(string operation, string? target)
     {
-        Hold? hold;
         lock (gate)
         {
             calls.Add(new RcCall(time.GetUtcNow(), operation, target));
             var index = armed.FindIndex(a => a.Operations.Contains(operation)
                                              && (a.Target is null || string.Equals(a.Target, target, StringComparison.OrdinalIgnoreCase)));
-            hold = index < 0 ? null : armed[index].Hold;
+            var hold = index < 0 ? null : armed[index].Hold;
             if (index >= 0)
             {
                 armed.RemoveAt(index);
             }
+
+            return hold;
         }
+    }
+
+    private readonly SemaphoreSlim rcdMountLock = new(1, 1);
+
+    private readonly record struct RcdResult<T>(bool Applied, T? Value);
+
+    /// <summary>
+    /// A call that takes rcd's mount lock (see the class remarks). The request is recorded and its hold
+    /// matched now, at arrival; execution waits for the lock and, for a held call, for the test to
+    /// release it. rcd's side runs on its own and is NOT tied to the caller's token: an unheld call whose
+    /// token is cancelled while it queues throws to its caller but still runs in rcd, as the real
+    /// handlers (which ignore their context) would.
+    /// </summary>
+    private async Task<T> ThroughRcdLock<T>(string operation, string? target, CancellationToken token, Func<Task<T>> proceed)
+    {
+        var hold = RecordAndTake(operation, target);
+        var clientView = hold?.Begin(operation, target ?? string.Empty, token, () => null);
+
+        var server = RunInRcdAsync(hold, proceed);
+
+        if (clientView is null)
+        {
+            return (await server.WaitAsync(token)).Value!;
+        }
+
+        var first = await Task.WhenAny(server, clientView);
+        if (first == clientView && hold!.ClientFailed)
+        {
+            await clientView; // throws what the caller is to see
+        }
+
+        var result = await server;
+        if (!result.Applied || hold!.ClientFailed)
+        {
+            await clientView; // the client failed first (rcd skipped the call, or finished it unheard): throws
+        }
+
+        return result.Value!;
+    }
+
+    private async Task<RcdResult<T>> RunInRcdAsync<T>(Hold? hold, Func<Task<T>> proceed)
+    {
+        await rcdMountLock.WaitAsync();
+        try
+        {
+            if (hold is not null)
+            {
+                hold.MarkExecuting();
+                await hold.RcdWorkDone;
+                if (hold.ClientFailed && !hold.Abandoned)
+                {
+                    return new RcdResult<T>(false, default);
+                }
+            }
+
+            Task<T> result;
+            lock (doubleGate)
+            {
+                result = proceed();
+            }
+
+            return new RcdResult<T>(true, await result);
+        }
+        finally
+        {
+            rcdMountLock.Release();
+        }
+    }
+
+    private async Task<T> Through<T>(string operation, string? target, CancellationToken token, Func<Task<T>> proceed)
+    {
+        var hold = RecordAndTake(operation, target);
 
         if (hold is not null)
         {
@@ -397,4 +574,32 @@ internal sealed class HoldableRclone(RcloneDouble inner, TimeProvider time) : IR
     }
 
     private readonly object doubleGate = new();
+}
+
+internal static class HoldExtensions
+{
+    /// <summary>
+    /// Plays rcd finishing its work for <paramref name="holds"/> (mount/* calls) one at a time, in whatever
+    /// order its lock grants them (bs-6lu): waits for whichever is running inside rcd, finishes it
+    /// (<see cref="Hold.FinishInRcd"/>), and repeats. Only one hold can be executing at a time, so the
+    /// order the lock picks never matters to the caller. Fails after <see cref="PreemptSpecHarness.Guard"/>
+    /// if no remaining hold ever starts executing.
+    /// </summary>
+    public static async Task FinishInRcdInTurnAsync(this IEnumerable<Hold> holds)
+    {
+        var pending = holds.ToList();
+        while (pending.Count > 0)
+        {
+            var running = await WhenAnyExecutingAsync(pending);
+            running.FinishInRcd();
+            pending.Remove(running);
+        }
+    }
+
+    private static async Task<Hold> WhenAnyExecutingAsync(List<Hold> pending)
+    {
+        var any = await Task.WhenAny(pending.Select(h => h.WhenExecuting.ContinueWith(_ => h, TaskScheduler.Default)))
+            .WaitAsync(PreemptSpecHarness.Guard);
+        return await any;
+    }
 }

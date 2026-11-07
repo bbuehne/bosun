@@ -76,7 +76,9 @@ public sealed class UnmountAllFirstSpecTests
         var pump = h.StartPump();
         await PreemptSpecHarness.ArrivedAsync(held, "charlie's unmount");
 
-        // alpha's and bravo's calls returned (their drives are gone from rclone's table) ...
+        // alpha's and bravo's calls returned (their drives are gone from rclone's table). They could run
+        // because charlie's request is the LAST one sent: rcd's mount lock (bs-6lu) was free until it
+        // arrived. Hold alpha's instead and these two would be queued behind it, drives still mounted.
         Assert.False(h.IsMountedInRclone("M:"));
         Assert.False(h.IsMountedInRclone("N:"));
 

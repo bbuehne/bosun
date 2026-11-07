@@ -64,7 +64,8 @@ public sealed class SweepVerificationSpecTests
         var suspend = SuspendCaller.Call(h.Supervisor);
         var pump = h.StartPump();
         await PreemptSpecHarness.ArrivedAsync(failing, "bravo's unmount");
-        failing.Fail(Timeout());
+        failing.Abandon(Timeout());
+        failing.FinishInRcd(); // rcd finishes the abandoned call (no effect: the drive never goes away)
         await h.FinishAsync(pump, "the sweep never finished after bravo's call failed", suspend);
 
         Assert.Equal(MountState.Disabled, h.State("alpha"));
@@ -101,7 +102,8 @@ public sealed class SweepVerificationSpecTests
         var pump = h.StartPump();
         await PreemptSpecHarness.ArrivedAsync(failing, "bravo's unmount");
         h.Rclone.DropMountSilently("N:");
-        failing.Fail(Timeout());
+        failing.Abandon(Timeout());
+        failing.FinishInRcd();
         await h.FinishAsync(pump, "the sweep never finished", suspend);
 
         Assert.Equal(MountState.Disabled, h.State("bravo"));
@@ -138,22 +140,24 @@ public sealed class SweepVerificationSpecTests
     }
 
     /// <summary>
-    /// <b>Protects:</b> rule 5 as amended 2026-11-02 after this test first failed: a hung request on one host
-    /// does NOT hold back any other host's FIRST request (all leave at arrival, I8), but the sweep's
-    /// verification and forced unmounts wait for the slowest request. alpha's <c>mount/unmount</c> hangs for its
-    /// whole 30 s timeout; bravo's returns at once but does not take effect.
-    /// <b>Catches:</b> bravo's first request held behind alpha's (a serial sweep); bravo never escalated once
-    /// alpha's call returns, or escalated twice.
+    /// <b>Protects:</b> rule 5 against the real rcd (bs-6lu, which corrected the bs-5o4 amendment of
+    /// 2026-11-02): every host's FIRST request leaves Bosun at arrival (I8), but rcd runs <c>mount/*</c> calls
+    /// one at a time, so alpha's hung <c>mount/unmount</c> holds bravo's and charlie's inside rcd. Their drives
+    /// stay mounted while it hangs. The sweep takes the SUM of the unmounts, not the slowest, and bravo's
+    /// forced unmount can come only after rcd is free again.
+    /// <b>Catches:</b> a fake that unmounts bravo and charlie in parallel with alpha's hung call (the false
+    /// "slowest call, not the sum" assumption); bravo's first request held back at Bosun's end (a serial
+    /// sweep); bravo never escalated once rcd is free, or escalated twice.
     /// </summary>
     /// <remarks>
-    /// Originally written to require bravo's forced unmount by arrival + budget; that failed at c0d4a7c and the
-    /// spec was amended to accept the delay (ARCHITECTURE §4 rule 5; note after the bs-5o4 amendment in
-    /// DECISIONS.md): a second identical request at 3 s or 30 s both land after Windows has slept.
-    /// The clock is moved in 10 ms steps. The channel is pumped again only when the previous pump has
+    /// alpha's call hangs for its whole 30 s client timeout, at which point Bosun gives up on it
+    /// (<see cref="Hold.Abandon"/>) while rcd carries on, and rcd then finishes it a moment later. bravo's and
+    /// charlie's requests are not held: the fake has no client-side call timeout, so they simply wait their turn
+    /// behind it. The clock is moved in 10 ms steps. The channel is pumped again only when the previous pump has
     /// finished, so there is never a second consumer.
     /// </remarks>
     [Fact]
-    public async Task One_hung_unmount_never_holds_another_hosts_first_request_and_its_forced_unmount_follows_the_slowest_call()
+    public async Task One_hung_unmount_holds_the_others_inside_rcd_and_bravos_forced_unmount_follows_rcd_being_free()
     {
         var h = await MountedAsync();
         h.Rclone.ConfirmUnmountAtCall("N:", 2); // bravo: the first request does nothing; the forced one works
@@ -163,6 +167,7 @@ public sealed class SweepVerificationSpecTests
         var suspend = SuspendCaller.Call(h.Supervisor);
         var pump = h.StartPump();
         await PreemptSpecHarness.ArrivedAsync(hung, "alpha's unmount");
+        await PreemptSpecHarness.WaitForAsync(() => hung.IsExecuting, "alpha's unmount running inside rcd");
 
         var until = arrival.AddSeconds(30);
         while (h.Now < until)
@@ -174,18 +179,34 @@ public sealed class SweepVerificationSpecTests
             }
         }
 
-        hung.Fail(Timeout());
-        await h.FinishAsync(pump, "the sweep never finished after alpha's call timed out", suspend);
-        await h.AdvanceAsync(TimeSpan.FromSeconds(1), Step);
-
+        // Bosun's side: all three first requests left at arrival, bravo's among them.
         var bravoFirst = h.HRclone.Calls.First(c => c.Operation == "unmount" && c.Target == "N:");
         Assert.Equal(arrival, bravoFirst.At);
+        Assert.Equal(1, UnmountsAt(h, "O:", arrival));
 
+        // rcd's side, 30 s later: still stuck on alpha's call. bravo's and charlie's requests have not run,
+        // so their drives are still mounted, and nothing has been verified.
+        Assert.True(h.IsMountedInRclone("N:"));
+        Assert.True(h.IsMountedInRclone("O:"));
+        Assert.Empty(h.EscalationTimes("bravo"));
+
+        // Bosun's 30 s timeout fires for alpha's call; rcd is still running it, then finishes.
+        hung.Abandon(Timeout());
+        Assert.True(h.HRclone.RcdMountLockHeld);
+        hung.FinishInRcd();
+
+        await h.FinishAsync(pump, "the sweep never finished after rcd was free again", suspend);
+        await h.AdvanceAsync(TimeSpan.FromSeconds(1), Step);
+
+        // Only now do bravo's and charlie's requests run, and bravo's forced unmount follows.
+        Assert.False(h.IsMountedInRclone("M:"));
+        Assert.False(h.IsMountedInRclone("O:"));
+        Assert.False(h.IsMountedInRclone("N:"));
         var escalations = h.EscalationTimes("bravo");
         Assert.Single(escalations);
         Assert.True(
-            escalations[0] >= arrival.AddSeconds(Budget) && escalations[0] <= until + TimeSpan.FromSeconds(1),
-            $"bravo's forced unmount came {(escalations[0] - arrival).TotalSeconds:0.##} s after arrival; expected after " +
-            $"the budget and no later than alpha's call returning (30 s).");
+            escalations[0] >= until && escalations[0] <= until + TimeSpan.FromSeconds(1),
+            $"bravo's forced unmount came {(escalations[0] - arrival).TotalSeconds:0.##} s after arrival; expected " +
+            $"right after rcd was free again (30 s), not at the {Budget} s budget.");
     }
 }

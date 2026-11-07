@@ -24,6 +24,13 @@ namespace Bosun.Tests.Supervisor;
 /// <para>
 /// Nothing here reaches a real rclone, drive letter or WinFsp; time moves only when a test moves it.
 /// </para>
+/// <para>
+/// <b>rcd runs mount calls one at a time (bs-6lu).</b> Bosun sends every request at arrival, but
+/// <c>rclone rcd</c> executes <c>mount/mount</c>, <c>mount/unmount</c> and <c>mount/listmounts</c> under one
+/// lock, so the sweep takes the SUM of its unmounts, and a hung one holds the rest inside rcd. The fake
+/// models that (<see cref="HoldableRclone"/> remarks): a test that observes a drive being unmounted must let
+/// rcd get to that call. "Requests in flight" below means requests sent, not requests executing.
+/// </para>
 /// </remarks>
 public sealed class SuspendUnmountAllFirstTests
 {
@@ -89,6 +96,11 @@ public sealed class SuspendUnmountAllFirstTests
         Assert.Equal(listMountsBefore, h.HRclone.Count("listmounts")); // verification waits for all requests
         Assert.All(["a1", "b1", "c1"], key => Assert.Equal(MountState.Draining, h.State(key)));
 
+        // rcd gets through them one at a time: only one is executing, the other two are queued behind it.
+        await WaitUntilAsync(() => holds.Any(x => x.IsExecuting), "one unmount running inside rcd");
+        Assert.Equal(1, holds.Count(x => x.IsExecuting));
+        Assert.All(Drives, drive => Assert.True(h.IsMountedInRclone(drive)));
+
         holds.ForEach(x => x.Release());
         await h.FinishAsync(pump, "the sweep never finished after every unmount returned", suspend);
 
@@ -127,51 +139,64 @@ public sealed class SuspendUnmountAllFirstTests
     }
 
     /// <summary>
-    /// <b>Protects:</b> the point of the change at its sharpest. Only ONE host's unmount hangs; the other
-    /// two requests must still be sent, take effect, and be unmounted, with the first still pending.
-    /// <b>Catches:</b> any ordering that lets one slow call gate the others.
+    /// <b>Protects:</b> what bs-5o4 does and does not buy, against the real rcd (bs-6lu). Only ONE host's
+    /// unmount hangs. All three requests still leave Bosun at arrival (that is the part bs-5o4 delivers), but
+    /// rcd runs <c>mount/*</c> calls one at a time, so the hung call holds the other two inside rcd: their
+    /// drives stay mounted while it hangs, and go only once it ends. The sweep takes the sum, not the slowest.
+    /// <b>Catches:</b> a fake that lets rcd unmount the other two in parallel with the hung one (the false
+    /// "slowest call, not the sum" assumption this test used to encode); a sweep that holds a request back
+    /// at Bosun's end; a sweep that finishes before the hung call returns.
     /// </summary>
     [Fact]
-    public async Task One_hung_unmount_does_not_hold_back_the_other_two_which_are_unmounted_while_it_hangs()
+    public async Task One_hung_unmount_holds_the_other_two_inside_rcd_although_all_three_requests_left_at_arrival()
     {
         var h = await ThreePersistentMountedAsync();
         var stuck = h.HRclone.HoldNext(OnCancel.Ignore, "unmount");
 
-        var (suspend, pump, _) = BeginSuspend(h);
+        var (suspend, pump, arrival) = BeginSuspend(h);
         await PreemptSpecHarness.ArrivedAsync(stuck, "the hung unmount");
-
-        // The other two requests went out and completed although the first has not returned. Their
-        // drives are gone from the rcd; the hung host's is not.
         await WaitUntilAsync(() => h.HRclone.Count("unmount") == 3, "the other two unmount requests being sent");
-        var stuckDrive = stuck.Target!;
-        foreach (var drive in Drives.Where(d => d != stuckDrive))
-        {
-            Assert.False(h.IsMountedInRclone(drive), $"{drive} should already be unmounted while {stuckDrive} hangs");
-        }
+        await WaitUntilAsync(() => stuck.IsExecuting, "the hung unmount running inside rcd");
 
-        Assert.True(h.IsMountedInRclone(stuckDrive));
+        // Bosun's side: every request left at the instant of arrival.
+        Assert.All(Drives, drive => Assert.Equal([arrival], h.HRclone.Times("unmount", drive)));
+
+        // rcd's side: one call is running and holds the lock; the other two have not run. No drive is
+        // gone, including the two whose requests are already on the wire.
+        Assert.True(h.HRclone.RcdMountLockHeld);
+        Assert.All(Drives, drive => Assert.True(h.IsMountedInRclone(drive), $"{drive} should still be mounted while rcd is stuck on {stuck.Target}"));
         Assert.True(stuck.IsPending);
+        Assert.False(pump.IsCompleted);
 
         stuck.Release();
         await h.FinishAsync(pump, "the sweep never finished after the hung unmount returned", suspend);
 
         Assert.All(["a1", "b1", "c1"], key => Assert.Equal(MountState.Disabled, h.State(key)));
         Assert.All(Drives, drive => Assert.False(h.IsMountedInRclone(drive)));
+        Assert.All(Drives, drive => Assert.Equal(1, h.HRclone.Count("unmount", drive)));
     }
 
     /// <summary>
     /// <b>Protects:</b> the forced-unmount escalation and the arrival-counted budget (bs-7d7) under the
-    /// worst case: every request times out after the 30 s call timeout. After that the whole budget has
-    /// long gone, so every still-listed host escalates, once, and the forced requests are ALSO sent
-    /// together; the drains then complete.
+    /// worst case: every request times out after the 30 s call timeout while rcd is still running them
+    /// (bs-6lu: the timed-out calls are abandoned, not cancelled; they keep rcd's lock and run one after
+    /// another). After that the whole budget has long gone, so every still-listed host escalates, once, and
+    /// the forced requests are ALSO sent together; the drains then complete.
     /// <b>Catches:</b> no escalation after a timed-out request; an escalation counted from when the
     /// request phase ended rather than from arrival (it would not fire at all at +30 s for a 3 s budget
-    /// if elapsed were taken from the wrong instant); a forced phase that is serial again.
+    /// if elapsed were taken from the wrong instant); a forced phase that is serial again; a fake that lets
+    /// the forced unmounts run inside rcd while the abandoned first-round calls still hold its lock.
     /// </summary>
     [Fact]
     public async Task With_every_unmount_timing_out_all_three_escalate_once_and_the_forced_requests_are_also_sent_together()
     {
         var h = await ThreePersistentMountedAsync();
+        foreach (var drive in Drives)
+        {
+            // The first unmount rcd runs for a drive has no effect; the forced one (call 2) does.
+            h.Rclone.ConfirmUnmountAtCall(drive, 2);
+        }
+
         var first = Drives.Select(_ => h.HRclone.HoldNext(OnCancel.Ignore, "unmount")).ToList();
         var forced = Drives.Select(_ => h.HRclone.HoldNext(OnCancel.Ignore, "unmount")).ToList();
 
@@ -181,8 +206,19 @@ public sealed class SuspendUnmountAllFirstTests
             await PreemptSpecHarness.ArrivedAsync(hold, "a first-round unmount request");
         }
 
+        await WaitUntilAsync(() => first.Any(x => x.IsExecuting), "one first-round unmount running inside rcd");
+        Assert.Equal(1, first.Count(x => x.IsExecuting));
+
         h.FireTimers(RcloneClient.UnmountTimeout);
-        first.ForEach(x => x.Fail(UnmountTimedOut()));
+        first.ForEach(x => x.Abandon(UnmountTimedOut()));
+
+        // Bosun has given up on all three, but rcd has not: its lock is still held by the first one and the
+        // other two have not run. The sweep's verification (mount/listmounts) is queued behind them.
+        Assert.True(h.HRclone.RcdMountLockHeld);
+        Assert.All(Drives, drive => Assert.True(h.IsMountedInRclone(drive)));
+
+        // rcd gets through the abandoned calls in turn (none changes the table), then answers listmounts.
+        await first.FinishInRcdInTurnAsync();
 
         foreach (var hold in forced)
         {
@@ -193,7 +229,7 @@ public sealed class SuspendUnmountAllFirstTests
         Assert.All(Drives, drive => Assert.Equal(2, h.HRclone.Count("unmount", drive)));
         Assert.All(Drives, drive => Assert.True(h.IsMountedInRclone(drive)));
 
-        forced.ForEach(x => x.Release());
+        await forced.FinishInRcdInTurnAsync();
         await h.FinishAsync(pump, "the sweep never finished after the forced requests returned", suspend);
 
         foreach (var key in new[] { "a1", "b1", "c1" })
@@ -308,7 +344,8 @@ public sealed class SuspendUnmountAllFirstTests
         await WaitUntilAsync(() => h.HRclone.Count("unmount") == 3, "the other two unmount requests being sent");
 
         h.FireTimers(RcloneClient.UnmountTimeout);
-        stuck.Fail(UnmountTimedOut());
+        stuck.Abandon(UnmountTimedOut());
+        stuck.FinishInRcd(); // rcd gets there in the end, which is what lets the queued unmounts run
         await h.FinishAsync(pump, "the sweep never finished after the stuck unmount timed out", suspend);
         await h.AdvanceAsync(TimeSpan.FromSeconds(10), Step);
         Assert.All(["a1", "od", "c1"], key => Assert.Equal(MountState.Disabled, h.State(key)));
