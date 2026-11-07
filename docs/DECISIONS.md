@@ -2181,6 +2181,17 @@ the amendment below. Cancelling a command in flight remains not done.)*
 - Residual: a suspend that arrives during the VFS baseline sample that follows a mount waits for it (at most
   one probe timeout), because the sample is the tail of a command and not a tick. Not starting the sample
   while a suspend is already pending covers the likelier case.
+- Residual (`bs-5ga` item 1, accepted 2026-11-07 by the maintainer): a host that reaches `Ready` inside an
+  idle-probe tick starts its mount in that tick, and the mount's pre-mount deep probe is not handed the
+  tick's preemption token (pinned by
+  `The_deep_probe_of_a_mount_started_inside_a_tick_is_not_cancelled_and_the_mount_is_abandoned_cleanly`).
+  A suspend that arrives during it waits for it, at most one probe timeout (5 s by default, past the
+  roughly 2 s Windows allows), so other hosts' unmounts can land after the machine has slept; resume
+  reconciles (ADR-017). The host being probed never mounts: D1 abandons the mount once the probe returns.
+  This is the same wait the decision already accepts for a user's "retry now" and an enable probe. Making
+  that probe preemptible was considered and not taken: it changes the I1 mount-entry path every mount
+  goes through, and a mistake there books a suspend as a mount failure, for a race that needs a host
+  coming back, its probe hanging and the lid closing during that probe.
 - The counter is not decremented if the supervisor loop is already dead. Nothing can mount without the loop,
   so the closed gate costs nothing.
 

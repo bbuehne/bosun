@@ -510,7 +510,10 @@ right before building any UI.
    best-effort by design, bounded by a budget that can elapse. It reconciles
    against `mount/listmounts` first; any host still `Mounted` is force-probed
    shallow *and* deep, and drains on a single deep failure once `rclone rcd` has
-   answered `core/version`. Everything else previously enabled is re-probed
+   answered `core/version`. The forced shallow probe is handled exactly like a
+   scheduled one: a failure adds one to the host's consecutive failures and drains
+   it (as an automatic unmount) only when that reaches `failures_before_unmount`
+   (`bs-c1i`). Everything else previously enabled is re-probed
    immediately: a `Disabled` host through `Probing`, a `Ready` or `Unreachable`
    host in place (rule 10).
    A network address change takes the identical path. See ADR-017.
