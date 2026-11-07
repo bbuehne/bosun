@@ -2178,9 +2178,9 @@ the amendment below. Cancelling a command in flight remains not done.)*
   they used to cover is kept as its own test with `mount/mount` held open.
 - A `mount/mount` request queued ahead of a suspend is now refused with "the system is suspended", the same
   refusal as during the suspend (`bs-oly`). It used to mount and be drained a moment later.
-- Residual: a suspend that arrives during the VFS baseline sample that follows a mount waits for it (at most
-  one probe timeout), because the sample is the tail of a command and not a tick. Not starting the sample
-  while a suspend is already pending covers the likelier case.
+- *(Was a residual; closed 2026-11-07, `bs-5ga.3` -- see the amendment at the end of this ADR.)* A suspend
+  that arrives during the VFS baseline sample that follows a mount used to wait for it (at most one probe
+  timeout), because the sample is the tail of a command and not a tick. It now cancels the sample.
 - Residual (`bs-5ga` item 1, accepted 2026-11-07 by the maintainer): a host that reaches `Ready` inside an
   idle-probe tick starts its mount in that tick, and the mount's pre-mount deep probe is not handed the
   tick's preemption token (pinned by
@@ -2273,8 +2273,9 @@ ordinary one in which every drained host waits for resume, and skipped hosts are
 - **Config reload** (`ApplyConfigChangeAsync`). Stopping would drop part of the new definition; a changed host's
   forced probe cannot be skipped either, because an `Unreachable` on-demand host has no timer to probe it later.
 - **`ReconcileAsync`'s drain loop**, the `mount/unmount` it issues for each mount rclone no longer lists.
-  This is `bs-5ga` item 4 ("an in-progress `ReconcileAsync`'s drains are not preemptible") and stays open there.
-  The re-derivation does stop before it starts `ReconcileAsync`.
+  The re-derivation does stop before it starts `ReconcileAsync`. (Settled 2026-11-07, `bs-5ga.3`: these
+  are drains and orphan unmounts, so decision 4 already covers them -- see the amendment at the end of
+  this ADR.)
 - **A drain in flight**, and the drain a forced probe's failure starts (decision 4).
 - **Startup.** `EnableHostAsync` already declines to start a probe while a suspend is pending.
 
@@ -2376,6 +2377,31 @@ recovery at wake against a stuck rcd, where resume queues behind those steps. rc
 a time anyway (`bs-6lu`), so combining due retries into one step (about 40-60 lines, moderate risk) would
 remove only Bosun's own round trips. A retry step already queued on the channel before a suspend can still
 send one extra unmount for a host the batch left unconfirmed; that is part of this residual.
+
+### Amendment (2026-11-07, bs-5ga.3): a suspend preempts the post-mount VFS baseline sample
+
+*Maintainer decision B; option A (close as covered by the skip-when-pending check) was recommended and declined.*
+This replaces the residual bullet in Consequences ("a suspend that arrives during the VFS baseline sample that
+follows a mount waits for it"). The sample is the tail of a mount command (or of the idle tick that began the
+mount), so it has no tick source of its own for the `SuspendAsync` prologue to cancel. It now runs under a source
+of its own, published in one field (`runningBaselineSample`) that `PreemptRunningTick` cancels beside the running
+tick's source: the same `CancelAsync` on the caller's thread, and the same preemption-token check
+(`TickPreempted` semantics) afterwards, so nothing about it is a second mechanism. The source is unpublished
+before it is disposed, and a cancel that loses the race to the disposal is swallowed.
+
+*A preempted sample is "no baseline taken", not a failed poll.* It is discarded before any bookkeeping: no
+baseline, no `UploadFailureCount`, no `VfsPollFaultLogged`, no idle-clock restart, no counter, no backoff, no
+warning (one Information line). It cannot reach the fail-closed "Which VFS" path of rule 7, so idle-unmount
+eligibility is unchanged: the idle timer, armed at the mount, runs on exactly as it does after a baseline poll
+that failed. The mount itself had already succeeded, so the host stays `Mounted` and the suspend drains it with
+`DrainCause.Suspend`. Only a suspend preempts the sample; a sample that fails any other way is the failed poll it
+always was. If the suspend does not arrive, nothing changes. A suspend already pending still skips the sample
+(decision 5).
+
+*Decision 4, spelled out for `ReconcileAsync`.* Its drains, and the `mount/unmount` it issues for each mount that
+rclone no longer lists (orphans), are drains: decision 4 already says they are not preempted, and a pending
+suspend does not cancel them. (The reconciliation tick's own `mount/listmounts` call stays preemptible, decision
+2, and a preempted one acts on nothing; it is the unmounts after it that finish.) This closes `bs-5ga` item 4.
 
 ---
 

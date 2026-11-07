@@ -251,7 +251,8 @@ channel runs one action at a time, so a suspend queued behind a hung probe or
 on the *caller's* thread, which in production is this same `SystemEvents` thread,
 before it queues itself, and in this order: it records its arrival time, it counts
 itself as pending (which closes the mount gate of rule 5 at once), and it cancels the
-recurring tick that is running. It does only that — it increments a counter and
+recurring tick that is running (and the post-mount VFS baseline sample, if one is in
+flight). It does only that — it increments a counter and
 cancels a token (`CancelAsync`, so no callback runs on this thread) — and it never
 throws or blocks. Only the five recurring timer callbacks can be cancelled this way
 (idle probe, mounted shallow probe with its VFS sample, mounted deep probe, idle-unmount
@@ -588,8 +589,11 @@ right before building any UI.
    keeps or gets the ADR-022 record (rule 9a), and a persistent host mounts on
    resume by its tier. A deep-probe *failure* still routes as in rule 2. A
    `mount/mount` already sent is never cancelled; the mount completes and the
-   suspend drains it as above, and the post-mount VFS baseline sample (rule 7) is
-   skipped.
+   suspend drains it as above. The post-mount VFS baseline sample (rule 7) is skipped
+   if a suspend is already pending, and is cancelled if one arrives while its
+   `vfs/list` or `vfs/stats` call is in flight (ADR-023 amendment, `bs-5ga.3`): the
+   host stays `Mounted` with no baseline taken, and the suspend drains it. A cancelled
+   sample is not a failed poll and changes nothing (rule 7).
 
    **A suspend preempts the routine checks that are running** (ADR-023, `bs-4in`).
    Five recurring timer callbacks are cancellable by a suspend: the idle probe, the
@@ -599,9 +603,11 @@ right before building any UI.
    tick discards its result — a `Success` too — and changes no counter, state, VFS
    bookkeeping or flag: it is not a failed probe, so it cannot drain a host as
    `Automatic`. It re-arms its own timer and logs one Information line. A tick that
-   starts while a suspend is pending skips its I/O the same way. Drains, `mount/mount`
-   once sent, commands, and the probe an enable is already running are not preempted:
-   the call they have in flight finishes.
+   starts while a suspend is pending skips its I/O the same way. The one other thing a
+   suspend cancels is the post-mount VFS baseline sample, which is the tail of a mount
+   command rather than a tick (see above). Drains (including `ReconcileAsync`'s drains and
+   orphan unmounts), `mount/mount` once sent, commands, and the probe an enable is
+   already running are not preempted: the call they have in flight finishes.
 
    **A command that works through several hosts stops between them** (ADR-023
    amendment, `bs-5ga.1`). Resume, a network change, "Unmount all & re-probe" and the
@@ -617,7 +623,7 @@ right before building any UI.
    no failure counted, no backoff reset, no timer disposed — and is picked up by the
    suspend (a `Mounted` host is drained) and by the resume after it, which visits
    every enabled host. A single-host command (`retry now`) is unaffected. Not covered:
-   config reload, and the drains inside `ReconcileAsync` (`bs-5ga` item 4).
+   config reload; the drains inside `ReconcileAsync` are drains and are not preempted.
    *(Added 2026-11-07, `bs-5ga.2`, maintainer decision A.)* A repair that stops this
    way does not return as if it had finished: `RepairAllAsync` throws
    `RepairStoppedException` and the click shows "stopped: the computer is going to
@@ -653,7 +659,8 @@ right before building any UI.
    `diskCache.bytesUsed`, `diskCache.files`, `diskCache.uploadsInProgress`,
    `diskCache.uploadsQueued`, `metadataCache.dirs`, `metadataCache.files`. The first
    sample after a mount (taken at the mount itself) is the baseline; it is thrown away
-   on every unmount, so a remount never compares against the previous mount. `vfs/stats`'s
+   on every unmount, so a remount never compares against the previous mount. A baseline
+   sample that a suspend cancels takes no baseline and is not a failed poll (rule 5). `vfs/stats`'s
    `inUse` is never read: it is a reference count on the VFS object, not a count of open
    files. Only on-demand hosts with `idle_unmount_seconds > 0` are polled at all.
 

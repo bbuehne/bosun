@@ -9,8 +9,8 @@ namespace Bosun.Tests.Supervisor.Independent.SuspendPreempt;
 /// ADR-023 decision 5 (D1: a mount that passed its deep probe is abandoned if a suspend is pending),
 /// decision 6 (D5: idle ticks skip while suspended), and the residuals the ADR admits (decision 4 and
 /// "What is not preempted, and why"): a <c>mount/mount</c> already sent, the probe of an enable, a command,
-/// and the post-mount VFS baseline sample run to completion. Each residual test checks the documented
-/// behaviour is the actual behaviour. Written from ADR-023 and §4 rule 5, not from the implementation.
+/// run to completion (the post-mount VFS baseline sample used to be on that list; since bs-5ga.3 a suspend
+/// cancels it). Each residual test checks the documented behaviour is the actual behaviour. Written from ADR-023 and §4 rule 5, not from the implementation.
 /// </summary>
 public sealed class MountInFlightAndResidualSpecTests
 {
@@ -231,14 +231,17 @@ public sealed class MountInFlightAndResidualSpecTests
     }
 
     /// <summary>
-    /// <b>Protects:</b> ADR-023's admitted residual: "a suspend that arrives during the VFS baseline sample that
-    /// follows a mount waits for it (at most one probe timeout)", and rule 7: every such poll runs "under one
-    /// probe timeout".
-    /// <b>Catches:</b> a baseline poll with no timeout on the injected clock -- with <c>rclone rcd</c> hung, the
-    /// suspend would wait forever behind it, not "at most one probe timeout".
+    /// <b>Protects:</b> ADR-023's amendment of 2026-11-07 (bs-5ga.3), which replaced the residual "a suspend that
+    /// arrives during the VFS baseline sample that follows a mount waits for it (at most one probe timeout)": the
+    /// suspend now cancels the sample, so it does NOT wait. This test used to fire the 5 s probe timeout to
+    /// release the suspend and pin that wait; it now moves no clock at all. (Rule 7's "one probe timeout" bound
+    /// on the poll itself still holds for a sample no suspend touches: see
+    /// <c>PostMountBaselinePreemptionTests.A_sample_released_by_the_probe_timeout_is_a_failed_poll_as_before</c>.)
+    /// <b>Catches:</b> a baseline sample that a suspend cannot cancel, so that the suspend needs the probe timeout
+    /// (past the 3 s suspend budget) to get through.
     /// </summary>
     [Fact]
-    public async Task A_suspend_behind_a_hung_VFS_baseline_sample_is_released_by_the_probe_timeout()
+    public async Task A_suspend_during_a_hung_VFS_baseline_sample_cancels_it_instead_of_waiting_for_the_probe_timeout()
     {
         var h = NewHarness(HostFixtures.OnDemand("od", idleUnmountSeconds: 600, drive: "Q:"));
         await h.StartAsync();
@@ -247,11 +250,12 @@ public sealed class MountInFlightAndResidualSpecTests
         var pump = h.StartPump();
         await PreemptSpecHarness.ArrivedAsync(sample, "the post-mount VFS baseline sample");
         Assert.Equal(1, h.MountCalls("Q:"));
+        var before = h.Now;
 
         var suspend = SuspendCaller.Call(h.Supervisor);
-        h.FireTimers(TimeSpan.FromSeconds(5)); // global.probe_timeout_seconds
-        await h.FinishAsync(pump, "the VFS baseline sample was not bounded by the probe timeout", request, suspend);
+        await h.FinishAsync(pump, "the suspend waited for the post-mount VFS baseline sample", request, suspend);
 
+        Assert.Equal(before, h.Now); // the probe timeout did not fire: the suspend released the sample
         Assert.Equal([DrainCause.Suspend], h.DrainCauses("od"));
         Assert.False(h.IsMountedInRclone("Q:"));
     }
