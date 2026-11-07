@@ -155,13 +155,15 @@ public sealed class SweepInterleavingSpecTests
         var h = New(Persistent("alpha", "M:"), Persistent("bravo", "N:"));
         await h.StartAsync();
         var before = h.Transitions("bravo").Count;
+        h.Rclone.ConfirmUnmountAtCall("N:", 2); // the timed-out call has no effect; the next one does
         var held = h.HRclone.HoldNextAt(OnCancel.Ignore, "unmount", "N:");
 
         var suspend = SuspendCaller.Call(h.Supervisor);
         var pump = h.StartPump();
         await PreemptSpecHarness.ArrivedAsync(held, "bravo's unmount");
         var resume = h.Supervisor.ResumeAsync();
-        held.Fail(Timeout());
+        held.Abandon(Timeout());
+        held.FinishInRcd(); // rcd carries on and finishes; the call had no effect on the table (call 1 of 2)
         await h.FinishAsync(pump, "the sweep or the resume never finished", suspend, resume);
         Assert.NotEqual(MountState.Mounted, h.State("bravo"));
 
@@ -265,6 +267,7 @@ public sealed class SweepInterleavingSpecTests
     {
         var h = New(Persistent("alpha", "M:"), Persistent("bravo", "N:"));
         await h.StartAsync();
+        h.Rclone.ConfirmUnmountAtCall("N:", 2); // the timed-out call has no effect; the next one does
         var held = h.HRclone.HoldNextAt(OnCancel.Ignore, "unmount", "N:");
 
         var suspend = SuspendCaller.Call(h.Supervisor);
@@ -273,7 +276,8 @@ public sealed class SweepInterleavingSpecTests
         var next = WithoutBravo();
         h.Store.Publish(next);
         var reload = h.Supervisor.ConfigChangedAsync(next);
-        held.Fail(Timeout());
+        held.Abandon(Timeout());
+        held.FinishInRcd(); // rcd carries on and finishes; the call had no effect on the table (call 1 of 2)
         await h.FinishAsync(pump, "the sweep or the reload never finished", suspend, reload);
         Assert.True(h.IsMountedInRclone("N:"), "setup: bravo's drive is still served after its failed request");
 

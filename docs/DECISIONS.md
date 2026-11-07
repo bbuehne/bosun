@@ -2216,3 +2216,20 @@ verification and forced unmount past arrival plus the budget. Accepted rather th
 continuations: every host's first request still leaves at arrival, which is what I8 needs; a second
 identical request at 3 s or 30 s both land after Windows has slept (~2 s); resume reconciles
 (ADR-017). `docs/ARCHITECTURE.md` §4 rule 5 states this.
+
+*Correction (2026-11-06, bs-6lu; the maintainer's decision, option A).* The amendment above and its first
+note say the request phase "takes as long as its slowest call, not the sum". That is wrong against the real
+`rclone rcd`, and is corrected here rather than rewritten out of the record. rcd holds one package-level mutex
+(`mountMu`, `cmd/mountlib/rc.go`, checked at rclone v1.75.0) for the whole of `mount/mount` (including the SFTP
+connect), `mount/unmount` (including the WinFsp unmount and an up-to-10 s poll for the drive letter to go),
+`mount/listmounts`, `mount/types` and `mount/unmountall`; `core/version`, `operations/list` and `vfs/*` do not
+take it. The `mount/unmount` and `mount/listmounts` handlers ignore their context, so a call Bosun times out on
+keeps running in rcd and keeps the lock. What is true: Bosun sends every host's unmount at arrival, and the
+amendment removed Bosun's own per-host round trips (the serial drain step of up to about 80 s per host). What
+is not: rcd executes those requests one at a time, so the sweep takes the **sum** of the unmounts, and one
+hung unmount holds the rest inside rcd (their drives stay mounted) until it ends, however many requests are
+already on the wire. The verification `mount/listmounts` and any forced unmount queue behind it too.
+**Accepted as a residual**: Bosun cannot parallelise around rcd's lock. A separate `rclone rcd` per host
+would, and was considered and rejected for now. The per-unmount latency on the maintainer's machine is unmeasured;
+manual test T1 will show it. The test fake (`HoldableRclone`) now models the lock, and the tests that assumed
+parallel unmounts were rewritten to the real behaviour. `docs/ARCHITECTURE.md` §4 rule 5 states this.

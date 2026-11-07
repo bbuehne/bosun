@@ -2829,9 +2829,12 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// <list type="number">
     /// <item><b>Request.</b> Every host's <c>mount/unmount</c> is started before any is awaited, so each
     /// request is on the wire at once and the last host's does not wait for the first host's. Each call
-    /// keeps its own timeout (<c>RcloneClient.UnmountTimeout</c>, 30 s), so the whole phase takes as long
-    /// as its slowest call, not the sum. Before this, one stuck rcd made host N's request wait for hosts
-    /// 1..N-1 each running a whole step (about 80 s) and the later hosts were not unmounted before sleep.</item>
+    /// keeps its own timeout (<c>RcloneClient.UnmountTimeout</c>, 30 s). That removes Bosun's own per-host
+    /// round trips: before this, one stuck rcd made host N's request wait for hosts 1..N-1 each running a
+    /// whole step (about 80 s). It does NOT make rcd parallel (bs-6lu): <c>rclone rcd</c> runs
+    /// <c>mount/*</c> calls under one lock, so rcd executes them one at a time, the sweep takes the sum of
+    /// the unmounts, and one hung unmount holds the rest inside rcd. Accepted residual; see
+    /// docs/ARCHITECTURE.md §4 rule 5.</item>
     /// <item><b>Verify.</b> One <c>mount/listmounts</c> covers all hosts. A host the table no longer lists
     /// completes its drain. Nothing is taken from an unmount call's own outcome (rule 4).</item>
     /// <item><b>Escalate.</b> A host still listed whose budget (counted from arrival, bs-7d7) has run out

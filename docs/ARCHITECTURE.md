@@ -450,7 +450,8 @@ right before building any UI.
    state or transition. A failed request on one host does not stop the others: every first request
    is already on the wire. A *hung* request does delay the rest of the sweep,
    though: verification, completion and any forced unmount for every host wait
-   until the slowest request returns (at most its 30 s call timeout), so a forced
+   until every request has returned (each at most its 30 s call timeout; see the
+   rcd lock below, which can make them all wait together), so a forced
    unmount can come later than arrival plus the budget. This is accepted
    (2026-11-02, found by independent testing of `bs-5o4`): the first request,
    which is what I8 needs, leaves at arrival for every host; Windows allows about
@@ -461,10 +462,34 @@ right before building any UI.
    `mount/listmounts` — up to about 80 s against a stuck `rclone rcd`) before the
    next host's unmount was even requested, so with a stuck rcd the later hosts
    were not unmounted before the machine slept (Invariant I8). Now the request
-   to the last host leaves at the same instant as the first host's, and the
-   request phase takes as long as its slowest call, not the sum. This applies to
-   the suspend sweep only; every other drain (probe failure, idle timeout, user
-   unmount, repair, config change) is still one host's step at a time.
+   to the last host leaves *Bosun* at the same instant as the first host's. This
+   applies to the suspend sweep only; every other drain (probe failure, idle
+   timeout, user unmount, repair, config change) is still one host's step at a
+   time.
+
+   **`rclone rcd` runs mount calls one at a time** (`bs-6lu`, found 2026-11-06,
+   checked against `cmd/mountlib/rc.go` at rclone v1.75.0). rcd holds one
+   package-level mutex, `mountMu`, for the whole of `mount/mount` (including
+   connecting to the SFTP host), `mount/unmount` (including the WinFsp unmount
+   and an up-to-10 s poll for the drive letter to vanish), `mount/listmounts`,
+   `mount/types` and `mount/unmountall`. `core/version`, `operations/list` and
+   `vfs/*` do not take it. So the sweep sends every host's unmount at arrival,
+   but rcd *executes* them one after another: the request phase takes the **sum**
+   of the unmounts, not the slowest one, and one hung unmount holds every other
+   host's unmount inside rcd, so their drives stay mounted until it ends. The
+   `mount/unmount` and `mount/listmounts` handlers ignore their context, so a call
+   Bosun gives up on at its 30 s timeout keeps running in rcd and keeps the lock:
+   the forced unmounts and the verification `mount/listmounts` queue behind it
+   too. What `bs-5o4` still removes is Bosun's own per-host round trips (no
+   request waits behind another's whole drain step on Bosun's side), and it
+   still gets every request onto the wire inside the 2 s Windows allows. It
+   cannot make rcd parallel. **Accepted residual** (`bs-6lu`, decided 2026-11-06,
+   maintainer): with a healthy rcd each unmount is quick (the per-unmount latency
+   on the maintainer's machine is unmeasured; manual test T1 will show it); with a
+   stuck one, drives past the stuck host can stay mounted through the sleep, and
+   resume reconciles (ADR-017). Bosun cannot parallelise around rcd's lock; a
+   separate rcd per host would, and was considered and rejected for now. The test
+   fake models the lock (`HoldableRclone`).
 
    A host that is **already `Draining`** for an ordinary reason when suspend
    arrives (a probe-failure threshold, an idle timeout, a user unmount, a repair)
