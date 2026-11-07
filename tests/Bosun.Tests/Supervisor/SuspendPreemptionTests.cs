@@ -316,9 +316,12 @@ public sealed class SuspendPreemptionTests
     }
 
     /// <summary>
-    /// <b>Protects:</b> the same gate on the COMMAND routes, which are not preempted: a "retry now" and a
-    /// network change queued ahead of the suspend still probe, take the persistent host to Ready, and
-    /// must stop there.
+    /// <b>Protects:</b> the same gate on the COMMAND routes, which are not preempted: a "retry now"
+    /// queued ahead of the suspend still probes, takes the persistent host to Ready, and must stop there.
+    /// "Retry now" is a single-host command, so it has no next host to stop before (bs-5ga.1); the
+    /// multi-host commands, which do stop between hosts, are pinned in
+    /// <see cref="SuspendStopsMultiHostCommandsTests"/>. What stays true for those as well is that the
+    /// call in flight is never cancelled.
     /// <b>Catches:</b> a gate placed only on the tick path.
     /// </summary>
     [Fact]

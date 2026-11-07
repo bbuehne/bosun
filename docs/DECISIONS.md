@@ -2117,7 +2117,9 @@ worst case, and the troubleshooter's analysis of 2026-11-02 (at `9a93b77`) measu
    probe timer (ADR-011, I2).
 4. **Not preempted:** drains, `mount/mount` once sent, commands (resume, network change, user actions,
    repair, config change, `OnRcloneRestartedAsync`), and the probe that `EnableHostAsync` is already running.
-   There is no `Probing -> Disabled` edge and none is added.
+   There is no `Probing -> Disabled` edge and none is added. *(Amended 2026-11-06, `bs-5ga.1`: the call a
+   command has in flight is still never cancelled, but a command that works through several hosts now
+   declines to start the next one once a suspend is pending. See the amendment below.)*
 5. **D1: a mount that has passed its deep probe is abandoned if a suspend is pending.** After the deep probe
    passes and before `mount/mount` is sent, a pending suspend abandons the mount on the existing
    `Mounting -> Draining` edge with `DrainCause.Suspend`. It is not a mount failure: no counter, no retry
@@ -2161,7 +2163,9 @@ channel gives up the single-writer discipline that §5 depends on.
 transition and change rule 10 (`Probing` is one-shot) for a probe that is bounded by the probe timeout. The
 early return in `EnableHostAsync` closes the part of the hole that matters, which is a probe *starting*.
 
-*D3: preempting commands.* Deferred to its own issue. It needs a decision per command.
+*D3: preempting commands.* Deferred to its own issue. It needs a decision per command. *(2026-11-06,
+`bs-5ga.1`: still deferred, and now rejected for the multi-host case in favour of the between-hosts check in
+the amendment below. Cancelling a command in flight remains not done.)*
 
 **Consequences.**
 
@@ -2179,6 +2183,81 @@ early return in `EnableHostAsync` closes the part of the hole that matters, whic
   while a suspend is already pending covers the likelier case.
 - The counter is not decremented if the supervisor loop is already dead. Nothing can mount without the loop,
   so the closed gate costs nothing.
+
+### Amendment (2026-11-06, bs-5ga.1): multi-host commands stop between hosts while a suspend is pending
+
+**Amendment.** Decision 4 leaves commands unpreempted, and the commands that reach every host were the
+largest piece of work a suspend could still wait behind. Resume and a network change run the ADR-017
+re-derivation (`core/version`, `mount/listmounts`, then for each `Mounted` host a forced shallow probe and a
+forced deep probe) and then probe each `Ready` or `Unreachable` host; "Unmount all & re-probe" and the
+deferred-remount sweep walk the hosts the same way. With the machine going to sleep, a suspend that arrived
+during any of these waited for the rest of the walk: up to about 5 s (a probe at the default
+`probe_timeout_seconds`) per remaining probe, against the roughly 2 s Windows allows.
+
+The maintainer decided on 2026-11-06 (option B of `bs-5ga` item 3): **commands are still not preempted, but a
+command that works through several hosts checks for a pending suspend before it starts the next unit of work
+and stops if one is pending.** Option C, full D3 (cancel the command in flight and treat a cancelled forced
+probe as "preempted, not failed" in ADR-017's gate), was rejected: nothing in flight is cancelled here, so that
+handling is not needed, and decision 3's rule is not extended to commands.
+
+*What it does.* The check is `MountSupervisor.StopForPendingSuspend`, which reads the same `pendingSuspends`
+counter as the decision-1 gate. It reads `SuspendPending` and not `MountingSuspended`: commands that
+legitimately run while the system is suspended (a network change) keep probing. It runs before:
+
+- `core/version`, `mount/listmounts` and each `Mounted` host's forced shallow probe, and between that host's
+  shallow and deep probes (`ReDeriveAfterTransitionAsync`, shared by resume and network change);
+- each host of resume's loop, of network change's loop, and of the deferred-remount sweep
+  (`SweepDeferredRemountsAsync`, which `NetworkChangedAsync`, `SetMountingAvailabilityAsync`,
+  `OnRcloneRestartedAsync` and the reconciliation tick reach);
+- each drain of "Unmount all & re-probe" and each host of its re-probe step.
+
+A single-host command (`RequestRetryNowAsync`, a mount or unmount click) has no next host and is unchanged.
+
+*The bound.* A suspend now waits behind **one call in flight**, not one per remaining host: `core/version`
+(client timeout 5 s), a forced probe (`probe_timeout_seconds`, default 5 s), or `mount/listmounts` (client
+timeout 10 s). Two caveats, stated so the bound is not read as tighter than it is:
+
+- A forced probe whose failure drains the host is a longer unit: the drain's `mount/unmount` (30 s client
+  timeout) and its `mount/listmounts` verification are part of the host's step and are not preempted
+  (decision 4). "Unmount all & re-probe" starts with drains, so its in-flight unit is one drain.
+- `rclone rcd` takes one lock around `mount/mount`, `mount/unmount` and `mount/listmounts` (`bs-6lu`), so a
+  `listmounts` that arrives while an unmount or mount holds the lock waits for it, up to its 10 s client
+  timeout. `core/version` and the probes do not take it.
+
+*What a skipped host is left as.* Exactly as it was: no state change, no failure counter touched (so nothing
+counts toward `failures_before_unmount`, and nothing is booked `Automatic`), no backoff reset, no remount record
+dropped, and **no timer disposed**. Every call site checks before it resets a backoff or disposes a timer; the
+forced-probe helper disposes the host's timer first, so a check placed after it would strand the host.
+Nothing is left unprobed afterwards, by state:
+
+- `Mounted`: its shallow and deep timers are still armed, and the suspend that is pending drains it
+  (`DrainCause.Suspend`; an on-demand host gets its ADR-022 record).
+- `Ready` and `Unreachable`: its idle-probe timer is still armed (it skips and re-arms while suspended, D5), and
+  the resume that follows the suspend force-probes it (rule 5; no tier split).
+- `Disabled` and administratively enabled: re-enabled by that resume. (`EnableHostAsync` already returned before
+  `Probing` while a suspend is pending, so resume's loop was safe for these hosts before this change.)
+- A host holding an ADR-022 remount record keeps it: the suspend leaves records in place and clears only their
+  deadline, and resume sets a new deadline and resolves them.
+
+A pending suspend cannot be cleared without running: `SuspendAsync` queues its action before it returns, the
+action decrements the counter as its first statement, and a caller that gives up still leaves the queued action to
+run. So the case "pending, then no suspend" does not arise; the case "suspend ran, no resume followed" is the
+ordinary one in which every drained host waits for resume, and skipped hosts are no worse off than the rest.
+
+*Not changed, and why.* These are loops over hosts that this amendment deliberately leaves alone:
+
+- **Config reload** (`ApplyConfigChangeAsync`). Stopping would drop part of the new definition; a changed host's
+  forced probe cannot be skipped either, because an `Unreachable` on-demand host has no timer to probe it later.
+- **`ReconcileAsync`'s drain loop**, the `mount/unmount` it issues for each mount rclone no longer lists.
+  This is `bs-5ga` item 4 ("an in-progress `ReconcileAsync`'s drains are not preemptible") and stays open there.
+  The re-derivation does stop before it starts `ReconcileAsync`.
+- **A drain in flight**, and the drain a forced probe's failure starts (decision 4).
+- **Startup.** `EnableHostAsync` already declines to start a probe while a suspend is pending.
+
+*Consequences.* `docs/ARCHITECTURE.md` §3 and §4 rule 5 now say that a multi-host command stops between hosts.
+The test that pinned "commands are not preempted" (`SuspendPreemptionTests`, "retry now") is still true for the
+call in flight and for a single-host command; its comment now says so. `SuspendStopsMultiHostCommandsTests` pins
+the new behaviour.
 
 ### Amendment (2026-11-02, bs-5o4): the suspend sweep unmounts all hosts, then verifies
 
