@@ -277,7 +277,7 @@ public sealed class BaselinePreemptionSpecTests
         var mark = h.Logger.Entries.Count;
 
         var suspend = SuspendCaller.Call(h.Supervisor);
-        await AssertSuspendCancelledAsync(hold, "the second mount's baseline sample");
+        AssertSuspendCancelled(hold, "the second mount's baseline sample");
         await h.FinishAsync(pump, "the suspend waited for the second mount's hung baseline sample", suspend, mount);
         await mount;
 
@@ -363,7 +363,7 @@ public sealed class BaselinePreemptionSpecTests
         Assert.Equal(2, h.MountCalls(Drive));
 
         var suspend = SuspendCaller.Call(h.Supervisor);
-        await AssertSuspendCancelledAsync(hold, "the remount's baseline sample");
+        AssertSuspendCancelled(hold, "the remount's baseline sample");
         await h.FinishAsync(pump, "the second suspend waited for the remount's hung baseline sample", suspend, resume);
         await resume;
 

@@ -77,17 +77,14 @@ internal static class BaselineSpec
             $"  {t.TimestampUtc:HH:mm:ss.fff} {t.From} -> {t.To} ({t.Trigger}; cause {t.DrainCause?.ToString() ?? "-"})"));
 
     /// <summary>
-    /// A POSITIVE check that a suspend cancelled <paramref name="hold"/>'s call, made after <c>SuspendAsync</c>
-    /// returned. It waits (guarded) rather than reading once: on .NET 10 <see cref="TokenLineage"/> was observed
-    /// to answer "not requested" for a linked token while the thread pool was running the cancelled parent's
-    /// callbacks (parent flagged, linked token not yet), and the linked token's own flag a moment later. A read
-    /// that happens to land in that window would fail a correct implementation. A missing cancellation still
-    /// fails, on the guard.
+    /// A POSITIVE check that a suspend cancelled <paramref name="hold"/>'s call, made once, right after
+    /// <c>SuspendAsync</c> returned: the suspend must have REQUESTED the cancellation by then (ADR-023 decision 2,
+    /// <c>CancelAsync</c> on the caller's thread), whatever the thread pool has run since. A single read is sound
+    /// since bs-7z8; before it, <see cref="TokenLineage"/> could answer "not requested" here when the held call
+    /// unwound and disposed its <c>vfs/*</c> linked source in the middle of the walk.
     /// </summary>
-    public static Task AssertSuspendCancelledAsync(Hold hold, string what) =>
-        PreemptSpecHarness.WaitForAsync(
-            () => hold.CancellationRequested || hold.TokenCancelled,
-            $"SuspendAsync did not cancel {what} (bs-5ga.3)");
+    public static void AssertSuspendCancelled(Hold hold, string what) =>
+        Assert.True(hold.CancellationRequested, $"SuspendAsync did not cancel {what} (bs-5ga.3)");
 
     /// <summary>
     /// Mounts <paramref name="hostKey"/> on demand with its baseline sample's <paramref name="operation"/>
@@ -104,7 +101,7 @@ internal static class BaselineSpec
         var mark = h.Logger.Entries.Count;
 
         var suspend = SuspendCaller.Call(h.Supervisor);
-        await AssertSuspendCancelledAsync(hold, $"the in-flight baseline {operation} call");
+        AssertSuspendCancelled(hold, $"the in-flight baseline {operation} call");
 
         if (onCancel == OnCancel.Ignore)
         {
