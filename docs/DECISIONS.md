@@ -2355,8 +2355,14 @@ host is in the batch twice (a host is either `Draining` or `Mounting`/`Mounted` 
 taken), so two unmounts for one drive are never in flight from Bosun together, and nothing new is cancelled.
 `docs/ARCHITECTURE.md` §4 rule 5 states this.
 
-*Open, not changed here:* `bs-mua` item 2 (a host still unconfirmed after the sweep retries on its own timer,
-so simultaneous re-issues run one host's step at a time) is still pending a decision.
+*Accepted residual (2026-11-07, `bs-mua` item 2; the maintainer's decision, option A):* a host still
+unconfirmed after the sweep retries on its own drain-retry timer, so when several are due together their
+re-issues run one host's step at a time. Not batched. Those retries fire at or after the suspend budget, so
+after the machine has slept, and every host's first request already left at arrival; the cost is a slower
+recovery at wake against a stuck rcd, where resume queues behind those steps. rcd runs `mount/*` calls one at
+a time anyway (`bs-6lu`), so combining due retries into one step (about 40-60 lines, moderate risk) would
+remove only Bosun's own round trips. A retry step already queued on the channel before a suspend can still
+send one extra unmount for a host the batch left unconfirmed; that is part of this residual.
 
 ---
 
