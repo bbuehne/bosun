@@ -256,8 +256,9 @@ cancels a token (`CancelAsync`, so no callback runs on this thread) — and it n
 throws or blocks. Only the five recurring timer callbacks can be cancelled this way
 (idle probe, mounted shallow probe with its VFS sample, mounted deep probe, idle-unmount
 fire, reconciliation tick); a drain, a `mount/mount` already sent, a command and the
-probe of an enable run to completion, and the race against the budget above remains the
-backstop for them. A cancelled tick's result is thrown away, never counted as a failure
+probe of an enable run to completion (a command that works through several hosts stops
+before it starts the next one, §4 rule 5), and the race against the budget above remains
+the backstop for them. A cancelled tick's result is thrown away, never counted as a failure
 (§4 rule 5).
 
 **When the supervisor faults during suspend** (`bs-3al`; `bs-u4a` item 5). The
@@ -535,7 +536,24 @@ right before building any UI.
    bookkeeping or flag: it is not a failed probe, so it cannot drain a host as
    `Automatic`. It re-arms its own timer and logs one Information line. A tick that
    starts while a suspend is pending skips its I/O the same way. Drains, `mount/mount`
-   once sent, commands, and the probe an enable is already running are not preempted.
+   once sent, commands, and the probe an enable is already running are not preempted:
+   the call they have in flight finishes.
+
+   **A command that works through several hosts stops between them** (ADR-023
+   amendment, `bs-5ga.1`). Resume, a network change, "Unmount all & re-probe" and the
+   deferred-remount sweep check for a pending suspend before they start the next unit
+   of work, and stop if one is pending: before `core/version`, before
+   `mount/listmounts`, before each `Mounted` host's forced shallow probe and between
+   that host's shallow and deep probes, before each host of the per-host loops, and
+   before each drain of the repair. The suspend therefore waits behind one call in
+   flight (`core/version` 5 s, a forced probe 5 s by default, `mount/listmounts` 10 s,
+   which can wait longer inside `rclone rcd`'s mount lock), not one per remaining host.
+   A forced probe whose failure drains the host is a longer unit, since the drain is
+   not preempted. A host skipped this way is left exactly as it was — no state change,
+   no failure counted, no backoff reset, no timer disposed — and is picked up by the
+   suspend (a `Mounted` host is drained) and by the resume after it, which visits
+   every enabled host. A single-host command (`retry now`) is unaffected. Not covered:
+   config reload, and the drains inside `ReconcileAsync` (`bs-5ga` item 4).
 
    At resume the flag is cleared and the held-back hosts are picked up through the
    re-probe above, not around it. A persistent, non-parked host found `Ready` is

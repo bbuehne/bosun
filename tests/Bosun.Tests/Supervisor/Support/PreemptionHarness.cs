@@ -189,6 +189,8 @@ internal sealed class HoldingRcloneClient(FakeRcloneMountClient inner) : IRclone
     private HeldCall? mountHold;
     private HeldCall? unmountHold;
     private HeldCall? vfsListHold;
+    private HeldCall? getVersionHold;
+    private HeldCall? listMountsHold;
 
     public FakeRcloneMountClient Inner => inner;
 
@@ -201,8 +203,21 @@ internal sealed class HoldingRcloneClient(FakeRcloneMountClient inner) : IRclone
 
     public HeldCall HoldNextVfsList(HoldMode mode) => vfsListHold = new HeldCall(mode);
 
-    public Task<RcloneVersionInfo> GetVersionAsync(CancellationToken cancellationToken) =>
-        inner.GetVersionAsync(cancellationToken);
+    /// <summary>Holds the next <c>core/version</c> (bs-5ga.1: the first call of a re-derivation).</summary>
+    public HeldCall HoldNextGetVersion(HoldMode mode = HoldMode.IgnoreToken) => getVersionHold = new HeldCall(mode);
+
+    /// <summary>Holds the next <c>mount/listmounts</c> (bs-5ga.1: the second call of a re-derivation).</summary>
+    public HeldCall HoldNextListMounts(HoldMode mode = HoldMode.IgnoreToken) => listMountsHold = new HeldCall(mode);
+
+    public async Task<RcloneVersionInfo> GetVersionAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.Exchange(ref getVersionHold, null) is { } held)
+        {
+            await held.WaitAsync(cancellationToken);
+        }
+
+        return await inner.GetVersionAsync(cancellationToken);
+    }
 
     public Task CreateConfigAsync(
         string remoteName, string type, IReadOnlyDictionary<string, string> parameters, CancellationToken cancellationToken) =>
@@ -232,8 +247,15 @@ internal sealed class HoldingRcloneClient(FakeRcloneMountClient inner) : IRclone
         await inner.UnmountAsync(mountPoint, cancellationToken);
     }
 
-    public Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken cancellationToken) =>
-        inner.ListMountsAsync(cancellationToken);
+    public async Task<IReadOnlyList<RcloneMountInfo>> ListMountsAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.Exchange(ref listMountsHold, null) is { } held)
+        {
+            await held.WaitAsync(cancellationToken);
+        }
+
+        return await inner.ListMountsAsync(cancellationToken);
+    }
 
     public Task<IReadOnlyList<RcloneListItem>> ListAsync(string fs, string remote, CancellationToken cancellationToken) =>
         inner.ListAsync(fs, remote, cancellationToken);

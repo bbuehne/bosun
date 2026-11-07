@@ -144,6 +144,36 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// <see cref="suspended"/> directly as a gate.</b></summary>
     private bool MountingSuspended => suspended || SuspendPending;
 
+    /// <summary>
+    /// ADR-023 amendment (bs-5ga.1): the between-hosts check of the multi-host COMMANDS (resume, network
+    /// change, repair, the deferred-remount sweep, and the re-derivation they share). A command is not
+    /// preempted -- the call it has in flight finishes -- but it does not START the next host's work once
+    /// a suspend is pending, so the suspend waits behind one call and not behind one per remaining host.
+    /// </summary>
+    /// <remarks>
+    /// Reads <see cref="SuspendPending"/>, not <see cref="MountingSuspended"/>: the commands that
+    /// legitimately run while the system is suspended (a network change, say) must keep probing.
+    /// <para>A host this skips is left exactly as it was: no state change, no counter, no backoff reset,
+    /// and -- because every call site checks BEFORE it disposes a timer -- no timer taken away. The
+    /// suspend then drains what is mounted, and the resume that follows it re-derives and re-probes
+    /// every host, the skipped ones included (<see cref="ResumeAsync"/> visits every enabled host).</para>
+    /// <para>Logs once, and the caller stops its loop, so one command logs one line.</para>
+    /// </remarks>
+    private bool StopForPendingSuspend(string command, string notStarted)
+    {
+        if (!SuspendPending)
+        {
+            return false;
+        }
+
+        logger.LogInformation(
+            "{Command} stops before {NotStarted}: a suspend is pending (Invariant I8, ADR-023 amendment bs-5ga.1). " +
+            "Nothing in flight is cancelled and nothing skipped is changed; the suspend drains what is mounted " +
+            "and the resume that follows re-derives every host",
+            command, notStarted);
+        return true;
+    }
+
     /// <summary>The cancellation source of the recurring tick that is running right now, or null
     /// between ticks (ADR-023). Published by <see cref="RunTickAsync"/> on the channel thread, read
     /// by <see cref="PreemptRunningTick"/> on whichever thread called <see cref="SuspendAsync"/>.
@@ -784,6 +814,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         foreach (var host in hosts.Values.Where(h => h.AdministrativelyEnabled).ToList())
         {
+            // bs-5ga.1: checked before anything about this host changes (the Backoff reset and the timer
+            // disposal below). The skipped hosts are re-probed by the resume that follows the suspend.
+            if (StopForPendingSuspend("Resume", $"re-probing {host.Key} and the hosts after it"))
+            {
+                break;
+            }
+
             switch (host.State)
             {
                 case MountState.Disabled:
@@ -856,6 +893,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         foreach (var host in hosts.Values.Where(h => h.State is MountState.Ready or MountState.Unreachable).ToList())
         {
+            // bs-5ga.1: before the Backoff reset and the forced probe, so a skipped host keeps both its
+            // backoff and its armed timer. The resume that follows the suspend re-probes it.
+            if (StopForPendingSuspend("Network change", $"re-probing {host.Key} and the hosts after it"))
+            {
+                break;
+            }
+
             // No tier split -- same reasoning as ResumeAsync above. ADR-014 splits the recurring
             // ladder; a network change is one bounded probe per host, and it is the event T2 (network
             // interruption) turns on. An on-demand row left showing a stale Unreachable after the
@@ -890,6 +934,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         var drained = new HashSet<HostRuntime>();
         foreach (var host in mounted)
         {
+            // bs-5ga.1: a host not drained here stays Mounted and the suspend drains it, as it would any
+            // mounted host. Step 2 below stops at once too, so it does not touch such a host either.
+            if (StopForPendingSuspend("Repair", $"draining {host.Key} and the hosts after it"))
+            {
+                break;
+            }
+
             await BeginDrainAsync(host, "repair: unmount all and re-probe", DrainCause.Repair, ct).ConfigureAwait(false);
             drained.Add(host);
         }
@@ -899,6 +950,11 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         //    re-probed now, with its backoff reset.
         foreach (var host in hosts.Values.Where(h => h.AdministrativelyEnabled && !drained.Contains(h)).ToList())
         {
+            if (StopForPendingSuspend("Repair", $"re-probing {host.Key} and the hosts after it"))
+            {
+                break;
+            }
+
             switch (host.State)
             {
                 case MountState.Ready:
@@ -1656,6 +1712,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 && h.State is MountState.Ready or MountState.Unreachable)
             .ToList())
         {
+            // bs-5ga.1: a skipped host keeps its remount record (the suspend action leaves records in
+            // place and resume resolves them), its backoff and its timer.
+            if (StopForPendingSuspend("Deferred-remount sweep", $"re-probing {host.Key} and the hosts after it"))
+            {
+                break;
+            }
+
             host.Backoff = BackoffState.Initial;
             await ForceImmediateIdleProbeAsync(host, $"{trigger}: re-probe before the deferred remount (ADR-022)", ct)
                 .ConfigureAwait(false);
@@ -3344,6 +3407,16 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// </remarks>
     private async Task ReDeriveAfterTransitionAsync(string trigger, CancellationToken ct)
     {
+        // bs-5ga.1: this is a command and its calls are not preempted, so it declines to START the next
+        // one once a suspend is pending: core/version, listmounts, then each Mounted host's shallow and
+        // deep probe. The call in flight finishes. What is not reached is changed in no way (no timer
+        // disposed, no counter touched, `rcdAnswering` left as it was); the suspend drains the Mounted
+        // hosts and the resume after it runs this whole sequence again.
+        if (StopForPendingSuspend($"Re-derivation after {trigger}", "core/version"))
+        {
+            return;
+        }
+
         try
         {
             await rcloneClient.GetVersionAsync(ct).ConfigureAwait(false);
@@ -3362,10 +3435,21 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             return;
         }
 
+        if (StopForPendingSuspend($"Re-derivation after {trigger}", "mount/listmounts"))
+        {
+            return;
+        }
+
         await ReconcileAsync(ct).ConfigureAwait(false);
 
         foreach (var host in hosts.Values.Where(h => h.State == MountState.Mounted).ToList())
         {
+            // Before the timers are disposed: a skipped host keeps its periodic shallow and deep timers.
+            if (StopForPendingSuspend($"Re-derivation after {trigger}", $"force-probing {host.Key} and the hosts after it"))
+            {
+                return;
+            }
+
             host.ProbeTimer?.Dispose();
             host.ProbeTimer = null;
             await HandleMountedProbeDueAsync(host, $"{trigger}: force-probe mounted host (shallow, ADR-017)", ct)
@@ -3376,6 +3460,13 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 // The forced shallow probe just drained it via the ordinary accumulating threshold --
                 // nothing left in Mounted to deep-probe.
                 continue;
+            }
+
+            // Between the host's own two probes too: the suspend waits behind one probe, not two. The
+            // shallow probe re-armed the periodic shallow timer; the deep timer is still armed.
+            if (StopForPendingSuspend($"Re-derivation after {trigger}", $"the forced deep probe of {host.Key}"))
+            {
+                return;
             }
 
             host.DeepProbeTimer?.Dispose();
