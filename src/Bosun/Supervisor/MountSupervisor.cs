@@ -310,11 +310,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
 
         /// <summary>True once an explicit user unmount (<see cref="RequestUnmountAsync"/>) has
         /// completed its drain. Suppresses the persistent tier's auto-mount-on-Ready
-        /// (<see cref="OnEnteredReadyAsync"/>) until an explicit user mount request clears it
-        /// (<see cref="RequestMountAsync"/>), a config reload rebuilds the host set, or the app
-        /// restarts. Deliberately does NOT stop the host from being probed while idle -- it still
-        /// shows live reachability, it just never auto-mounts. See the defect-3 discussion in the
-        /// delivery report and <see cref="HostMountSnapshot.UserParked"/>.</summary>
+        /// (<see cref="OnEnteredReadyAsync"/>) until an explicit user act clears it: a mount request
+        /// (<see cref="RequestMountAsync"/>) or a mode change from on-demand to persistent
+        /// (<see cref="ApplyHostConfigChangeAsync"/>, bs-uzy). A config reload does NOT clear it (ADR-015's
+        /// amendment: the Settings window saves on every edit, so an unrelated edit must not bring back
+        /// a drive the user took down), nor does a mode change to on-demand; it does not survive an app
+        /// restart (it is in memory only). Deliberately does NOT stop the host from being probed while
+        /// idle -- it still shows live reachability, it just never auto-mounts. See the defect-3
+        /// discussion in the delivery report and <see cref="HostMountSnapshot.UserParked"/>.</summary>
         public bool UserParked;
 
         /// <summary>ADR-022 (bs-hrg): set by <see cref="SuspendAsync"/> on an ON-DEMAND host that was
@@ -3171,7 +3174,8 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             host.UserParked = true;
             logger.LogInformation(
                 "Host {HostKey} parked at the user's request (explicit unmount); will not auto-remount until the " +
-                "user requests it again, config reloads, or Bosun restarts", host.Key);
+                "user mounts it again or changes its mode to persistent (a config reload does not un-park it; " +
+                "Bosun restarting does)", host.Key);
         }
 
         SetState(host, MountState.Disabled, $"drain completed: {host.DrainReason}");
@@ -3731,6 +3735,23 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             // ADR-022 decision 5: a mode change clears the remount record. The user's mount click was
             // about an on-demand drive; whatever tier the host has now is a different arrangement.
             host.RemountAfterResume = false;
+
+            if (oldMode == MountMode.OnDemand && newMode == MountMode.Persistent && host.UserParked)
+            {
+                // bs-uzy (maintainer decision B, 2026-11-07; ADR-015 amendment): moving a host to the
+                // persistent tier is an explicit user act meaning "use this drive again", so it clears
+                // the park an earlier unmount set. Done here, before any branch below, so it holds
+                // whether the host is Ready (mounts now), Unreachable (mounts when it reaches Ready),
+                // or in any other state (the ordinary persistent paths see an unparked host) -- and
+                // whether or not the same edit also changed a mount-affecting field. Every mount this
+                // leads to still goes through TryBeginMountAsync and its probe (I1). The other
+                // direction, persistent -> on-demand, deliberately keeps a park: an on-demand host
+                // never auto-mounts, so there is nothing to un-park.
+                host.UserParked = false;
+                logger.LogInformation(
+                    "Host {HostKey} un-parked: its mode changed from on-demand to persistent, which is an " +
+                    "explicit request to use the drive again", host.Key);
+            }
         }
 
         if (newMode == MountMode.None && oldMode != MountMode.None)
@@ -3799,6 +3820,20 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                         host.Backoff = BackoffState.Initial;
                         await ForceImmediateIdleProbeAsync(host, "config change: mount-affecting field changed", ct)
                             .ConfigureAwait(false);
+
+                        // bs-uzy: an on-demand -> persistent edit that also changed a mount-affecting
+                        // field. A Ready host's successful probe is in place (it does not re-run
+                        // OnEnteredReadyAsync), so the promotion's "mount now if Ready" has to be done
+                        // here, on the fresh probe's evidence; TryBeginMountAsync still deep-probes (I1).
+                        // The park was cleared above, so a parked host is not skipped by accident.
+                        if (oldMode == MountMode.OnDemand
+                            && newMode == MountMode.Persistent
+                            && host.State == MountState.Ready
+                            && !host.UserParked)
+                        {
+                            await TryBeginMountAsync(host, "config change: tier changed to persistent", ct)
+                                .ConfigureAwait(false);
+                        }
                     }
 
                     return;
