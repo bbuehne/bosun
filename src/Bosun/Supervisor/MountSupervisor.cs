@@ -1326,6 +1326,14 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// (and a toast). When this returns true the caller discards the result of the I/O it just did
     /// (a Success as well), changes no counter, state, VFS bookkeeping or flag, and re-arms its own
     /// timer. One Information line is logged here.
+    /// <para>
+    /// <b>The re-arm is a safety net no test can observe today</b> (bs-5ga item 5, accepted 2026-11-07).
+    /// For a MOUNTED host's tick (shallow, deep, VFS sample, idle-unmount) the suspend that preempted it
+    /// drains the host straight afterwards, which disposes every timer, and the remount after resume arms
+    /// fresh ones; removing those re-arms leaves the whole suite green. They are kept on purpose: if a
+    /// future change ever lets a mounted host survive a suspend, a missing re-arm would leave it with no
+    /// mounted probe at all (Invariant I2). Do not delete them as dead code.
+    /// </para>
     /// </summary>
     private bool TickPreempted(CancellationToken preemption, string tick, string scope)
     {
