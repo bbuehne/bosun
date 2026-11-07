@@ -777,6 +777,36 @@ explicit user action clears it.
 Found by independent test authorship of `bs-7ck`, which spotted that its spec and
 this one disagreed rather than implementing to one and leaving the other stale.
 
+**Amendment (2026-11-07, `bs-uzy`, maintainer decision B): changing a host's mode
+from on-demand to persistent un-parks it.** The previous amendment says only an
+explicit user action clears what an explicit user action set. Editing a host's
+`mount.mode` to `persistent` in the host editor is such an action: it means "use
+this drive again". So that one edit now clears the park, and the host then behaves
+as an unparked persistent host: if `Ready` it mounts now, if `Unreachable` it
+mounts when it next reaches `Ready`, and in any other state the ordinary persistent
+paths mount it later. Every one of those mounts still goes through
+`TryBeginMountAsync` and its probe (Invariant I1). One `Information` line is logged
+when this clears a park.
+
+What does **not** clear a park: any other edit (hostname, idle seconds, tab colour
+and so on); a change to `on-demand` (an on-demand host never auto-mounts, so there
+is nothing to un-park and the park stays); and a change from `none`, which was not
+in the decision.
+
+What this fixes: before, the `Ready` branch of the on-demand-to-persistent change
+mounted the host without looking at the park, while the other three persistent
+auto-mount sites respected it. A host the user had unmounted, switched to
+persistent and back to on-demand, then put through a suspend, was therefore
+remounted at wake by the ADR-022 record. That left a host `Mounted` while parked,
+which undid the user's unmount. With this amendment `Mounted` and parked no longer
+coexist on any path found.
+
+*Rejected: option A, "respect the park"* (add `&& !host.UserParked` at the mount
+site, so the switch to persistent leaves the host parked). It is the smaller
+change and keeps the amendment above literally true, but a user who deliberately
+switches a drive to persistent would then find it still absent, with the tray
+showing it parked and no hint that the edit they just made was ignored.
+
 **Reasoning.**
 
 *The spec already says this, read as a whole.* §4 lists "user unmount" as a

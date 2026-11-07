@@ -237,8 +237,10 @@ public interface IMountSupervisor
     /// <c>user</c>, <c>identity_file</c>): a live mount no longer matches intent, so it drains and
     /// the normal path remounts it -- never directly, always re-probed first (Invariant I1).</item>
     /// <item><b>Tier change</b> (<c>mount.mode</c>): persistent to on-demand keeps any live mount
-    /// and just stops auto-remounting; on-demand to persistent mounts immediately if idle and
-    /// reachable; anything to <c>none</c> drains and stops supervising; <c>none</c> to anything
+    /// and just stops auto-remounting (a user park, if any, stays); on-demand to persistent
+    /// clears a user park -- the edit is an explicit "use this drive again" (bs-uzy, ADR-015) -- and
+    /// then mounts immediately if idle and reachable, or when it next reaches <c>Ready</c>;
+    /// anything to <c>none</c> drains and stops supervising; <c>none</c> to anything
     /// begins supervising from <c>Disabled</c>, exactly as at startup.</item>
     /// <item><b>Scheduling-affecting</b> (<c>probe.interval_seconds</c>, <c>probe.deep_probe</c>,
     /// <c>mount.idle_unmount_seconds</c>): timers re-arm; nothing drains.</item>
