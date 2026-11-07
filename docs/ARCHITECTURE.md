@@ -568,8 +568,14 @@ right before building any UI.
    stays `Ready` (no new transition, no `Mounting`, no rc call). The same gate
    covers the edges around the mount (ADR-023): a user's mount request and
    "Unmount all & re-probe" are refused with "the system is suspended"; a drain that
-   completes while a suspend is pending is not re-enabled, and `EnableHostAsync`
-   returns before `Probing` (the host stays `Disabled`; resume enables it). An idle
+   completes while a suspend is pending is not re-enabled, and while a suspend is
+   **pending** `EnableHostAsync` returns before `Probing` (the host stays
+   `Disabled`; resume enables it). That last guard is "pending" only, not
+   "suspended or pending" (`bs-5ga` item 2, decided 2026-11-07): it exists so a
+   suspend never waits behind a probe, and once the suspend has run there is
+   nothing left to wait for. So a host a config change adds or enables while the
+   system is suspended goes to `Probing` and may reach `Ready`, but never
+   `Mounting` (the combined gate above refuses it); resume mounts it by its tier. An idle
    probe *tick* that fires while the system is suspended does nothing and re-arms
    itself; the forced probes of resume, a network change and "retry now" are
    commands and still probe.
