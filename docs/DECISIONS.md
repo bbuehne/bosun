@@ -2295,7 +2295,9 @@ rule 5 has the behaviour):
   calls.
 - Scope: the suspend sweep only. Hosts that were already `Draining` when the suspend arrived keep the
   behaviour of `bs-u4a` item 4 (each is re-driven one at a time after the sweep). The general drain path
-  is not changed for any other drain cause.
+  is not changed for any other drain cause. *(The parenthesis is superseded 2026-11-07, `bs-mua.1`: the
+  already-`Draining` hosts' re-issue now goes in the sweep's batch. See the note at the end of this
+  amendment.)*
 - Not changed, and left open: a host that is still unconfirmed after the sweep retries on its own timer,
   so when several reach the same deadline their re-issued requests run one host's step at a time. Each
   of them has already had its first request issued.
@@ -2323,6 +2325,38 @@ already on the wire. The verification `mount/listmounts` and any forced unmount 
 would, and was considered and rejected for now. The per-unmount latency on the maintainer's machine is unmeasured;
 manual test T1 will show it. The test fake (`HoldableRclone`) now models the lock, and the tests that assumed
 parallel unmounts were rewritten to the real behaviour. `docs/ARCHITECTURE.md` §4 rule 5 states this.
+
+*Amendment (2026-11-07, bs-mua.1; the maintainer's decision, option B of `bs-mua` item 1; option A,
+"document as won't-fix", was recommended and declined).* This replaces the statement above that hosts
+already `Draining` when the suspend arrives are "re-driven one at a time after the sweep". They are not any
+more. Such a host, when the suspend budget shortens its forced-unmount deadline (`bs-u4a` item 4), now has its
+unmount re-issued in the sweep's arrival batch: `RunSuspendAsync` moves the `Mounted`/`Mounting` hosts to
+`Draining`, counts the budget for the already-`Draining` hosts, and passes both groups to
+`DrainAllForSuspendAsync` (swept hosts first, then the re-driven ones: a swept host has never had an unmount
+sent, an already-draining one has). All requests are started before any is awaited, so with a stuck rcd a
+later already-`Draining` host's request no longer waits behind an earlier host's whole step (up to about 80 s
+each) on Bosun's side. The re-driven hosts then share the sweep's one `mount/listmounts` and its forced-unmount
+phase. A host whose deadline the budget does not shorten is still not re-issued.
+
+*What is unchanged:* each host's drain cause (a user unmount still parks it, a removed host is still
+evicted, an idle timeout stays an idle timeout, a probe-failure drain stays `Automatic`), its single
+`Draining` transition-log entry, its once-only escalation flag, and the arrival-counted budget (`bs-7d7`).
+
+*What it does not do:* make rcd faster. `rclone rcd` runs `mount/*` calls one at a time under one lock
+(`bs-6lu`, above), so this removes Bosun-side serialisation only; the sweep still takes the sum of the unmounts
+inside rcd, and a hung one still holds the rest. The sweep's own accepted residuals (verification and forced
+unmount wait for every request to return) apply to the re-driven hosts too.
+
+*A request already in flight (decided here, not before).* Every rc call a drain makes is awaited on the
+supervisor's channel, which runs one action at a time. So a host's own unmount (a retry step stuck on a slow
+rcd) has returned, or timed out, before the suspend action starts; the suspend waits behind it, as ADR-023
+decision 4 already says (drains are not preempted). The batch then sends that host exactly one re-issue. No
+host is in the batch twice (a host is either `Draining` or `Mounting`/`Mounted` when the two lists are
+taken), so two unmounts for one drive are never in flight from Bosun together, and nothing new is cancelled.
+`docs/ARCHITECTURE.md` §4 rule 5 states this.
+
+*Open, not changed here:* `bs-mua` item 2 (a host still unconfirmed after the sweep retries on its own timer,
+so simultaneous re-issues run one host's step at a time) is still pending a decision.
 
 ---
 

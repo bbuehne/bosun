@@ -769,7 +769,7 @@ public sealed class SuspendPreemptionTests
     /// <summary>
     /// <b>Protects:</b> the same for a host that was ALREADY draining when the suspend arrived: its
     /// shortened deadline is arrival + budget, not dequeue time + budget.
-    /// <b>Catches:</b> <c>ApplySuspendBudgetToDrainingHostAsync</c> reading the clock when it runs.
+    /// <b>Catches:</b> <c>ApplySuspendBudgetToDrainingHost</c> reading the clock when it runs.
     /// </summary>
     [Fact]
     public async Task A_host_already_draining_gets_the_deadline_arrival_plus_budget_even_when_the_suspend_waited()

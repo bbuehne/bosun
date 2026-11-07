@@ -746,19 +746,35 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             }
         }
 
-        await DrainAllForSuspendAsync(newlyDraining, ct).ConfigureAwait(false);
-
-        // bs-u4a item 4: a host already Draining for an ordinary reason keeps its drain cause (so a
-        // user unmount still parks it, a removed host is still evicted) but must not keep the 10 s
+        // bs-u4a item 4 / bs-mua.1: a host already Draining for an ordinary reason keeps its drain cause
+        // (so a user unmount still parks it, a removed host is still evicted) but must not keep the 10 s
         // ordinary escalation deadline: that could fall after the machine has gone to sleep. It gets
-        // the suspend budget instead -- shortened only, never lengthened.
-        foreach (var host in alreadyDraining)
-        {
-            await ApplySuspendBudgetToDrainingHostAsync(host, arrivalUtc, ct).ConfigureAwait(false);
-        }
+        // the suspend budget instead -- shortened only, never lengthened. One that this shortens is
+        // re-driven in the SAME batch as the hosts swept above, after them (a swept host has never had
+        // an unmount sent; an already-draining one has), so its request leaves at arrival too, instead of
+        // waiting for the sweep and then for the hosts before it, one whole step each (about 80 s against
+        // a stuck rcd). It then shares the sweep's verification and forced unmount. A host whose deadline
+        // is not shortened is not re-driven: its own timer is already aimed at that deadline.
+        //
+        // No host is in the batch twice, and none has a request of its own in flight here: the lists are
+        // disjoint (Draining versus Mounting/Mounted when taken), and every rc call a drain makes is
+        // awaited on this channel, which runs one action at a time, so any earlier step -- one stuck on a
+        // slow rcd included -- finished before this action began (the suspend waited behind it, bs-4in).
+        var redriven = alreadyDraining.Where(h => ApplySuspendBudgetToDrainingHost(h, arrivalUtc)).ToList();
+
+        await DrainAllForSuspendAsync([.. newlyDraining, .. redriven], ct).ConfigureAwait(false);
     }
 
-    private async Task ApplySuspendBudgetToDrainingHostAsync(HostRuntime host, DateTimeOffset arrivalUtc, CancellationToken ct)
+    /// <summary>
+    /// Counts the suspend budget for a host that was already <c>Draining</c> when suspend arrived
+    /// (bs-u4a item 4) and says whether the host needs its unmount re-issued now: <see langword="true"/>
+    /// when the budget shortened its forced-unmount deadline (the retry timer already armed was aimed at
+    /// the old, later one, so it is disposed here and the caller's batch re-drives the host and re-arms
+    /// at the new deadline), <see langword="false"/> when the drain's own deadline was already at or
+    /// before the suspend deadline (nothing to shorten, the timer already armed is aimed at it).
+    /// Synchronous and sends no rc call: <see cref="DrainAllForSuspendAsync"/> does (bs-mua.1).
+    /// </summary>
+    private bool ApplySuspendBudgetToDrainingHost(HostRuntime host, DateTimeOffset arrivalUtc)
     {
         var before = EffectiveDrainTimeout(host);
 
@@ -773,9 +789,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         var after = EffectiveDrainTimeout(host);
         if (after >= before)
         {
-            // The drain's own deadline is already at or before the suspend deadline: nothing to
-            // shorten, and the retry timer already armed is aimed at it.
-            return;
+            return false;
         }
 
         logger.LogInformation(
@@ -783,12 +797,9 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             "shortened from {Before} to {After} after the drain began (the suspend budget)",
             host.Key, host.DrainReason, before, after);
 
-        // The retry timer already armed was aimed at the old, later deadline. Supersede it with an
-        // attempt now: it re-issues the unmount and re-verifies (exactly what a drain step does),
-        // then re-arms the next check AT the new deadline.
         host.ProbeTimer?.Dispose();
         host.ProbeTimer = null;
-        await AttemptDrainStepAsync(host, ct).ConfigureAwait(false);
+        return true;
     }
 
     public Task ResumeAsync(CancellationToken cancellationToken = default) => EnqueueAndWait(async ct =>
@@ -2888,7 +2899,11 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
     /// <summary>
     /// The suspend drain (bs-5o4, the maintainer's decision of 2026-11-02: "unmount all, then verify").
     /// Drains every host in <paramref name="batch"/>, all already <c>Draining</c> with the suspend
-    /// budget, as ONE step in three phases instead of one full drain step per host in turn:
+    /// budget, as ONE step in three phases instead of one full drain step per host in turn. The batch is
+    /// the hosts the sweep just moved to <c>Draining</c> (<see cref="DrainCause.Suspend"/>) followed by the
+    /// hosts that were already <c>Draining</c> for another cause when suspend arrived and whose deadline the
+    /// budget shortened (bs-mua.1); the phases do not look at the cause, so each keeps its own, and
+    /// <see cref="EffectiveDrainTimeout"/> gives each its own budget:
     /// <list type="number">
     /// <item><b>Request.</b> Every host's <c>mount/unmount</c> is started before any is awaited, so each
     /// request is on the wire at once and the last host's does not wait for the first host's. Each call

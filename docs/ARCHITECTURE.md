@@ -458,13 +458,15 @@ right before building any UI.
    which is what I8 needs, leaves at arrival for every host; Windows allows about
    2 s, so a second identical request at 3 s or at 30 s lands after the machine
    has slept either way, and resume reconciles (ADR-017). Hosts already
-   `Draining` are re-driven after the sweep, so they wait the same way. The reason: the drain used to be one host's whole step
+   `Draining` whose deadline the budget shortens are in that same batch (see
+   below, `bs-mua.1`), so they wait the same way. The reason: the drain used to be one host's whole step
    (`mount/unmount`, `mount/listmounts`, forced `mount/unmount`,
    `mount/listmounts` — up to about 80 s against a stuck `rclone rcd`) before the
    next host's unmount was even requested, so with a stuck rcd the later hosts
    were not unmounted before the machine slept (Invariant I8). Now the request
    to the last host leaves *Bosun* at the same instant as the first host's. This
-   applies to the suspend sweep only; every other drain (probe failure, idle
+   applies to the suspend sweep only (which includes the already-`Draining`
+   hosts re-driven by it, below); every other drain (probe failure, idle
    timeout, user unmount, repair, config change) is still one host's step at a
    time.
 
@@ -502,9 +504,37 @@ right before building any UI.
    after the machine has gone to sleep. The supervisor re-issues the unmount at
    once and aims the next check at the new deadline. The change only ever
    **shortens** a deadline: a drain whose ordinary deadline is already sooner than
-   suspend arrival plus the budget keeps it, and a second suspend never moves a
+   suspend arrival plus the budget keeps it (and is not re-issued: its own timer
+   is already aimed at that deadline), and a second suspend never moves a
    deadline later. A host already escalated is left alone (it is already on the
    forced path). `bs-u4a` item 4.
+
+   **The re-issue is part of the sweep's batch** (`bs-mua.1`, the maintainer's
+   decision of 2026-11-07; before it, these hosts were re-driven *after* the
+   sweep, one host's whole step at a time). The suspend sweeps the `Mounted` and
+   `Mounting` hosts, counts the budget for the already-`Draining` hosts, and then
+   sends ONE batch: first the swept hosts' unmounts, then the re-issue for each
+   already-`Draining` host whose deadline the budget shortened (a swept host has
+   never had an unmount sent, so it goes first). Every request is started before
+   any is awaited, so with a stuck rcd a later already-`Draining` host's request
+   no longer waits behind an earlier host's whole step (up to about 80 s) on
+   Bosun's side. They then share the sweep's verification (one `mount/listmounts`
+   for all) and its forced-unmount phase (all together, one more
+   `mount/listmounts`), and a host still unconfirmed retries on its own timer,
+   exactly as a swept host does. Nothing about such a host changes except when
+   its request leaves: its drain cause (a user unmount still parks it, a removed
+   host is still evicted, an idle timeout stays an idle timeout), its single
+   `Draining` entry in the transition log, its once-only escalation flag and its
+   deadline are untouched. **This is not a speed-up inside rcd** (`bs-6lu`,
+   above): rcd runs these calls one at a time under its one lock, so the batch
+   removes Bosun-side serialisation only; the sweep still takes the sum of the
+   unmounts there. **A request already in flight:** every rc call a drain makes
+   is awaited on the supervisor's channel, which runs one action at a time, so a
+   host's own unmount (a step stuck on a slow rcd, say) has returned before the
+   suspend action starts: the suspend waits behind it (ADR-023 decision 4:
+   drains are not preempted), and the batch then sends the host exactly one
+   re-issue. Two unmounts for one drive are never in flight from Bosun together,
+   and no host appears in the batch twice.
 
    On resume, the supervisor **does not assume suspend succeeded** — it is
    best-effort by design, bounded by a budget that can elapse. It reconciles
