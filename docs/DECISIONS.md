@@ -2323,3 +2323,98 @@ already on the wire. The verification `mount/listmounts` and any forced unmount 
 would, and was considered and rejected for now. The per-unmount latency on the maintainer's machine is unmeasured;
 manual test T1 will show it. The test fake (`HoldableRclone`) now models the lock, and the tests that assumed
 parallel unmounts were rewritten to the real behaviour. `docs/ARCHITECTURE.md` §4 rule 5 states this.
+
+---
+
+## ADR-024 · Start and resume Claude Code sessions remotely, from a Claude conversation
+
+**Status:** Proposed (2026-11-07). The maintainer asked for the capability and settled its shape in
+conversation on 2026-11-07: the tool set, the one-time handoff, and resume-by-default. The
+architecture in Decision 2 is partly Claude's proposal and is not yet confirmed; the Open questions
+are undecided. Nothing here is built. Would extend Bosun's scope (`CLAUDE.md` §1), add the first
+network-reachable surface Bosun has had, and share machinery with ADR-021.
+
+**Context.** The maintainer spends much of his day driving Claude Code sessions remotely, from a
+phone, while away from the workstation. Often something comes up that needs a new Claude Code
+session and none is running on the workstation. Today that means waiting until he is at the desk.
+The same gap exists for an existing project that has no live session: nothing is open in it, so
+there is nothing to connect to.
+
+He wants to close the gap from inside a Claude conversation. For a new project, he and Claude
+settle the concept in chat; when he gives the go-ahead, Claude does the setup on the workstation
+without him. For an existing project, Claude lists what is there and reopens it.
+
+This is a handoff, not remote control by Claude. Once a session is running on the workstation with
+Remote Control enabled, he switches to Claude Code Remote Control and works there. Sessions tend to
+stay up once started, so the hard part is only getting one started and connectable.
+
+Bosun already runs all day in the user's interactive session (I3), already launches `wt.exe`
+through `IExternalLauncher`, and under ADR-021 already knows which Claude Code sessions exist and
+how to resume them with `claude --resume <id>`. That makes it the natural owner.
+
+**Decision (proposed).**
+
+1. **What it does.** Given a project, open a Windows Terminal tab in that project's directory, start
+   Claude Code in it, and turn Remote Control on, then return the way to reach the session. A
+   conversation in the Claude app triggers it. It is a one-time handoff per session; it does not
+   keep driving the session afterwards.
+
+2. **Shape.** A local service owned by Bosun on the workstation.
+   - The core is a plain local API, so it is useful on its own and could be described by a UTCP
+     manual later. A thin MCP layer sits in front of it so the Claude app can use it as a custom
+     connector. As far as known, the Claude app's connectors speak MCP only; this is unverified.
+   - It is exposed through a Cloudflare Tunnel, with Cloudflare Access so only the maintainer can
+     reach it.
+   - The Claude connector expects OAuth, so sign-in has to come from Access acting as the identity
+     layer rather than from a static service token. Whether that works today is unverified.
+   - Tunnel credentials and tokens are secrets and stay out of the repository (I9).
+
+3. **Tools.** Ten, all accepted by the maintainer:
+
+   | Tool | Purpose |
+   |---|---|
+   | Workstation check | Machine awake, service healthy, Claude Code logged in. A clear answer instead of a silent failure. |
+   | List projects | Directories in the development area. |
+   | Create project | New folder, a brief written from the concept agreed in chat, a terminal there, Claude Code started with the brief, Remote Control on. |
+   | Open or resume project | Terminal in an existing project, Claude Code started, Remote Control on. Resumes the prior conversation by default. |
+   | List resumable sessions | A project's saved conversations with last-active time and a one-line summary, so one can be picked in chat. |
+   | List running sessions | Live sessions Bosun launched, with how to reach each, to avoid duplicates. |
+   | Close session | Shut down a finished session. |
+   | Clone and open | Clone a GitHub repository into the development area and start a session in it. |
+   | New-project setup | `git init`, create the GitHub repository, set up Beads and Graphify, so new projects start the same way. |
+   | Peek at session | Recent output of a running session, for a status check. |
+
+4. **Order and effort.**
+   1. Groundwork, the largest piece: the local service, the tunnel, OAuth through Access, the MCP
+      layer, and starting a terminal plus Claude Code plus Remote Control reliably with nobody at
+      the keyboard. The first spike is proving Remote Control can be turned on unattended.
+   2. Low effort once the groundwork exists: workstation check, list projects, create project,
+      open project.
+   3. Moderate, because Bosun must track the sessions it launches: list resumable sessions and
+      resume, list running sessions, close session.
+   4. Moderate, mostly scripting: clone and open, new-project setup.
+   5. Hardest after the groundwork: peek at session. Windows Terminal does not expose a tab's
+      contents to other processes, so this may need sessions launched in a way that captures
+      output.
+
+**Open questions.** To be filed as `needs-decision`; not part of the decision above.
+
+- How Remote Control is turned on unattended, and whether it can be at launch rather than by
+  typing into the session afterwards.
+- Whether Cloudflare Access can act as the OAuth provider the Claude custom connector requires,
+  and what the maintainer's current Access setup already allows.
+- What an authenticated caller may do. The service creates directories and starts processes, so
+  authentication is the whole security boundary. Whether it may only act inside the development
+  area, and never run an arbitrary command, is to be confirmed.
+- Where the development area is configured. Bosun's configuration has no such setting today
+  (`docs/CONFIG-SCHEMA.md`), so a key has to be added or an existing location reused.
+- How this shares code with ADR-021: the session records, the process snapshot, and the
+  `claude --resume` launch through `IExternalLauncher`. It may also need its own opt-in table, as
+  `[claude_sessions]` has, since it opens a path into the machine.
+- What "the way to reach the session" is: a Remote Control link, a session name, or something
+  else, and whether the tool can return it in the same call.
+
+**Consequences, if accepted.** `CLAUDE.md` §1 gains a fifth responsibility. A new project holds
+the service and the MCP layer, and it must not reference WPF (the same rule as `Bosun.ClaudeHook`).
+Default-suite tests must not launch `wt.exe`, start Claude Code, or touch the tunnel. The work is
+filed as Beads issues from this ADR; no `TODO.md` or plan file is added.
