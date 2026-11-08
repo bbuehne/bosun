@@ -753,7 +753,7 @@ right before building any UI.
    This does not weaken rule 1: the click causes a *probe*, and `Mounting` is
    still reached only from `Ready` after a passing deep probe. See ADR-014.
 9. **A user-requested unmount parks the host.** It stays unmounted until an
-   explicit user remount, a mode change to `persistent` (below), or an application restart — including for `persistent`
+   explicit user remount, a mode change to `persistent` or out of `none` (below), or an application restart — including for `persistent`
    hosts, which would otherwise auto-mount again on their very next arrival at
    `Ready` and make the tray's Unmount item look like it did nothing. A parked
    host **keeps probing**, so the tray can show live reachability; it simply does
@@ -771,9 +771,13 @@ right before building any UI.
    clears the park and the host then behaves as an unparked persistent host. It
    mounts now if `Ready`, or when it next reaches `Ready` if `Unreachable`; each
    mount goes through the probe and `Ready -> Mounting` as always (rule 1). A change
-   to `on-demand` does **not** clear a park (an on-demand host never auto-mounts),
-   and no other edit does either. One consequence: no path was found that leaves a
-   host `Mounted` while parked.
+   to `on-demand` or to `none` does **not** clear a park, and no other edit does
+   either. A change **out of** `none` (to any mode) does clear it: the host begins
+   supervising from `Disabled` exactly as at startup, when nothing is parked
+   (`bs-uzy.1`). If the edit to `persistent` lands while the user's own unmount is
+   still `Draining`, the drain's completion does not park the host, so the ordinary
+   persistent paths mount it (`bs-uzy.1`). One consequence: no path was found that
+   leaves a host `Mounted` while parked.
 
    The **repair** "Unmount all & re-probe" (`RepairAllAsync`, ADR-020's `bs-aoz`
    amendment) neither parks nor un-parks. It drains every mounted host with its own

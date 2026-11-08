@@ -250,9 +250,12 @@ public interface IMountSupervisor
     /// <item><b>Tier change</b> (<c>mount.mode</c>): persistent to on-demand keeps any live mount
     /// and just stops auto-remounting (a user park, if any, stays); on-demand to persistent
     /// clears a user park -- the edit is an explicit "use this drive again" (bs-uzy, ADR-015) -- and
-    /// then mounts immediately if idle and reachable, or when it next reaches <c>Ready</c>;
-    /// anything to <c>none</c> drains and stops supervising; <c>none</c> to anything
-    /// begins supervising from <c>Disabled</c>, exactly as at startup.</item>
+    /// then mounts immediately if idle and reachable, or when it next reaches <c>Ready</c> (if the
+    /// user's own unmount is still draining when the edit lands, its completion does not park the
+    /// host, bs-uzy.1);
+    /// anything to <c>none</c> drains and stops supervising (a park, if any, stays); <c>none</c> to
+    /// anything begins supervising from <c>Disabled</c>, exactly as at startup, and so clears a user
+    /// park (bs-uzy.1).</item>
     /// <item><b>Scheduling-affecting</b> (<c>probe.interval_seconds</c>, <c>probe.deep_probe</c>,
     /// <c>mount.idle_unmount_seconds</c>): timers re-arm; nothing drains.</item>
     /// <item><b>Cosmetic/session-only</b> (<c>display_name</c>, every <c>session.*</c> field):
@@ -307,8 +310,8 @@ public sealed record HostMountSnapshot
     public string? LastTransitionTrigger { get; init; }
 
     /// <summary>True if the user explicitly unmounted this host and it has not since been
-    /// explicitly remounted, had its mode changed from on-demand to persistent (bs-uzy), or
-    /// restarted with the app (bs-fix-e5). Any other config reload leaves it set (ADR-015). A
+    /// explicitly remounted, had its mode changed from on-demand to persistent (bs-uzy) or out of
+    /// <c>none</c> (bs-uzy.1), or restarted with the app (bs-fix-e5). Any other config reload leaves it set (ADR-015). A
     /// persistent host can be <see cref="MountState.Ready"/> (or cycling through
     /// <see cref="MountState.Unreachable"/>/<see cref="MountState.Probing"/>) with this <c>true</c>
     /// -- that is deliberate parking, not a fault, and the tray UI should render it as such rather

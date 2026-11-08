@@ -23,8 +23,8 @@ namespace Bosun.Tests.Supervisor.Independent.UnparkAndRepairEnd;
 /// reaches <c>Ready</c>, and in any other state the ordinary persistent paths mount it later. Every one of
 /// those mounts still goes through <c>TryBeginMountAsync</c> and its probe (Invariant I1)."</item>
 /// <item>Same amendment: "What does not clear a park: any other edit (hostname, idle seconds, tab colour and
-/// so on); a change to <c>on-demand</c> ... and a change from <c>none</c>, which was not in the
-/// decision." and "<c>Mounted</c> and parked no longer coexist on any path found."</item>
+/// so on); a change to <c>on-demand</c> ..." (its clause "and a change from <c>none</c>" was corrected
+/// by bs-uzy.1, maintainer decision A: a change out of <c>none</c> also clears the park) and "<c>Mounted</c> and parked no longer coexist on any path found."</item>
 /// <item>docs/ARCHITECTURE.md §4 rule 5: "No mount happens while the supervisor is suspended — or while a
 /// suspend is pending".</item>
 /// <item>ADR-022 decision 5: the remount record "is cleared by: the remount itself, a user unmount, the host
@@ -585,14 +585,14 @@ public sealed class ModeChangeUnparkSpecTests
     // ---------------------------------------------------------------- what the decision does not cover
 
     /// <summary>
-    /// <b>Protects:</b> "What does not clear a park: ... a change from <c>none</c>, which was not in the
-    /// decision." A parked host edited to <c>none</c> and then to <c>persistent</c> stays parked and unmounted.
-    /// (bs-uzy.1 item 2 asks the maintainer whether to change this; until then this is the spec.)
-    /// <b>Catches:</b> the un-park keyed to "the new mode is persistent" rather than to the on-demand-to-
-    /// persistent change.
+    /// <b>Protects:</b> bs-uzy.1 item 2 (maintainer decision A): any change out of <c>none</c> clears the
+    /// park, because <c>none</c> to anything "begins supervising from Disabled, exactly as at startup"
+    /// and nothing is parked at startup. A parked host edited to <c>none</c> and then to <c>persistent</c>
+    /// is unparked, and mounts through the ordinary probe path.
+    /// <b>Catches:</b> the un-park keyed only to the on-demand-to-persistent change (the pre-bs-uzy.1 rule).
     /// </summary>
     [Fact]
-    public async Task A_parked_host_edited_to_none_and_then_to_persistent_stays_parked()
+    public async Task A_parked_host_edited_to_none_and_then_to_persistent_is_unparked_and_mounts()
     {
         var h = await ParkedOnDemandAsync();
         var from = Here(h.Log);
@@ -601,9 +601,11 @@ public sealed class ModeChangeUnparkSpecTests
         await h.ReloadAsync(Persistent());
         await h.AdvanceSecondsAsync(300);
 
-        Assert.True(h.Snapshot(Key).UserParked, "a change from none does not clear a park (ADR-015, bs-uzy amendment)");
-        Assert.Equal(0, MountCallsAfter(h.Log, Drive, from));
-        Assert.Null(h.Rclone.FsAt(Drive));
+        Assert.False(h.Snapshot(Key).UserParked, "a change out of none clears a park (ADR-015, bs-uzy.1 correction)");
+        Assert.Equal(MountState.Mounted, h.State(Key));
+        Assert.Equal(1, MountCallsAfter(h.Log, Drive, from));
+        AssertEveryMountPrecededByPassingDeepProbe(h.Log, Key, Drive, from);
+        Assert.NotNull(h.Rclone.FsAt(Drive));
     }
 
     /// <summary>
@@ -614,7 +616,7 @@ public sealed class ModeChangeUnparkSpecTests
     /// <b>Catches:</b> the park set at drain completion (cause <c>UserUnmount</c>) after the edit already
     /// cleared it, leaving a persistent host parked although the user's last act was "use this drive again".
     /// </summary>
-    [Fact(Skip = "bs-uzy.1 independent: ADR-015's bs-uzy amendment says that after the edit to persistent the host 'behaves as an unparked persistent host ... in any other state the ordinary persistent paths mount it later'. Observed: an edit landing while the user's own unmount is still Draining leaves the host parked once the drain completes (UserParked=true, never remounted). Already filed as bs-uzy.1 item 1 (needs-decision); kept skipped until the maintainer decides.")]
+    [Fact]
     public async Task An_edit_to_persistent_while_the_users_unmount_is_still_draining_leaves_the_host_unparked()
     {
         var h = new RemountHarness(OnDemand());
