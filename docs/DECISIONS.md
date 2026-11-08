@@ -2660,3 +2660,7 @@ Remote Control session id. And restored sessions reconnecting is already ADR-021
 **Sleep (2026-11-07).** Already covered: the maintainer never lets the workstation sleep. Nothing is
 built for it. The workstation check cannot report "asleep"; if the machine ever is, the remote
 desktop app showing it offline is the signal.
+
+**Peek at session (2026-11-07).** Left out of the first build. The maintainer may add it back if a
+gap shows up in use; as a modular tool reading the pseudo console's recent output, it is one more
+class. Tracked as a deferred `bs-` issue so it is not forgotten.
