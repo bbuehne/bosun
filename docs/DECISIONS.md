@@ -2633,3 +2633,15 @@ specific tasks Bosun automates. Decided, in this order:
    under a ConPTY host with no window. To be proved by a spike.
 
 The status stays Proposed.
+
+### Addendum (2026-11-07): what the remote tools may do, maintainer decision A
+
+- Bosun's tools are a fixed list. They act only inside the development area, and none of them runs a
+  command passed in by the caller. Anything outside the list goes through the remote desktop.
+- Sessions they start use the maintainer's normal Claude Code permission settings, exactly as a
+  session started at the desk. Bosun passes no permission-mode flag. Approval prompts reach the
+  maintainer through Remote Control.
+- **Modular, so tools can be added.** Each tool is one class behind one small interface (its name,
+  description, parameters, and handler), registered in one list. Adding a tool is a new class, one
+  registration line, and its tests; nothing else changes. This is compile-time modularity, not a
+  plugin system (`CLAUDE.md` §5): no tools are loaded at runtime from outside Bosun.
