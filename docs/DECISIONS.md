@@ -2656,3 +2656,7 @@ is not a failure. Whether the link is printed is checked by spike `bs-4xw.3`.
 Correction to the issue list given in conversation: ADR-021 Decision 8 does not forbid reading a
 Remote Control session id. And restored sessions reconnecting is already ADR-021 Assumption 5
 (`remoteControlAtStartup`), so it is not an ADR-024 issue.
+
+**Sleep (2026-11-07).** Already covered: the maintainer never lets the workstation sleep. Nothing is
+built for it. The workstation check cannot report "asleep"; if the machine ever is, the remote
+desktop app showing it offline is the signal.
