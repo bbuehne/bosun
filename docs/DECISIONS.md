@@ -2664,3 +2664,8 @@ desktop app showing it offline is the signal.
 **Peek at session (2026-11-07).** Left out of the first build. The maintainer may add it back if a
 gap shows up in use; as a modular tool reading the pseudo console's recent output, it is one more
 class. Tracked as a deferred `bs-` issue so it is not forgotten.
+
+**GitHub repository visibility (2026-11-07, maintainer decision A).** New-project setup always
+creates a private repository under the account `gh` is signed in as. The tool has no option to make
+one public; the maintainer does that on GitHub by hand. The workstation check confirms `gh` is signed
+in.
