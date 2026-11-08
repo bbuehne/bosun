@@ -2669,3 +2669,16 @@ class. Tracked as a deferred `bs-` issue so it is not forgotten.
 creates a private repository under the account `gh` is signed in as. The tool has no option to make
 one public; the maintainer does that on GitHub by hand. The workstation check confirms `gh` is signed
 in.
+
+**Configuration (2026-11-07, maintainer decision A).** A table of its own, off unless set:
+
+```toml
+[remote_sessions]
+enabled          = false                        # ADR-024
+development_area = "%USERPROFILE%\Development"  # required when enabled; must exist
+```
+
+Bosun refuses to start the tools when `enabled = true` and `development_area` is missing or does not
+exist. `%VAR%` tokens are kept literal and expanded at use, as `rclone_config_path` is. Separate
+from `[claude_sessions]`: restore acts only on the machine, these tools open a way in from outside.
+`docs/CONFIG-SCHEMA.md` changes only when the ADR is accepted.
