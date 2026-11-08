@@ -2610,3 +2610,26 @@ Known gaps in A, to be settled by the investigation (`bs-` issue filed 2026-11-0
 Sources: code.claude.com/docs/en/remote-control.md, settings-reference.md (`remoteControlAtStartup`),
 cli-reference.md; claude.com/docs/connectors/building/authentication; support.claude.com article
 11175166.
+
+### Addendum (2026-11-07): reaching the workstation remotely, maintainer decision A
+
+The maintainer wants a working way to do these things remotely, whether by remote desktop or by
+specific tasks Bosun automates. Decided, in this order:
+
+1. **An existing remote desktop tool as the safety net, set up first.** Chrome Remote Desktop
+   (shares the signed-in console session, outbound connection, phone client) or Windows RDP over a
+   private network path. Nothing is built in Bosun for this. It covers the "Trust this folder?"
+   prompt and anything the tools below do not. A remote-control server of Bosun's own (VNC-style)
+   is rejected: existing tools are safer than anything Bosun would expose.
+2. **Specific tasks Bosun automates, built afterwards** (the tools in Decision 3). Finding behind
+   the design: Bosun cannot send keystrokes to a locked workstation, and cannot read a Windows
+   Terminal tab, so it cannot answer a prompt in a Terminal tab while the maintainer is away. Instead,
+   Bosun would start Claude Code in a pseudo console (ConPTY) it owns, which works while the
+   workstation is locked. Bosun can then see a trust prompt, relay it, and answer it through Claude
+   Code's own prompt when the maintainer approves. That is not an edit of `~/.claude.json`, so
+   ADR-021 Decision 2 holds. The same mechanism gives Peek at session its output. The cost: such
+   sessions have no visible Terminal tab (they are reached through Remote Control) and end if Bosun
+   exits. Unverified: that Claude Code's interactive UI, including Remote Control, runs normally
+   under a ConPTY host with no window. To be proved by a spike.
+
+The status stays Proposed.
