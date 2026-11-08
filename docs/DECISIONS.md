@@ -2497,9 +2497,10 @@ record what has been decided since, and they win where the two differ.
   Decision 4's "first spike" is now `bs-4xw.3`.
 - Open questions "what an authenticated caller may do", "where the development area is configured"
   and "what the way to reach the session is": answered in the addenda.
-- Still open: how the request gets from the phone to Bosun (shape A's Remote Control server session
-  or shape B's connector through a tunnel, which carries the Cloudflare Access sign-in question);
-  how this shares code with ADR-021.
+- The way in: shape B, a connector in regular Claude chats through a Cloudflare Tunnel (addendum
+  "the way in is shape B").
+- Still open: whether Cloudflare Access can be the OAuth sign-in the connector requires; how this
+  shares code with ADR-021.
 
 **Context.** The maintainer spends much of his day driving Claude Code sessions remotely, from a
 phone, while away from the workstation. Often something comes up that needs a new Claude Code
@@ -2699,3 +2700,17 @@ Bosun refuses to start the tools when `enabled = true` and `development_area` is
 exist. `%VAR%` tokens are kept literal and expanded at use, as `rclone_config_path` is. Separate
 from `[claude_sessions]`: restore acts only on the machine, these tools open a way in from outside.
 `docs/CONFIG-SCHEMA.md` changes only when the ADR is accepted.
+
+### Addendum (2026-11-07): the way in is shape B, maintainer decision B
+
+Requests reach Bosun through a connector in the maintainer's regular Claude chats: Bosun's tools
+behind a thin MCP layer, exposed through a Cloudflare Tunnel with Cloudflare Access as the sign-in
+(Decision 2 as first written). Shape A's always-running Remote Control server session is not the way
+in. What carries over from the other addenda: the remote desktop safety net, sessions started in a
+Bosun-owned pseudo console, the fixed modular tool list, session names and links, private
+repositories, and the `[remote_sessions]` table.
+
+Still unverified, and the first thing to settle: whether Cloudflare Access can act as the OAuth
+authorisation server a claude.ai custom connector requires (dynamic client registration or a client
+ID metadata document), with the authorisation server's metadata reachable from Anthropic's egress
+range. If it cannot, a different sign-in in front of the tunnel has to be chosen.
