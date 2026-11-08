@@ -2645,3 +2645,14 @@ The status stays Proposed.
   description, parameters, and handler), registered in one list. Adding a tool is a new class, one
   registration line, and its tests; nothing else changes. This is compile-time modularity, not a
   plugin system (`CLAUDE.md` §5): no tools are loaded at runtime from outside Bosun.
+
+### Addendum (2026-11-07): handing back the session, maintainer decision A
+
+Bosun names every session it starts (for example `bosun · <project>`) and always returns that name,
+which the maintainer can find in the Claude app's session list. If the session prints its Remote
+Control link, which Bosun can read from the pseudo console, the link is returned too. A missing link
+is not a failure. Whether the link is printed is checked by spike `bs-4xw.3`.
+
+Correction to the issue list given in conversation: ADR-021 Decision 8 does not forbid reading a
+Remote Control session id. And restored sessions reconnecting is already ADR-021 Assumption 5
+(`remoteControlAtStartup`), so it is not an ADR-024 issue.
