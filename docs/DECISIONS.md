@@ -2714,3 +2714,13 @@ Still unverified, and the first thing to settle: whether Cloudflare Access can a
 authorisation server a claude.ai custom connector requires (dynamic client registration or a client
 ID metadata document), with the authorisation server's metadata reachable from Anthropic's egress
 range. If it cannot, a different sign-in in front of the tunnel has to be chosen.
+
+**Sign-in research (2026-11-07, desk only, `bs-4xw.5`).** Cloudflare Access has a "Managed OAuth"
+mode that on paper meets the connector's needs: OAuth metadata, dynamic client registration with an
+allowed-redirect list, and the normal Access policy limiting sign-in to one email. But
+`anthropics/claude-ai-mcp#410` (June 2026, closed "not planned", reproduced by several people since)
+reports claude.ai web and mobile failing against it while Claude Code works with the same URL. The
+suspected cause is a missing RFC 8707 `resource` parameter; no fix was found. The documented fallback
+is a Cloudflare Worker running `@cloudflare/workers-oauth-provider` that does the sign-in itself,
+admits only the maintainer, and forwards to the tunnel. Whether the Access route works today can only
+be settled by trying it.
