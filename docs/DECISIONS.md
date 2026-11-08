@@ -2484,6 +2484,23 @@ architecture in Decision 2 is partly Claude's proposal and is not yet confirmed;
 are undecided. Nothing here is built. Would extend Bosun's scope (`CLAUDE.md` §1), add the first
 network-reachable surface Bosun has had, and share machinery with ADR-021.
 
+**Where this stands (2026-11-07).** The text below is kept as first written; dated addenda at the end
+record what has been decided since, and they win where the two differ.
+
+- Decided: an existing remote desktop as the safety net, then specific tools that Bosun runs Claude
+  Code for in a pseudo console it owns, not a Windows Terminal tab (supersedes Decision 1's "open a
+  Windows Terminal tab"). Tools are a fixed, modular list inside the development area, sessions use
+  the normal permission settings, Bosun returns each session's name and its link when printed,
+  repositories are always private, Peek is deferred, configuration is a `[remote_sessions]` table.
+- Open question "how Remote Control is turned on unattended": answered. `claude --remote-control`
+  at launch; the one-time "Enable Remote Control?" prompt is visible to Bosun in the pseudo console.
+  Decision 4's "first spike" is now `bs-4xw.3`.
+- Open questions "what an authenticated caller may do", "where the development area is configured"
+  and "what the way to reach the session is": answered in the addenda.
+- Still open: how the request gets from the phone to Bosun (shape A's Remote Control server session
+  or shape B's connector through a tunnel, which carries the Cloudflare Access sign-in question);
+  how this shares code with ADR-021.
+
 **Context.** The maintainer spends much of his day driving Claude Code sessions remotely, from a
 phone, while away from the workstation. Often something comes up that needs a new Claude Code
 session and none is running on the workstation. Today that means waiting until he is at the desk.
