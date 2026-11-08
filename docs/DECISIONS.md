@@ -791,7 +791,31 @@ when this clears a park.
 What does **not** clear a park: any other edit (hostname, idle seconds, tab colour
 and so on); a change to `on-demand` (an on-demand host never auto-mounts, so there
 is nothing to un-park and the park stays); and a change from `none`, which was not
-in the decision.
+in the decision (**corrected 2026-11-07, `bs-uzy.1`**: a change *out of* `none` does
+clear it, see below).
+
+**Correction (2026-11-07, `bs-uzy.1`, maintainer decision A): two edge cases clear
+the park too.** The `bs-uzy` amendment left two cases open; the maintainer decided
+both clear the park.
+
+1. *An edit to `persistent` while the user's unmount is still draining.* A park is
+   set only when a user-unmount drain completes. Clearing it at the edit therefore
+   did nothing: the drain finished afterwards and parked the host as `persistent`,
+   so the user's later act was ignored. The edit now marks the in-flight drain so
+   its completion does not park; the host goes through the ordinary re-enable
+   (probe, then the persistent paths mount it from `Ready`). Nothing is mounted
+   from the drain completion, so Invariant I1 holds. A drain that completes with
+   the host still `on-demand`, and a `persistent` to `on-demand` edit during a user
+   unmount, still park as before.
+2. *Any change out of `none`.* `IMountSupervisor.ConfigChangedAsync` already says a
+   change from `none` "begins supervising from `Disabled`, exactly as at startup",
+   and nothing is parked at startup. So a parked host edited to `none` and later to
+   `persistent` (or `on-demand`) is no longer parked. This replaces the sentence
+   above that a change from `none` does not clear a park. A change **to** `none`
+   still does not clear it.
+
+The same `Information` line is logged when either case clears a park that was
+already set.
 
 What this fixes: before, the `Ready` branch of the on-demand-to-persistent change
 mounted the host without looking at the park, while the other three persistent

@@ -311,14 +311,24 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         /// <summary>True once an explicit user unmount (<see cref="RequestUnmountAsync"/>) has
         /// completed its drain. Suppresses the persistent tier's auto-mount-on-Ready
         /// (<see cref="OnEnteredReadyAsync"/>) until an explicit user act clears it: a mount request
-        /// (<see cref="RequestMountAsync"/>) or a mode change from on-demand to persistent
-        /// (<see cref="ApplyHostConfigChangeAsync"/>, bs-uzy). A config reload does NOT clear it (ADR-015's
-        /// amendment: the Settings window saves on every edit, so an unrelated edit must not bring back
-        /// a drive the user took down), nor does a mode change to on-demand; it does not survive an app
-        /// restart (it is in memory only). Deliberately does NOT stop the host from being probed while
-        /// idle -- it still shows live reachability, it just never auto-mounts. See the defect-3
-        /// discussion in the delivery report and <see cref="HostMountSnapshot.UserParked"/>.</summary>
+        /// (<see cref="RequestMountAsync"/>), a mode change from on-demand to persistent, or any mode
+        /// change out of <c>none</c> (<see cref="ApplyHostConfigChangeAsync"/>, bs-uzy, bs-uzy.1). A config
+        /// reload does NOT clear it (ADR-015's amendment: the Settings window saves on every edit, so an
+        /// unrelated edit must not bring back a drive the user took down), nor does a mode change to
+        /// on-demand or to none; it does not survive an app restart (it is in memory only). Deliberately
+        /// does NOT stop the host from being probed while idle -- it still shows live reachability, it
+        /// just never auto-mounts. See the defect-3 discussion in the delivery report and
+        /// <see cref="HostMountSnapshot.UserParked"/>.</summary>
         public bool UserParked;
+
+        /// <summary>bs-uzy.1: set by <see cref="ApplyHostConfigChangeAsync"/> when a park-clearing mode
+        /// change lands while the user's own unmount (<see cref="DrainCause.UserUnmount"/>) is still
+        /// <see cref="MountState.Draining"/>. The park is only set when that drain completes, so clearing
+        /// <see cref="UserParked"/> at the edit is not enough: <see cref="CompleteDrainAsync"/> reads this
+        /// flag and skips setting the park, leaving the host unparked for the ordinary persistent paths.
+        /// Reset by <see cref="EnterDraining"/> (a new drain starts clean) and consumed by
+        /// <see cref="CompleteDrainAsync"/>.</summary>
+        public bool SkipParkAtDrainEnd;
 
         /// <summary>ADR-022 (bs-hrg): set by <see cref="SuspendAsync"/> on an ON-DEMAND host that was
         /// <see cref="MountState.Mounted"/> or <see cref="MountState.Mounting"/> when suspend arrived,
@@ -2849,6 +2859,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.DrainStartedUtc = startedUtc ?? timeProvider.GetUtcNow();
         host.DrainEscalated = false;
         host.SuspendEscalationDeadlineUtc = null;
+        host.SkipParkAtDrainEnd = false;
         host.DrainCause = cause;
 
         host.ProbeTimer?.Dispose();
@@ -3199,7 +3210,19 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.ConsecutiveMountedFailures = 0;
         host.ConsecutiveDeepProbeFailures = 0;
 
-        if (host.DrainCause == DrainCause.UserUnmount)
+        var skipPark = host.SkipParkAtDrainEnd;
+        host.SkipParkAtDrainEnd = false;
+        if (host.DrainCause == DrainCause.UserUnmount && skipPark)
+        {
+            // bs-uzy.1: the user switched the host to persistent while this unmount was still draining.
+            // That edit is the later explicit act ("use this drive again"), so the park this drain would
+            // set is not set. The host goes through the ordinary re-enable below (probe, then the
+            // persistent paths mount it from Ready); nothing is mounted from here (I1).
+            logger.LogInformation(
+                "Host {HostKey} not parked at drain completion: its mode was changed to persistent while the " +
+                "user's unmount was still draining", host.Key);
+        }
+        else if (host.DrainCause == DrainCause.UserUnmount)
         {
             // bs-fix-e5 defect 3: park rather than let rule 6's "persistent auto-mounts on becoming
             // Ready" fire on the very next arrival, which is what turned the tray's Unmount command
@@ -3207,7 +3230,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             host.UserParked = true;
             logger.LogInformation(
                 "Host {HostKey} parked at the user's request (explicit unmount); will not auto-remount until the " +
-                "user mounts it again or changes its mode to persistent (a config reload does not un-park it; " +
+                "user mounts it again, changes its mode to persistent, or changes it out of none (a config reload does not un-park it; " +
                 "Bosun restarting does)", host.Key);
         }
 
@@ -3769,21 +3792,36 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             // about an on-demand drive; whatever tier the host has now is a different arrangement.
             host.RemountAfterResume = false;
 
-            if (oldMode == MountMode.OnDemand && newMode == MountMode.Persistent && host.UserParked)
+            // bs-uzy / bs-uzy.1 (maintainer decisions B and A, 2026-11-07; ADR-015 amendment): two mode
+            // changes are explicit user acts that clear the park an earlier unmount set.
+            //  * on-demand -> persistent: "use this drive again".
+            //  * anything out of none: the host "begins supervising from Disabled, exactly as at
+            //    startup" (IMountSupervisor.ConfigChangedAsync), and nothing is parked at startup.
+            // Done here, before any branch below, so it holds whether the host is Ready (mounts now),
+            // Unreachable (mounts when it reaches Ready), or in any other state (the ordinary persistent
+            // paths see an unparked host) -- and whether or not the same edit also changed a
+            // mount-affecting field. Every mount this leads to still goes through TryBeginMountAsync and
+            // its probe (I1). persistent -> on-demand and anything -> none deliberately keep a park: an
+            // on-demand host never auto-mounts, so there is nothing to un-park.
+            var promotedToPersistent = oldMode == MountMode.OnDemand && newMode == MountMode.Persistent;
+            if (promotedToPersistent || oldMode == MountMode.None)
             {
-                // bs-uzy (maintainer decision B, 2026-11-07; ADR-015 amendment): moving a host to the
-                // persistent tier is an explicit user act meaning "use this drive again", so it clears
-                // the park an earlier unmount set. Done here, before any branch below, so it holds
-                // whether the host is Ready (mounts now), Unreachable (mounts when it reaches Ready),
-                // or in any other state (the ordinary persistent paths see an unparked host) -- and
-                // whether or not the same edit also changed a mount-affecting field. Every mount this
-                // leads to still goes through TryBeginMountAsync and its probe (I1). The other
-                // direction, persistent -> on-demand, deliberately keeps a park: an on-demand host
-                // never auto-mounts, so there is nothing to un-park.
-                host.UserParked = false;
-                logger.LogInformation(
-                    "Host {HostKey} un-parked: its mode changed from on-demand to persistent, which is an " +
-                    "explicit request to use the drive again", host.Key);
+                if (host.UserParked)
+                {
+                    host.UserParked = false;
+                    logger.LogInformation(
+                        "Host {HostKey} un-parked: its mode changed from {OldMode} to {NewMode}, which is an " +
+                        "explicit request to use the drive again",
+                        host.Key, oldMode, newMode);
+                }
+
+                // The park is set only when a user-unmount drain COMPLETES, so an edit that lands while
+                // that drain is still running has nothing to clear yet: mark the drain so its
+                // completion does not park (bs-uzy.1 item 1).
+                if (host.State == MountState.Draining && host.DrainCause == DrainCause.UserUnmount)
+                {
+                    host.SkipParkAtDrainEnd = true;
+                }
             }
         }
 
