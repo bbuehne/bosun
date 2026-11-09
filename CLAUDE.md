@@ -37,6 +37,11 @@ A single-process WPF tray application (.NET 10, C# 14) that:
   Terminal exit killed, by reopening each one in a Windows Terminal tab with
   `claude --resume <id>`. It learns about sessions from a hook helper it ships as
   a Claude Code plugin (ADR-021). Off unless `[claude_sessions] enabled = true`.
+- **Starts and resumes Claude Code sessions remotely**, from a Claude
+  conversation on the maintainer's phone, through a connector behind a
+  Cloudflare Tunnel (ADR-024). Bosun runs each session in a pseudo console it
+  owns, with Remote Control on, and acts only inside the configured development
+  area. Off unless `[remote_sessions] enabled = true`.
 
 It is a personal tool, shared publicly. It is **not** a product.
 
@@ -271,7 +276,8 @@ injected time, and a temp fragment path. Anything needing real rclone or WinFsp 
 a marked integration test the human runs deliberately. The same goes for ADR-021:
 no default-suite test launches `wt.exe`, reads or writes
 `%LOCALAPPDATA%\Bosun\claude-sessions\`, or writes
-`%LOCALAPPDATA%\Bosun\claude-plugin\`.
+`%LOCALAPPDATA%\Bosun\claude-plugin\`. And for ADR-024: no default-suite test
+starts Claude Code, opens a pseudo console, or touches the tunnel.
 
 ### Validation is the interfacing agent's responsibility
 
@@ -285,7 +291,8 @@ the `validator` subagent for large or critical changes:
    `IMountSupervisor` calls `mount/mount` / `mount/unmount`.
 5. Confirm no default-suite test can touch a real mount, drive letter, or the real
    fragment path, launch `wt.exe`, or touch the real Claude session records or
-   plugin directory (ADR-021).
+   plugin directory (ADR-021), or start Claude Code, open a pseudo console, or
+   touch the tunnel (ADR-024).
 
 Never mark a bd issue done on a subagent's claim alone.
 

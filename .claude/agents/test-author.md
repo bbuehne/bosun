@@ -36,8 +36,11 @@ Critical invariants that deserve dedicated, adversarial suites:
 
 **Determinism is not optional here.** Time is injected and advanced explicitly —
 no sleeps, no wall clock. `IRcloneClient` and `IProbe` are fakes. No test in the
-default suite touches WinFsp, a real host, or a real drive letter; anything that
-must is a marked integration test the human runs deliberately.
+default suite touches WinFsp, a real host, or a real drive letter, launches
+`wt.exe`, touches the real Claude session records or plugin directory (ADR-021),
+or starts Claude Code, opens a pseudo console, or touches the Cloudflare Tunnel
+(ADR-024); anything that must is a marked integration test the human runs
+deliberately.
 
 Every test must be able to fail for one describable reason. If you cannot name the
 bug a test catches, do not write it.

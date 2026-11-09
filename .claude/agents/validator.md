@@ -33,7 +33,8 @@ Explorer hanging for thirty seconds with no explanation, days later.
    path. A test that mounts something on the dev machine is an automatic FAIL. The
    same applies to launching `wt.exe`, reading or writing
    `%LOCALAPPDATA%\Bosun\claude-sessions\`, or writing
-   `%LOCALAPPDATA%\Bosun\claude-plugin\` (ADR-021).
+   `%LOCALAPPDATA%\Bosun\claude-plugin\` (ADR-021), and to starting Claude Code,
+   opening a pseudo console, or touching the Cloudflare Tunnel (ADR-024).
 6. **Seam check.** Regenerate Graphify; confirm Win32 interop has not spread beyond
    `ISessionMonitor`'s implementation, and that no new component talks to rclone
    directly. `src/Bosun.ClaudeHook/` may hold its own P/Invoke, in one file

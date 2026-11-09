@@ -66,6 +66,8 @@ fragment file — all of which look like OS faults, not test failures. Rules:
 - No default-suite test may launch `wt.exe`, read or write
   `%LOCALAPPDATA%\Bosun\claude-sessions\`, or write
   `%LOCALAPPDATA%\Bosun\claude-plugin\` (ADR-021).
+- No default-suite test may start Claude Code, open a pseudo console, or touch
+  the Cloudflare Tunnel (ADR-024).
 - Small, coherent commits; imperative subject; reference the bd ID:
   `Add probe backoff reset on resume (bs-31)`.
 - Never commit secrets, a real `hosts.toml`, or publish output.
