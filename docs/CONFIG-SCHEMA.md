@@ -100,11 +100,14 @@ Not per host: a Claude Code session is not tied to a configured SSH host.
 ```toml
 [remote_sessions]
 enabled          = false                        # start and resume Claude Code sessions remotely; ADR-024
-development_area = "%USERPROFILE%\\Development"  # required when enabled; must exist
+development_area = "%USERPROFILE%\\Development"  # required when enabled
 ```
 
-Off when the table is absent. When `enabled = true`, a missing `development_area`, or one that does
-not exist, refuses the tools rather than guessing a folder. `%VAR%` tokens are kept literal and
+Off when the table is absent. When `enabled = true`, a missing or blank `development_area` is a
+config error: there is no default folder, because the tools must not guess one. Whether the folder
+exists is **not** a config error (bs-4xw.16). It is checked when a remote tool runs, and a folder that
+has been renamed or deleted leaves the remote tools unavailable while the rest of Bosun (mounts,
+Terminal profiles, reloads, host saves) keeps running. `%VAR%` tokens are kept literal and
 expanded at use, as `rclone_config_path` is. Kept separate from `[claude_sessions]`: restore acts only
 on the machine, these tools open a way in from outside. The table is bound, validated and written back
 by `HostConfigTomlWriter` (bs-4xw.6); nothing uses it yet. Expansion happens in one place,
@@ -195,9 +198,10 @@ Reject the whole config, keep the previous one, and surface the error if any of:
   (`"main"`), which is defence-in-depth, not something authors should rely on.
 - `remote_sessions.enabled = true` with a null, absent or blank `remote_sessions.development_area`
   (rule `remote-sessions-development-area-required`, bs-4xw.6). There is no default folder.
-- `remote_sessions.enabled = true` with a `development_area` that, after `%VAR%` expansion, is not
-  an existing directory (rule `remote-sessions-development-area-not-found`). Nothing in
-  `[remote_sessions]` is checked while `enabled` is `false`, so a stale path in a disabled table
+  Only the literal value is read: validation does not expand `%VAR%` and does not touch the file
+  system, so a development folder that does not exist is **not** a validation error. A missing folder
+  switches off only the remote tools; each tool checks the folder when it runs (bs-4xw.16). Nothing
+  in `[remote_sessions]` is checked while `enabled` is `false`, so a stale path in a disabled table
   does not stop Bosun starting.
 
 **Note on "duplicate host key":** this cannot actually reach `ConfigValidator`.

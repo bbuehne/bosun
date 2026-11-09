@@ -126,16 +126,24 @@ public sealed record RemoteSessionsConfig
     public string? DevelopmentArea { get; init; }
 
     /// <summary><see cref="DevelopmentArea"/> with <c>%VAR%</c> environment-variable tokens
-    /// expanded, or <see langword="null"/> when no (non-blank) area is configured. The single point
-    /// of environment expansion for this field; do not call
+    /// expanded, or <see langword="null"/> when no usable area is configured: the literal is null or
+    /// blank, or it expands to a blank string (an unset variable can do that). Never returns an
+    /// empty or whitespace path, so a consumer is never handed a blank one. Does not check that the
+    /// folder exists. The single point of environment expansion for this field; do not call
     /// <see cref="Environment.ExpandEnvironmentVariables(string)"/> on it elsewhere.</summary>
     /// <param name="expandEnvironmentVariables">Injected expander; defaults to
     /// <see cref="Environment.ExpandEnvironmentVariables(string)"/>. Tests pass a fake so no result
     /// depends on the machine's real environment.</param>
-    public string? ResolveDevelopmentArea(Func<string, string>? expandEnvironmentVariables = null) =>
-        string.IsNullOrWhiteSpace(DevelopmentArea)
-            ? null
-            : (expandEnvironmentVariables ?? Environment.ExpandEnvironmentVariables)(DevelopmentArea);
+    public string? ResolveDevelopmentArea(Func<string, string>? expandEnvironmentVariables = null)
+    {
+        if (string.IsNullOrWhiteSpace(DevelopmentArea))
+        {
+            return null;
+        }
+
+        var expanded = (expandEnvironmentVariables ?? Environment.ExpandEnvironmentVariables)(DevelopmentArea);
+        return string.IsNullOrWhiteSpace(expanded) ? null : expanded;
+    }
 }
 
 /// <summary>One <c>[hosts.&lt;key&gt;]</c> entry.</summary>

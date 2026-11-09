@@ -5,11 +5,11 @@ namespace Bosun.Tests.Configuration;
 
 /// <summary>
 /// bs-4xw.6 / ADR-024: the top-level <c>[remote_sessions]</c> table. Binding defaults, the
-/// "required when enabled, must exist" validation, literal-until-expanded <c>%VAR%</c> handling,
+/// "required when enabled" validation (existence is deliberately not checked, bs-4xw.16), literal-until-expanded <c>%VAR%</c> handling,
 /// and the <see cref="HostConfigTomlWriter"/> round trip (ADR-019: Bosun is the sole writer, so a
 /// host edit must never drop <c>enabled = true</c> or the area). Pure text in, pure text out; the
-/// directory check and the environment expander are injected, so no test depends on the real
-/// file system or environment. The one test that makes a real directory uses a unique temp
+/// environment expander is injected, so no test depends on the real environment, and validation
+/// itself performs no file-system access for this table. The one test that makes a real directory uses a unique temp
 /// directory it deletes again.
 /// </summary>
 public sealed class RemoteSessionsConfigTests
@@ -207,15 +207,39 @@ public sealed class RemoteSessionsConfigTests
         }
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("%BOSUN_TEST_BLANK_EXPANSION%")]
+    [InlineData("%BOSUN_TEST_BLANK_EXPANSION%  ")]
+    public void ResolveDevelopmentArea_NonBlankLiteralThatExpandsToBlank_IsNull(string literal)
+    {
+        // An unset variable can expand to a blank string; a consumer must never be handed one.
+        var config = new RemoteSessionsConfig { DevelopmentArea = literal };
+
+        var resolved = config.ResolveDevelopmentArea(
+            s => s.Replace("%BOSUN_TEST_BLANK_EXPANSION%", string.Empty, StringComparison.Ordinal));
+
+        Assert.Null(resolved);
+    }
+
+    [Fact]
+    public void ResolveDevelopmentArea_DoesNotCheckThatTheFolderExists()
+    {
+        var config = new RemoteSessionsConfig { Enabled = true, DevelopmentArea = @"Z:\does\not\exist" };
+
+        Assert.Equal(@"Z:\does\not\exist", config.ResolveDevelopmentArea(s => s));
+    }
+
     // -- validation ---------------------------------------------------------------------------
 
     [Fact]
-    public void Validate_Disabled_NeverChecksTheArea_EvenWhenItIsMissingOrStale()
+    public void Validate_Disabled_IsValid_EvenWhenTheAreaIsMissingOrStale()
     {
         var config = ConfigParser.Parse(
             "[remote_sessions]\nenabled = false\ndevelopment_area = 'Z:\\does\\not\\exist'\n\n" + OneHost);
 
-        var result = Validate(config, directoryExists: _ => throw new InvalidOperationException("must not be called"));
+        var result = Validate(config);
 
         Assert.True(result.IsValid, string.Join("; ", result.Errors));
     }
@@ -223,7 +247,7 @@ public sealed class RemoteSessionsConfigTests
     [Fact]
     public void Validate_TableAbsent_IsValid()
     {
-        var result = Validate(ConfigParser.Parse(OneHost), directoryExists: _ => false);
+        var result = Validate(ConfigParser.Parse(OneHost));
 
         Assert.True(result.IsValid, string.Join("; ", result.Errors));
     }
@@ -233,7 +257,7 @@ public sealed class RemoteSessionsConfigTests
     {
         var config = ConfigParser.Parse("[remote_sessions]\nenabled = true\n\n" + OneHost);
 
-        var result = Validate(config, directoryExists: _ => true);
+        var result = Validate(config);
 
         var error = Assert.Single(result.Errors);
         Assert.Equal("remote-sessions-development-area-required", error.Rule);
@@ -248,29 +272,23 @@ public sealed class RemoteSessionsConfigTests
         var config = ConfigParser.Parse(
             $"[remote_sessions]\nenabled = true\ndevelopment_area = \"{blank}\"\n\n{OneHost}");
 
-        var result = Validate(config, directoryExists: _ => true);
+        var result = Validate(config);
 
         Assert.Equal("remote-sessions-development-area-required", Assert.Single(result.Errors).Rule);
     }
 
+    // bs-4xw.16: a development folder that does not exist must not reject the config. Bosun rejects a
+    // whole config on any validation error, so an existence rule would stop startup, every reload and
+    // every host save when the folder is renamed or deleted. The remote tools check it when they run.
+
     [Fact]
-    public void Validate_EnabledWithNonexistentDirectory_IsRejected_AndNamesTheLiteralValue()
+    public void Validate_EnabledWithNonexistentDirectory_IsValid()
     {
         var missing = Path.Combine(Path.GetTempPath(), "bosun-test-missing-" + Guid.NewGuid().ToString("N"));
-        var config = new BosunConfig
-        {
-            Global = new GlobalConfig(),
-            Hosts = new Dictionary<string, HostConfig>(),
-            RemoteSessions = new RemoteSessionsConfig { Enabled = true, DevelopmentArea = missing },
-        };
 
-        // Real Directory.Exists on a path that cannot exist (random GUID under the temp directory).
-        var result = ConfigValidator.Validate(config);
+        var result = ConfigValidator.Validate(ConfigWithArea(missing));
 
-        var error = Assert.Single(result.Errors);
-        Assert.Equal("remote-sessions-development-area-not-found", error.Rule);
-        Assert.Contains(missing, error.Message, StringComparison.Ordinal);
-        Assert.Contains("remote_sessions.development_area", error.Message, StringComparison.Ordinal);
+        Assert.True(result.IsValid, string.Join("; ", result.Errors));
     }
 
     [Fact]
@@ -280,14 +298,7 @@ public sealed class RemoteSessionsConfigTests
         Directory.CreateDirectory(dir);
         try
         {
-            var config = new BosunConfig
-            {
-                Global = new GlobalConfig(),
-                Hosts = new Dictionary<string, HostConfig>(),
-                RemoteSessions = new RemoteSessionsConfig { Enabled = true, DevelopmentArea = dir },
-            };
-
-            var result = ConfigValidator.Validate(config);
+            var result = ConfigValidator.Validate(ConfigWithArea(dir));
 
             Assert.True(result.IsValid, string.Join("; ", result.Errors));
         }
@@ -298,22 +309,15 @@ public sealed class RemoteSessionsConfigTests
     }
 
     [Fact]
-    public void Validate_ExistingFileInsteadOfDirectory_IsRejected()
+    public void Validate_ExistingFileInsteadOfDirectory_IsValid()
     {
         var file = Path.Combine(Path.GetTempPath(), "bosun-test-file-" + Guid.NewGuid().ToString("N"));
         File.WriteAllText(file, string.Empty);
         try
         {
-            var config = new BosunConfig
-            {
-                Global = new GlobalConfig(),
-                Hosts = new Dictionary<string, HostConfig>(),
-                RemoteSessions = new RemoteSessionsConfig { Enabled = true, DevelopmentArea = file },
-            };
+            var result = ConfigValidator.Validate(ConfigWithArea(file));
 
-            var result = ConfigValidator.Validate(config);
-
-            Assert.Equal("remote-sessions-development-area-not-found", Assert.Single(result.Errors).Rule);
+            Assert.True(result.IsValid, string.Join("; ", result.Errors));
         }
         finally
         {
@@ -322,27 +326,41 @@ public sealed class RemoteSessionsConfigTests
     }
 
     [Fact]
-    public void Validate_PercentVarIsExpandedBeforeTheExistenceCheck_AndErrorShowsTheLiteral()
+    public void Validate_EnabledWithUnsetPercentVar_IsValid()
     {
-        var config = ConfigParser.Parse(
-            "[remote_sessions]\nenabled = true\ndevelopment_area = \"%USERPROFILE%\\\\Development\"\n\n" + OneHost);
-        var checkedPaths = new List<string>();
+        // The validator reads the literal and does not expand it, so a variable that is unset (or
+        // expands to nothing) is not a config error either.
+        var name = "BOSUN_TEST_UNSET_" + Guid.NewGuid().ToString("N");
 
-        var result = Validate(config, directoryExists: p => { checkedPaths.Add(p); return false; });
+        var result = ConfigValidator.Validate(ConfigWithArea($@"%{name}%\Development"));
 
-        Assert.Equal([@"C:\FakeProfile\Development"], checkedPaths);
-        var error = Assert.Single(result.Errors);
-        Assert.Contains(@"%USERPROFILE%\Development", error.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("FakeProfile", error.Message, StringComparison.Ordinal);
+        Assert.True(result.IsValid, string.Join("; ", result.Errors));
     }
 
     [Fact]
-    public void Validate_PercentVarExpansionToAnExistingDirectory_IsValid()
+    public void Validate_PercentVarInTheArea_IsValid()
     {
         var config = ConfigParser.Parse(
             "[remote_sessions]\nenabled = true\ndevelopment_area = \"%USERPROFILE%\\\\Development\"\n\n" + OneHost);
 
-        var result = Validate(config, directoryExists: p => p == @"C:\FakeProfile\Development");
+        var result = Validate(config);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors));
+    }
+
+    [Theory]
+    [InlineData(@"Z:\does\not\exist")]
+    [InlineData(@"\\no-such-server.invalid\share\dev")]
+    [InlineData("C:\\bad<>|?*\"chars")]
+    [InlineData("has\0nul")]
+    [InlineData("%%%")]
+    [InlineData("%UNCLOSED")]
+    [InlineData("   padded   ")]
+    public void Validate_EnabledWithPathsThatCannotExistOrAreGarbage_IsValidAndDoesNotThrow(string area)
+    {
+        // Validation reads only the literal text: it neither touches the file system nor expands the
+        // value, so nothing about the path's contents can make it throw or reject.
+        var result = ConfigValidator.Validate(ConfigWithArea(area));
 
         Assert.True(result.IsValid, string.Join("; ", result.Errors));
     }
@@ -354,7 +372,7 @@ public sealed class RemoteSessionsConfigTests
         var config = ConfigParser.Parse(
             "[global]\nfailures_before_unmount = 0\n\n[remote_sessions]\nenabled = true\n\n" + OneHost);
 
-        var result = Validate(config, directoryExists: _ => true);
+        var result = Validate(config);
 
         Assert.Contains(result.Errors, e => e.Rule == "invalid-failures-before-unmount");
         Assert.Contains(result.Errors, e => e.Rule == "remote-sessions-development-area-required");
@@ -427,12 +445,15 @@ public sealed class RemoteSessionsConfigTests
 
     // -----------------------------------------------------------------------------------------
 
-    private static ConfigValidationResult Validate(BosunConfig config, Func<string, bool> directoryExists) =>
-        ConfigValidator.Validate(
-            config,
-            identityFileExists: _ => true,
-            directoryExists: directoryExists,
-            expandEnvironmentVariables: FakeExpand);
+    private static ConfigValidationResult Validate(BosunConfig config) =>
+        ConfigValidator.Validate(config, identityFileExists: _ => true);
+
+    private static BosunConfig ConfigWithArea(string area) => new()
+    {
+        Global = new GlobalConfig(),
+        Hosts = new Dictionary<string, HostConfig>(),
+        RemoteSessions = new RemoteSessionsConfig { Enabled = true, DevelopmentArea = area },
+    };
 
     private static string ReadExampleConfig()
     {

@@ -260,7 +260,7 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
         var config = ConfigParser.Parse(toml + "\n");
 
         Assert.False(config.RemoteSessions.Enabled);
-        var result = ConfigValidator.Validate(config, AlwaysExists, directoryExists: _ => false, expandEnvironmentVariables: s => s);
+        var result = ConfigValidator.Validate(config, AlwaysExists);
         Assert.True(result.IsValid, string.Join("; ", result.Errors));
     }
 
@@ -317,27 +317,54 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
     }
 
     // ===================================================================================
-    // Validation with the REAL defaults (Directory.Exists, Environment expansion)
+    // Validation: only the literal is read (bs-4xw.16: no expansion, no file-system access)
     // ===================================================================================
 
-    public static TheoryData<string> GarbageAreas => new()
-    {
+    private static readonly string[] NonBlankGarbage =
+    [
         "D:\\bad<>|?*name",
         "D:\\nul\0byte",
-        "\t\n",
         "::::",
         new string('x', 40_000),
         "%BOSUN_DEFINITELY_UNSET_" + Guid.NewGuid().ToString("N") + "%\\dev",
-    };
+    ];
+
+    public static TheoryData<string> GarbageAreas
+    {
+        get
+        {
+            var data = new TheoryData<string>();
+            foreach (var value in NonBlankGarbage)
+            {
+                data.Add(value);
+            }
+
+            data.Add("\t\n"); // blank: whitespace only
+            return data;
+        }
+    }
+
+    public static TheoryData<string> NonBlankGarbageAreas
+    {
+        get
+        {
+            var data = new TheoryData<string>();
+            foreach (var value in NonBlankGarbage)
+            {
+                data.Add(value);
+            }
+
+            return data;
+        }
+    }
 
     [Theory]
     [MemberData(nameof(GarbageAreas))]
-    public void Validate_DisabledWithGarbageArea_RealDefaults_IsValidAndDoesNotThrow(string garbage)
+    public void Validate_DisabledWithGarbageArea_IsValidAndDoesNotThrow(string garbage)
     {
-        // Spec: "Nothing in [remote_sessions] is checked while enabled is false." The existing test
-        // proves the injected check is not called; this proves the *default* path does not normalise
-        // or expand the value either (Path.GetFullPath throws on '\0' and on some illegal forms), so
-        // a stale value cannot crash startup.
+        // Spec: "Nothing in [remote_sessions] is checked while enabled is false." Proves the
+        // validator does not normalise or expand the value either (Path.GetFullPath throws on '\0' and
+        // on some illegal forms), so a stale value cannot crash startup.
         var config = Config(enabled: false, area: garbage);
 
         var result = ConfigValidator.Validate(config, AlwaysExists);
@@ -346,41 +373,55 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
     }
 
     [Theory]
-    [MemberData(nameof(GarbageAreas))]
-    public void Validate_EnabledWithGarbageArea_RealDefaults_IsRejectedNotThrown(string garbage)
+    [MemberData(nameof(NonBlankGarbageAreas))]
+    public void Validate_EnabledWithNonBlankGarbageArea_IsValidAndDoesNotThrow(string garbage)
     {
         // Bug class: an exception escaping the validator. On a reload that would not be a
         // "rejected config, previous retained" -- it would be an unhandled fault on a timer thread.
-        // The value must be reported as a validation error instead.
+        // bs-4xw.16: the validator checks only that a value was written, so a non-blank value that
+        // cannot be a path is not a config error; the remote tools find that out when they run.
         var config = Config(enabled: true, area: garbage);
 
         var result = ConfigValidator.Validate(config, AlwaysExists);
 
-        Assert.False(result.IsValid);
-        Assert.Contains(
-            result.Errors,
-            e => e.Rule is "remote-sessions-development-area-not-found" or "remote-sessions-development-area-required");
+        Assert.True(result.IsValid, string.Join("; ", result.Errors));
     }
 
     [Fact]
-    public void Validate_EnabledWithUnsetPercentVar_RealDefaults_IsNotFound()
+    public void Validate_EnabledWithWhitespaceOnlyArea_IsRequiredError()
     {
-        // Environment.ExpandEnvironmentVariables leaves an unknown %VAR% in place. The resulting
-        // literal path does not exist, so the config must be rejected -- not accepted because the
-        // token "looked like" a path, and not reported as "required" because something blanked it.
+        var config = Config(enabled: true, area: "\t\n");
+
+        var result = ConfigValidator.Validate(config, AlwaysExists);
+
+        Assert.Equal("remote-sessions-development-area-required", Assert.Single(result.Errors).Rule);
+    }
+
+    [Fact]
+    public void Validate_EnabledWithAreaThatDoesNotExist_IsValid()
+    {
+        var result = ConfigValidator.Validate(Config(enabled: true, area: MissingDirectory()), AlwaysExists);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors));
+    }
+
+    [Fact]
+    public void Validate_EnabledWithUnsetPercentVar_IsValid()
+    {
+        // Environment.ExpandEnvironmentVariables leaves an unknown %VAR% in place, giving a path
+        // that does not exist. The validator does not expand and does not check existence, so this is
+        // valid (bs-4xw.16); the remote tools report it when they run.
         var area = $@"%BOSUN_UNSET_{Guid.NewGuid():N}%\Development";
 
         var result = ConfigValidator.Validate(Config(enabled: true, area: area), AlwaysExists);
 
-        var error = Assert.Single(result.Errors);
-        Assert.Equal("remote-sessions-development-area-not-found", error.Rule);
+        Assert.True(result.IsValid, string.Join("; ", result.Errors));
     }
 
     [Fact]
-    public void Validate_EnabledWithPercentVarPointingAtARealTempDirectory_RealDefaults_IsValid()
+    public void Validate_EnabledWithPercentVarPointingAtARealTempDirectory_IsValid_AndStaysLiteral()
     {
-        // End to end through the real expander and the real Directory.Exists: the value is kept
-        // literal in the model, expanded only for the check, and the check passes.
+        // The value is kept literal in the model; validation passes and does not rewrite it.
         var dir = CreateTempDirectory();
         var name = SetProcessVariable(dir);
         var config = Config(enabled: true, area: $"%{name}%");
@@ -394,43 +435,38 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    public void Validate_ExpansionYieldingBlank_IsRejected(string expansion)
+    public void ResolveDevelopmentArea_ExpansionYieldingBlank_IsNull(string expansion)
     {
-        // A non-blank literal whose expansion is blank leaves no folder at all. Bug class: a
-        // validator that treats a blank *expanded* value as "nothing to check" and returns early,
-        // so an empty path reaches a consumer as "the development area" (it would resolve to the
-        // current directory). Real Directory.Exists; only the expander is injected.
+        // A non-blank literal whose expansion is blank leaves no folder at all. Bug class: handing
+        // a consumer an empty path as "the development area" (it would resolve to the current
+        // directory). Before bs-4xw.16 the validator rejected this; the validator no longer expands,
+        // so the guarantee now lives in ResolveDevelopmentArea, which returns null instead.
         var config = Config(enabled: true, area: "%EMPTY%");
 
-        var result = ConfigValidator.Validate(
-            config,
-            AlwaysExists,
-            directoryExists: null,
-            expandEnvironmentVariables: _ => expansion);
+        var resolved = config.RemoteSessions.ResolveDevelopmentArea(_ => expansion);
 
-        Assert.False(result.IsValid, "an area that expands to a blank string was accepted");
+        Assert.Null(resolved);
+        // And validation, which reads only the literal, accepts it: the tools report the missing
+        // folder when they run.
+        Assert.True(ConfigValidator.Validate(config, AlwaysExists).IsValid);
     }
 
     [Fact]
-    public void Validate_ExpansionGoesThroughTheInjectedExpanderOnly()
+    public void ResolveDevelopmentArea_ExpansionGoesThroughTheInjectedExpanderOnly()
     {
-        // Bug class: the validator expanding by itself (Environment.ExpandEnvironmentVariables
-        // directly) instead of via ResolveDevelopmentArea with the injected expander -- i.e. two
-        // expansion points. The variable is set in the real environment to a path that DOES exist,
-        // but the injected expander maps it somewhere that does not; only the injected answer may
-        // be checked.
+        // Bug class: a second expansion point (Environment.ExpandEnvironmentVariables called directly)
+        // instead of the injected expander. The variable is set in the real environment to a path
+        // that DOES exist, but the injected expander maps it elsewhere; only the injected answer may
+        // come back.
         var realDir = CreateTempDirectory();
         var name = SetProcessVariable(realDir);
-        var checkedPaths = new List<string>();
+        string? seen = null;
 
-        var result = ConfigValidator.Validate(
-            Config(enabled: true, area: $"%{name}%"),
-            AlwaysExists,
-            directoryExists: p => { checkedPaths.Add(p); return Directory.Exists(p); },
-            expandEnvironmentVariables: _ => @"Q:\injected\answer");
+        var resolved = Config(enabled: true, area: $"%{name}%").RemoteSessions.ResolveDevelopmentArea(
+            literal => { seen = literal; return @"Q:\injected\answer"; });
 
-        Assert.Equal([@"Q:\injected\answer"], checkedPaths);
-        Assert.Equal("remote-sessions-development-area-not-found", Assert.Single(result.Errors).Rule);
+        Assert.Equal($"%{name}%", seen);
+        Assert.Equal(@"Q:\injected\answer", resolved);
     }
 
     [Fact]
@@ -481,17 +517,19 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
     }
 
     [Fact]
-    public void Reload_EnabledWithMissingDirectory_IsRejected_AndThePreviousConfigIsKept()
+    public void Reload_EnabledWithMissingDirectory_IsAdopted_AndTheConfigIsServed()
     {
+        // bs-4xw.16: existence is not a config rule. Before it, this reload was rejected.
         using var harness = StoreHarness.Load(RichBody);
-        var before = harness.Store.Current;
         var failures = new List<ConfigReloadFailedEventArgs>();
         harness.Store.ConfigReloadFailed += (_, e) => failures.Add(e);
+        var missing = MissingDirectory();
 
-        harness.Reload(RichBody + $"\n\n[remote_sessions]\nenabled = true\ndevelopment_area = '{MissingDirectory()}'\n");
+        harness.Reload(RichBody + $"\n\n[remote_sessions]\nenabled = true\ndevelopment_area = '{missing}'\n");
 
-        Assert.Same(before, harness.Store.Current);
-        Assert.Equal(ConfigReloadFailureReason.ValidationFailed, Assert.Single(failures).Reason);
+        Assert.Empty(failures);
+        Assert.True(harness.Store.Current.RemoteSessions.Enabled);
+        Assert.Equal(missing, harness.Store.Current.RemoteSessions.DevelopmentArea);
     }
 
     [Fact]
@@ -514,23 +552,29 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
     }
 
     [Fact]
-    public void Reload_AfterTheDevelopmentAreaWasDeleted_IsRejected_AndTheEnabledConfigIsKept()
+    public void Reload_AfterTheDevelopmentAreaWasDeleted_IsAdopted_AndTheEnabledConfigIsServed()
     {
-        // The folder existed at load and was later removed or renamed. The next reload (any edit,
-        // even an unrelated one) is rejected and the previous -- enabled -- config stays in force.
-        // Pinned per the validation list; see the report for the design question this raises.
+        // The folder existed at load and was later removed or renamed. bs-4xw.16: the next reload
+        // (any edit, even an unrelated one) is adopted, not rejected. A missing folder switches off
+        // only the remote tools; it must not freeze the rest of the config.
         var dir = CreateTempDirectory();
         var withArea = RichBody + $"\n\n[remote_sessions]\nenabled = true\ndevelopment_area = '{dir}'\n";
         using var harness = StoreHarness.Load(withArea);
         var before = harness.Store.Current;
         Directory.Delete(dir);
         var failures = new List<ConfigReloadFailedEventArgs>();
+        BosunConfig? changed = null;
         harness.Store.ConfigReloadFailed += (_, e) => failures.Add(e);
+        harness.Store.ConfigChanged += (_, e) => changed = e.Config;
 
         harness.Reload(withArea.Replace("display_name  = \"Jump\"", "display_name  = \"Jump 2\"", StringComparison.Ordinal));
 
-        Assert.Same(before, harness.Store.Current);
-        Assert.Equal(ConfigReloadFailureReason.ValidationFailed, Assert.Single(failures).Reason);
+        Assert.Empty(failures);
+        Assert.NotSame(before, harness.Store.Current);
+        Assert.Same(changed, harness.Store.Current);
+        Assert.Equal("Jump 2", harness.Store.Current.Hosts["jump"].DisplayName);
+        Assert.True(harness.Store.Current.RemoteSessions.Enabled);
+        Assert.Equal(dir, harness.Store.Current.RemoteSessions.DevelopmentArea);
     }
 
     [Fact]
@@ -569,8 +613,8 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
     public void InitialLoad_EnabledWithoutArea_IsFatal_NoConfigIsServed()
     {
         // There is no previous config at startup, so the rule makes the first load fail
-        // (HostConfigStore.Load: InvalidConfigException). Pinned per the validation list; see the
-        // report -- the schema prose ("refuses the tools") reads narrower than this.
+        // (HostConfigStore.Load: InvalidConfigException). A missing VALUE is still a config error
+        // after bs-4xw.16; only a folder that does not exist is not (next test).
         var reader = new FakeConfigFileReader { Content = RichBody + "\n\n[remote_sessions]\nenabled = true\n" };
         var watcher = new FakeConfigFileWatcher();
 
@@ -579,6 +623,27 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
 
         Assert.Contains("remote_sessions.development_area", ex.Message + string.Join(" ", ex.Errors), StringComparison.Ordinal);
         Assert.Equal(1, watcher.DisposeCallCount);
+    }
+
+    [Fact]
+    public void InitialLoad_EnabledWithAreaThatDoesNotExist_Succeeds_AndServesTheConfig()
+    {
+        // bs-4xw.16: a renamed or deleted development folder must not stop Bosun starting (no mounts,
+        // no Terminal profiles). The config loads; the remote tools find the folder missing when
+        // they run.
+        var missing = MissingDirectory();
+        var reader = new FakeConfigFileReader
+        {
+            Content = RichBody + $"\n\n[remote_sessions]\nenabled = true\ndevelopment_area = '{missing}'\n",
+        };
+        var watcher = new FakeConfigFileWatcher();
+
+        using var store = HostConfigStore.Load("hosts.toml", reader, watcher, new FakeTimeProvider(), AlwaysExists);
+
+        Assert.True(store.Current.RemoteSessions.Enabled);
+        Assert.Equal(missing, store.Current.RemoteSessions.DevelopmentArea);
+        Assert.Equal(2, store.Current.Hosts.Count);
+        Assert.Equal(0, watcher.DisposeCallCount);
     }
 
     // ===================================================================================
@@ -611,11 +676,12 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
     }
 
     [Fact]
-    public async Task SaveHost_WhenTheEnabledAreaNoLongerExists_IsRefusedAndWritesNothing()
+    public async Task SaveHost_WhenTheEnabledAreaNoLongerExists_Succeeds_AndCarriesTheTableThroughUnchanged()
     {
-        // HostConfigWriter's contract: "nothing this method writes can be rejected by the loader on
-        // next start". With the area gone, the loader would reject the file, so the writer must
-        // refuse too, with the same rule, and leave the file untouched.
+        // bs-4xw.16: HostConfigWriter's contract is that nothing it writes can be rejected by the
+        // loader on next start. With existence no longer a config rule the loader accepts the file,
+        // so the host save must succeed rather than be refused over a folder the host edit has
+        // nothing to do with. The [remote_sessions] table rides along untouched.
         var dir = CreateTempDirectory();
         var initial = RichBody + $"\n\n[remote_sessions]\nenabled = true\ndevelopment_area = '{dir}'\n";
         using var harness = StoreHarness.Load(initial);
@@ -626,9 +692,12 @@ public sealed class RemoteSessionsIndependentTests : IDisposable
 
         var result = await writer.SaveHostAsync(harness.Store.Current.Hosts["jump"] with { DisplayName = "Jump edited" });
 
-        Assert.False(result.Succeeded);
-        Assert.Contains(result.ValidationErrors, e => e.Rule == "remote-sessions-development-area-not-found");
-        Assert.Equal(initial, File.ReadAllText(configPath));
+        Assert.True(result.Succeeded, $"Error='{result.Error}'; [{string.Join("; ", result.ValidationErrors)}]");
+        var reparsed = ConfigParser.Parse(File.ReadAllText(configPath), "written");
+        Assert.Equal("Jump edited", reparsed.Hosts["jump"].DisplayName);
+        Assert.True(reparsed.RemoteSessions.Enabled);
+        Assert.Equal(dir, reparsed.RemoteSessions.DevelopmentArea);
+        Assert.Equal(harness.Store.Current.RemoteSessions, reparsed.RemoteSessions);
     }
 
     // -----------------------------------------------------------------------------------
