@@ -47,6 +47,12 @@ public enum PathRejection
 
     /// <summary>The file system could not be inspected (for example access denied). The guard fails closed.</summary>
     Unverifiable,
+
+    /// <summary>
+    /// The development area root is not an existing directory at the time of the call (missing, a
+    /// file, or unreachable). The guard fails closed.
+    /// </summary>
+    AreaUnavailable,
 }
 
 /// <summary>

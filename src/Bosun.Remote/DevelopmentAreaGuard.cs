@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Bosun.Remote;
 
 /// <summary>
@@ -21,6 +23,12 @@ namespace Bosun.Remote;
 /// itself, and anything above it, is trusted configuration and is not inspected: the maintainer may
 /// legitimately have made the area a junction. Components that do not exist yet (create-project)
 /// cannot be links and are accepted.</para>
+///
+/// <para><b>Missing area (fail closed).</b> The area root itself must be an existing directory at
+/// the moment of each call. If it is missing, is a file, or cannot be reached, every resolution is
+/// <see cref="PathRejection.AreaUnavailable"/> (after the input-shape checks, which still win).
+/// Nothing is cached, so the area disappearing or returning while Bosun runs is noticed on the
+/// next call. A guard can be created for a root that does not exist yet.</para>
 ///
 /// <para><b>Not covered.</b> A time-of-check to time-of-use gap remains: something running as the
 /// same user could create a junction after the check and before the caller's use. Closing it would
@@ -47,11 +55,13 @@ public sealed class DevelopmentAreaGuard
         "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
         "COM\u00B9", "COM\u00B2", "COM\u00B3", "LPT\u00B9", "LPT\u00B2", "LPT\u00B3",
     };
-
     /// <summary>
     /// Creates a guard for <paramref name="developmentAreaRoot"/>, an already-expanded absolute path
     /// (the caller expands <c>%VAR%</c> tokens; ADR-024 "Configuration"). Trailing separators and
-    /// <c>.</c>/<c>..</c> in the root are normalised. The root need not exist.
+    /// <c>.</c>/<c>..</c> in the root are normalised. The root need not exist when the guard is
+    /// created: existence is checked on every <see cref="Resolve"/> call (a missing area is
+    /// <see cref="PathRejection.AreaUnavailable"/>) and by <see cref="AreaExists"/>. Host code that
+    /// must not throw on a bad root uses <see cref="TryCreate"/>, which applies the same rules.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The root is empty, relative, UNC or a device path, has a <c>:</c> beyond the drive letter, or
@@ -59,18 +69,73 @@ public sealed class DevelopmentAreaGuard
     /// </exception>
     public DevelopmentAreaGuard(string developmentAreaRoot)
     {
+        var problem = CheckRoot(developmentAreaRoot, out var canonicalRoot, out var inner);
+        if (problem is not null)
+        {
+            throw inner is null
+                ? new ArgumentException(problem, nameof(developmentAreaRoot))
+                : new ArgumentException(problem, nameof(developmentAreaRoot), inner);
+        }
+
+        Root = canonicalRoot!;
+    }
+
+    // Only TryCreate uses this, with a root that CheckRoot has already canonicalised.
+    private DevelopmentAreaGuard(string canonicalRoot, bool alreadyChecked)
+    {
+        _ = alreadyChecked;
+        Root = canonicalRoot;
+    }
+
+    /// <summary>
+    /// Creates a guard without throwing for a bad root. Applies exactly the same rules as the
+    /// constructor (both call one shared check). A root that does not exist is accepted; existence
+    /// is a per-call check.
+    /// </summary>
+    /// <param name="developmentAreaRoot">The already-expanded absolute path, or null.</param>
+    /// <param name="guard">The guard when the root is usable; otherwise null.</param>
+    /// <param name="problem">
+    /// When the root is refused, a short reason. It never contains the root text. It is for Bosun's
+    /// own log and health display, not for the remote caller. Null when the guard was created.
+    /// </param>
+    /// <returns>True when <paramref name="guard"/> was created.</returns>
+    public static bool TryCreate(
+        string? developmentAreaRoot,
+        [NotNullWhen(true)] out DevelopmentAreaGuard? guard,
+        [NotNullWhen(false)] out string? problem)
+    {
+        problem = CheckRoot(developmentAreaRoot, out var canonicalRoot, out _);
+        if (problem is not null)
+        {
+            guard = null;
+            return false;
+        }
+
+        guard = new DevelopmentAreaGuard(canonicalRoot!, alreadyChecked: true);
+        return true;
+    }
+
+    /// <summary>
+    /// The single place the root rules live, shared by the constructor and <see cref="TryCreate"/> so
+    /// the two cannot drift. Returns null and the canonical root when the root is usable; otherwise a
+    /// short problem text (never containing the root) and, when the runtime rejected the path, the
+    /// exception to chain.
+    /// </summary>
+    private static string? CheckRoot(string? developmentAreaRoot, out string? canonicalRoot, out Exception? inner)
+    {
+        canonicalRoot = null;
+        inner = null;
+
         if (string.IsNullOrWhiteSpace(developmentAreaRoot))
         {
-            throw new ArgumentException("The development area root is empty.", nameof(developmentAreaRoot));
+            return "The development area root is empty.";
         }
 
         // Reject UNC and device roots on the raw text: GetFullPath keeps "\\?\C:\x" as it is.
         if (developmentAreaRoot.StartsWith(@"\\", StringComparison.Ordinal)
             || developmentAreaRoot.StartsWith("//", StringComparison.Ordinal))
         {
-            throw new ArgumentException(
-                "The development area root must be a drive-letter path, not a UNC or device path.",
-                nameof(developmentAreaRoot));
+            return "The development area root must be a drive-letter path, not a UNC or device path.";
         }
 
         if (developmentAreaRoot.Length < 3
@@ -78,9 +143,7 @@ public sealed class DevelopmentAreaGuard
             || developmentAreaRoot[1] != ':'
             || !Array.Exists(Separators, s => s == developmentAreaRoot[2]))
         {
-            throw new ArgumentException(
-                "The development area root must be a fully qualified drive-letter path such as C:\\Dev.",
-                nameof(developmentAreaRoot));
+            return "The development area root must be a fully qualified drive-letter path such as C:\\Dev.";
         }
 
         string full;
@@ -90,30 +153,57 @@ public sealed class DevelopmentAreaGuard
         }
         catch (Exception ex) when (ex is PathTooLongException or NotSupportedException)
         {
-            throw new ArgumentException("The development area root is not a valid path.", nameof(developmentAreaRoot), ex);
+            inner = ex;
+            return "The development area root is not a valid path.";
         }
 
         if (full.IndexOf(':', 2) >= 0)
         {
-            throw new ArgumentException(
-                "The development area root contains ':' after the drive letter.",
-                nameof(developmentAreaRoot));
+            return "The development area root contains ':' after the drive letter.";
         }
 
         var trimmed = Path.TrimEndingDirectorySeparator(full);
         // TrimEndingDirectorySeparator leaves "C:\" alone, so a bare drive is 3 characters here.
         if (trimmed.Length <= 3)
         {
-            throw new ArgumentException(
-                "The development area root must be a folder, not a whole drive.",
-                nameof(developmentAreaRoot));
+            return "The development area root must be a folder, not a whole drive.";
         }
 
-        Root = trimmed;
+        canonicalRoot = trimmed;
+        return null;
     }
 
     /// <summary>The canonical area root, without a trailing separator.</summary>
     public string Root { get; }
+
+    /// <summary>
+    /// True when the area root is an existing directory right now. Not cached: the folder can
+    /// disappear or come back while Bosun runs. For tools that never call <see cref="Resolve"/>
+    /// (list projects, workstation check). An unreachable root counts as not existing.
+    /// </summary>
+    public bool AreaExists() => RootIsExistingDirectory();
+
+    // Directory.Exists alone says true for a junction whose target is gone (the link entry itself is a
+    // directory), so the root is also opened for listing: that follows the link and fails when the
+    // target is missing or unreadable. Only the first entry is requested, so a large area costs nothing.
+    private bool RootIsExistingDirectory()
+    {
+        if (!Directory.Exists(Root))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var entries = Directory.EnumerateFileSystemEntries(Root).GetEnumerator();
+            entries.MoveNext();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// Resolves a relative path (one or more names separated by <c>\</c> or <c>/</c>) to a full path
@@ -180,6 +270,15 @@ public sealed class DevelopmentAreaGuard
         if (!IsStrictlyInside(Root, full))
         {
             return Reject(PathRejection.EscapesArea, "The path leaves the development area.");
+        }
+
+        // Fail closed when the area itself is gone (missing, a file, unreachable): the reparse walk
+        // below stops quietly at the first missing component, which would otherwise let a
+        // create-project tool build the whole area. Checked on every call, never cached, and after
+        // the input-shape checks so a malformed name is still reported as malformed.
+        if (!RootIsExistingDirectory())
+        {
+            return Reject(PathRejection.AreaUnavailable, "The development area is not available on the workstation.");
         }
 
         return CheckForReparsePoints(segments) ?? PathResolution.Allowed(full);

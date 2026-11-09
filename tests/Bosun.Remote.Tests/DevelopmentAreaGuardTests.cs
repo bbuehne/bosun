@@ -355,25 +355,109 @@ public sealed class DevelopmentAreaGuardTests : IDisposable
 
     // ---- Root handling -----------------------------------------------------------------
 
+    /// <summary>
+    /// Every root the constructor refuses. The constructor tests and the TryCreate tests both use
+    /// this list, so the two are held to the same cases.
+    /// </summary>
+    public static TheoryData<string> UnusableRoots =>
+    [
+        "",
+        "   ",
+        "Dev",
+        "\\Dev",
+        "..\\Dev",
+        "\\\\server\\share\\Dev",
+        "//server/share/Dev",
+        "\\\\?\\C:\\Dev",
+        "\\\\.\\C:\\Dev",
+        "C:",
+        "C:Dev",
+        "C:\\",
+        "D:/",
+        "C:\\Dev:stream",
+        "C:\\Dev\\a:b",
+        // Roots that normalise to a whole drive.
+        "C:\\Dev\\..",
+        "C:/a/b/../..",
+        "C:\\.",
+    ];
+
     [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    [InlineData("Dev")]
-    [InlineData("\\Dev")]
-    [InlineData("..\\Dev")]
-    [InlineData("\\\\server\\share\\Dev")]
-    [InlineData("//server/share/Dev")]
-    [InlineData("\\\\?\\C:\\Dev")]
-    [InlineData("\\\\.\\C:\\Dev")]
-    [InlineData("C:")]
-    [InlineData("C:Dev")]
-    [InlineData("C:\\")]
-    [InlineData("D:/")]
-    [InlineData("C:\\Dev:stream")]
-    [InlineData("C:\\Dev\\a:b")]
+    [MemberData(nameof(UnusableRoots))]
     public void An_unusable_root_is_refused_at_construction(string root)
     {
         Assert.Throws<ArgumentException>(() => new DevelopmentAreaGuard(root));
+    }
+
+    [Theory]
+    [MemberData(nameof(UnusableRoots))]
+    public void TryCreate_refuses_every_root_the_constructor_refuses_without_throwing(string root)
+    {
+        var created = DevelopmentAreaGuard.TryCreate(root, out var guard, out var problem);
+
+        Assert.False(created);
+        Assert.Null(guard);
+        Assert.False(string.IsNullOrWhiteSpace(problem));
+    }
+
+    [Fact]
+    public void TryCreate_refuses_a_null_root_without_throwing()
+    {
+        var created = DevelopmentAreaGuard.TryCreate(null, out var guard, out var problem);
+
+        Assert.False(created);
+        Assert.Null(guard);
+        Assert.False(string.IsNullOrWhiteSpace(problem));
+    }
+
+    [Theory]
+    [InlineData("zq-marker")]
+    [InlineData("\\zq-marker")]
+    [InlineData("..\\zq-marker")]
+    [InlineData("\\\\zq-marker\\share")]
+    [InlineData("\\\\?\\C:\\zq-marker")]
+    [InlineData("C:zq-marker")]
+    [InlineData("C:\\zq-marker:stream")]
+    [InlineData("C:\\zq-marker\\..")]
+    public void TryCreate_problem_text_never_contains_the_root_text(string root)
+    {
+        var created = DevelopmentAreaGuard.TryCreate(root, out _, out var problem);
+
+        Assert.False(created);
+        Assert.DoesNotContain("zq-marker", problem, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [MemberData(nameof(UnusableRoots))]
+    public void TryCreate_problem_is_the_constructors_message(string root)
+    {
+        // One shared check, so the reason is the same text and not merely the same verdict.
+        var thrown = Assert.Throws<ArgumentException>(() => new DevelopmentAreaGuard(root));
+        DevelopmentAreaGuard.TryCreate(root, out _, out var problem);
+
+        Assert.StartsWith(problem!, thrown.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TryCreate_accepts_a_good_root_and_builds_the_same_guard_as_the_constructor()
+    {
+        var created = DevelopmentAreaGuard.TryCreate(_temp.Area + "\\", out var guard, out var problem);
+
+        Assert.True(created);
+        Assert.Null(problem);
+        Assert.NotNull(guard);
+        Assert.Equal(new DevelopmentAreaGuard(_temp.Area + "\\").Root, guard.Root);
+        Assert.Equal(_temp.Area, guard.Root);
+        Assert.Equal(Path.Combine(_temp.Area, "proj"), guard.Resolve("proj").FullPath);
+    }
+
+    [Fact]
+    public void TryCreate_accepts_a_root_that_does_not_exist()
+    {
+        var created = DevelopmentAreaGuard.TryCreate(Path.Combine(_temp.Root, "not-created"), out var guard, out _);
+
+        Assert.True(created);
+        Assert.False(guard!.AreaExists());
     }
 
     [Fact]
@@ -404,11 +488,118 @@ public sealed class DevelopmentAreaGuardTests : IDisposable
     }
 
     [Fact]
-    public void A_root_that_does_not_exist_is_accepted()
+    public void A_root_that_does_not_exist_is_accepted_but_nothing_resolves_until_it_does()
+    {
+        var root = Path.Combine(_temp.Root, "not-created");
+        var guard = new DevelopmentAreaGuard(root);
+
+        Assert.False(guard.AreaExists());
+        AssertUnavailable(guard.Resolve("proj"));
+        AssertUnavailable(guard.ResolveProject("proj"));
+
+        Directory.CreateDirectory(root);
+
+        Assert.True(guard.AreaExists());
+        Assert.Equal(Path.Combine(root, "proj"), guard.Resolve("proj").FullPath);
+        Assert.Equal(Path.Combine(root, "proj"), guard.ResolveProject("proj").FullPath);
+    }
+
+    [Fact]
+    public void An_area_deleted_after_the_guard_was_created_fails_closed_and_recovers_when_recreated()
+    {
+        Assert.True(_guard.Resolve("proj").IsAllowed);
+
+        Directory.Delete(_temp.Area, recursive: true);
+
+        Assert.False(_guard.AreaExists());
+        AssertUnavailable(_guard.Resolve("proj"));
+        AssertUnavailable(_guard.Resolve("proj\\sub"));
+        AssertUnavailable(_guard.ResolveProject("proj"));
+
+        Directory.CreateDirectory(_temp.Area);
+
+        Assert.True(_guard.AreaExists());
+        Assert.True(_guard.Resolve("proj").IsAllowed);
+        Assert.True(_guard.ResolveProject("proj").IsAllowed);
+    }
+
+    [Fact]
+    public void A_root_that_is_a_file_is_unavailable()
+    {
+        var file = Path.Combine(_temp.Root, "a-file");
+        File.WriteAllText(file, "not a folder");
+        var guard = new DevelopmentAreaGuard(file);
+
+        Assert.False(guard.AreaExists());
+        AssertUnavailable(guard.Resolve("proj"));
+        AssertUnavailable(guard.ResolveProject("proj"));
+    }
+
+    [Fact]
+    public void The_unavailable_detail_does_not_reveal_where_the_area_is()
+    {
+        var root = Path.Combine(_temp.Root, "not-created");
+        var guard = new DevelopmentAreaGuard(root);
+
+        var result = guard.Resolve("proj");
+        AssertUnavailable(result);
+        var detail = result.Detail!;
+
+        Assert.DoesNotContain(root, detail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Path.GetFileName(_temp.Root), detail, StringComparison.OrdinalIgnoreCase);
+        foreach (var segment in root.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            // Case-sensitive on purpose: a folder called "Dev" must not trip over the word "development".
+            Assert.DoesNotContain(segment, detail, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("..\\x", PathRejection.TraversalSegment)]
+    [InlineData("ab:c", PathRejection.AlternateDataStream)]
+    [InlineData("\\x", PathRejection.Rooted)]
+    [InlineData("D:x", PathRejection.DriveSpecifier)]
+    [InlineData("CON", PathRejection.ReservedDeviceName)]
+    [InlineData("a\\\\b", PathRejection.EmptySegment)]
+    [InlineData("", PathRejection.Empty)]
+    public void A_malformed_input_is_still_reported_as_malformed_when_the_area_is_missing(string input, PathRejection expected)
     {
         var guard = new DevelopmentAreaGuard(Path.Combine(_temp.Root, "not-created"));
 
+        Assert.Equal(expected, guard.Resolve(input).Rejection);
+    }
+
+    [Fact]
+    public void ResolveProject_reports_a_multi_segment_name_as_such_when_the_area_is_missing()
+    {
+        var guard = new DevelopmentAreaGuard(Path.Combine(_temp.Root, "not-created"));
+
+        Assert.Equal(PathRejection.NotASingleSegment, guard.ResolveProject("a\\b").Rejection);
+    }
+
+    [Fact]
+    public void A_junction_whose_target_was_deleted_makes_the_area_unavailable()
+    {
+        var target = Path.Combine(_temp.Root, "real-area");
+        Directory.CreateDirectory(target);
+        var link = Path.Combine(_temp.Root, "area-link");
+        TempArea.CreateJunction(link, target);
+        var guard = new DevelopmentAreaGuard(link);
         Assert.True(guard.Resolve("proj").IsAllowed);
+
+        Directory.Delete(target);
+
+        Assert.False(guard.AreaExists());
+        AssertUnavailable(guard.Resolve("proj"));
+        AssertUnavailable(guard.ResolveProject("proj"));
+    }
+
+    private static void AssertUnavailable(PathResolution result)
+    {
+        Assert.False(result.IsAllowed);
+        Assert.Null(result.FullPath);
+        Assert.Equal(PathRejection.AreaUnavailable, result.Rejection);
+        Assert.False(string.IsNullOrWhiteSpace(result.Detail));
     }
 
     [Fact]
