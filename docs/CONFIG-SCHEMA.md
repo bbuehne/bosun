@@ -95,6 +95,19 @@ enabled = false   # restore Claude Code sessions after a reboot or a Terminal ex
 
 Not per host: a Claude Code session is not tied to a configured SSH host.
 
+## Remote sessions
+
+```toml
+[remote_sessions]
+enabled          = false                        # start and resume Claude Code sessions remotely; ADR-024
+development_area = "%USERPROFILE%\\Development"  # required when enabled; must exist
+```
+
+Off when the table is absent. When `enabled = true`, a missing `development_area`, or one that does
+not exist, refuses the tools rather than guessing a folder. `%VAR%` tokens are kept literal and
+expanded at use, as `rclone_config_path` is. Kept separate from `[claude_sessions]`: restore acts only
+on the machine, these tools open a way in from outside. Not implemented yet.
+
 ## Field semantics
 
 | Field | Notes |

@@ -2478,11 +2478,11 @@ suspend does not cancel them. (The reconciliation tick's own `mount/listmounts` 
 
 ## ADR-024 · Start and resume Claude Code sessions remotely, from a Claude conversation
 
-**Status:** Proposed (2026-11-07). The maintainer asked for the capability and settled its shape in
-conversation on 2026-11-07: the tool set, the one-time handoff, and resume-by-default. The
-architecture in Decision 2 is partly Claude's proposal and is not yet confirmed; the Open questions
-are undecided. Nothing here is built. Would extend Bosun's scope (`CLAUDE.md` §1), add the first
-network-reachable surface Bosun has had, and share machinery with ADR-021.
+**Status:** Accepted (2026-11-08; proposed 2026-11-07). The maintainer asked for the capability,
+made each choice in the addenda in conversation on 2026-11-07, and accepted it on 2026-11-08 with
+the assumptions listed under "Where this stands" still unverified. A failed assumption reopens the
+decision resting on it. Nothing here is built. Extends Bosun's scope (`CLAUDE.md` §1), adds the first
+network-reachable surface Bosun has had, and shares machinery with ADR-021.
 
 **Where this stands (2026-11-07).** The text below is kept as first written; dated addenda at the end
 record what has been decided since, and they win where the two differ.
@@ -2499,8 +2499,22 @@ record what has been decided since, and they win where the two differ.
   and "what the way to reach the session is": answered in the addenda.
 - The way in: shape B, a connector in regular Claude chats through a Cloudflare Tunnel (addendum
   "the way in is shape B").
-- Still open: whether Cloudflare Access can be the OAuth sign-in the connector requires; how this
-  shares code with ADR-021.
+- Settled during implementation planning, not a decision: how this shares code with ADR-021.
+
+**Assumptions (unverified at acceptance).** Each names the issue that checks it and what happens if
+it fails.
+
+1. A Cloudflare-hosted sign-in works with claude.ai's connector: Access "Managed OAuth" or, if that
+   fails (`anthropics/claude-ai-mcp#410`), a Worker running `@cloudflare/workers-oauth-provider`
+   (`bs-4xw.5`). If neither works, the way in is reopened.
+2. Claude Code's interactive UI, its trust prompt and the "Enable Remote Control?" prompt work in a
+   Bosun-owned pseudo console, with the workstation locked, and the session is reachable through
+   Remote Control (`bs-4xw.3`; the probe's own mechanics passed with a stand-in program on
+   2026-11-07). If not, sessions open in Windows Terminal tabs and prompts are answered through the
+   remote desktop; the pseudo-console decision is reopened.
+3. `claude --remote-control <name>` gives the session that name in the Claude app (`bs-4xw.3`). If
+   not, the hand-back decision is revisited.
+4. A remote desktop tool reaches the signed-in session from the phone (`bs-4xw.2`).
 
 **Context.** The maintainer spends much of his day driving Claude Code sessions remotely, from a
 phone, while away from the workstation. Often something comes up that needs a new Claude Code
@@ -2693,13 +2707,13 @@ in.
 ```toml
 [remote_sessions]
 enabled          = false                        # ADR-024
-development_area = "%USERPROFILE%\Development"  # required when enabled; must exist
+development_area = "%USERPROFILE%\\Development"  # required when enabled; must exist
 ```
 
 Bosun refuses to start the tools when `enabled = true` and `development_area` is missing or does not
 exist. `%VAR%` tokens are kept literal and expanded at use, as `rclone_config_path` is. Separate
 from `[claude_sessions]`: restore acts only on the machine, these tools open a way in from outside.
-`docs/CONFIG-SCHEMA.md` changes only when the ADR is accepted.
+`docs/CONFIG-SCHEMA.md` changes only when the ADR is accepted (done 2026-11-08).
 
 ### Addendum (2026-11-07): the way in is shape B, maintainer decision B
 
