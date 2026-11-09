@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.IO;
+using Bosun.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Diag = System.Diagnostics;
@@ -13,24 +15,40 @@ namespace Bosun.Rclone.Process;
 /// (<c>cmd.exe /c exit 0</c>) rather than rclone itself, so the mechanics (start, detect exit,
 /// kill) are proven without depending on rclone being installed.
 /// </summary>
+/// <remarks>
+/// <b>Output is always drained (bs-0lq).</b> Both streams are redirected, so both are read for the
+/// life of the child by a <see cref="RcloneOutputPump"/>; a redirected pipe nobody reads fills, and
+/// the child then blocks inside its own logger while still alive.
+/// </remarks>
 public sealed class Win32RcloneProcessLauncher : IRcloneProcessLauncher
 {
     private readonly IProcessJob? _job;
     private readonly ILogger _logger;
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>No Job Object: the child is not tied to Bosun's lifetime. Used by tests that only
-    /// exercise start/exit/kill mechanics.</summary>
+    /// exercise start/exit/kill mechanics. The child's output is still drained, and discarded.</summary>
     public Win32RcloneProcessLauncher()
     {
         _logger = NullLogger.Instance;
+        _timeProvider = TimeProvider.System;
     }
 
-    /// <summary>Production constructor: every child is assigned to <paramref name="job"/>
-    /// (ADR-020 §1, bs-772).</summary>
+    /// <summary>Every child is assigned to <paramref name="job"/> (ADR-020 §1, bs-772); wall-clock
+    /// time for the output limiter.</summary>
     public Win32RcloneProcessLauncher(IProcessJob job, ILogger<Win32RcloneProcessLauncher> logger)
+        : this(job, logger, TimeProvider.System)
+    {
+    }
+
+    /// <summary>Production constructor (the one the container picks: it has the most parameters it
+    /// can satisfy). <paramref name="timeProvider"/> times the child-output rate limiter.</summary>
+    public Win32RcloneProcessLauncher(
+        IProcessJob job, ILogger<Win32RcloneProcessLauncher> logger, TimeProvider timeProvider)
     {
         _job = job;
         _logger = logger;
+        _timeProvider = timeProvider;
     }
 
     /// <summary>Win32 <c>ERROR_FILE_NOT_FOUND</c>. This is the specific
@@ -85,6 +103,10 @@ public sealed class Win32RcloneProcessLauncher : IRcloneProcessLauncher
             throw new RcloneProcessLaunchException(startInfo.ExecutablePath, ex);
         }
 
+        // Start draining immediately (bs-0lq): before the Job Object assignment, before anything that
+        // could be slow, so a child that writes at once can never fill a pipe nobody is reading.
+        var pumpTask = StartOutputPump(process, startInfo);
+
         // Job Object assignment (ADR-020 §1, bs-772). RACE WINDOW, NOT CLOSED: Process.Start
         // returns after CreateProcess has already let the child run, so there is a gap of
         // microseconds to a few milliseconds before the assignment below. If Bosun were killed
@@ -110,17 +132,64 @@ public sealed class Win32RcloneProcessLauncher : IRcloneProcessLauncher
             }
         }
 
-        return new RealHandle(process);
+        return new RealHandle(process, pumpTask);
+    }
+
+    /// <summary>
+    /// Begins reading both redirected streams. The returned task completes when both reach EOF (the
+    /// child exited, or its pipes were closed) and never faults. It references only the stream
+    /// readers, not the <see cref="Diag.Process"/>, so it cannot keep the process handle alive.
+    /// </summary>
+    private Task StartOutputPump(Diag.Process process, RcloneProcessStartInfo startInfo)
+    {
+        var pump = new RcloneOutputPump(
+            _logger,
+            _timeProvider,
+            BuildRedactor(startInfo.EnvironmentVariables),
+            Path.GetFileName(startInfo.ExecutablePath));
+
+        var stdout = process.StandardOutput;
+        var stderr = process.StandardError;
+
+        // Task.Run so a first read that happens to run synchronously cannot hold up Start.
+        return Task.Run(() => pump.RunAsync(stdout, stderr));
+    }
+
+    /// <summary>
+    /// The rc credential reaches the child only through these environment variables, so that is
+    /// where the redactor learns its value. rclone should not print it, but a line that does must not
+    /// reach the log: <see cref="DiagnosticsRedactor"/> masks the value in every spelling it knows
+    /// and the usual secret-carrying shapes. With no credential in the environment only the shape
+    /// layer applies.
+    /// </summary>
+    private static Func<string, string> BuildRedactor(IReadOnlyDictionary<string, string> environment)
+    {
+        RcloneRcCredential? credential = null;
+        if (environment.TryGetValue("RCLONE_RC_USER", out var user)
+            && environment.TryGetValue("RCLONE_RC_PASS", out var password)
+            && !string.IsNullOrEmpty(user)
+            && !string.IsNullOrEmpty(password))
+        {
+            credential = new RcloneRcCredential(user, password);
+        }
+
+        return new DiagnosticsRedactor(credential).Redact;
     }
 
     private sealed class RealHandle : IRcloneProcessHandle
     {
+        // After the process has exited, how long Dispose waits for the output pump to finish reading
+        // what the child wrote last (typically the reason it died) before closing the pipes under it.
+        private static readonly TimeSpan PumpDrainGrace = TimeSpan.FromMilliseconds(500);
+
         private readonly Diag.Process _process;
+        private readonly Task _pumpTask;
         private int _disposed;
 
-        public RealHandle(Diag.Process process)
+        public RealHandle(Diag.Process process, Task pumpTask)
         {
             _process = process;
+            _pumpTask = pumpTask;
             _process.Exited += OnProcessExited;
 
             // Race: the process could have already exited between Start() returning and this
@@ -152,6 +221,18 @@ public sealed class Win32RcloneProcessLauncher : IRcloneProcessLauncher
             }
         }
 
+        private bool HasExitedSafe()
+        {
+            try
+            {
+                return _process.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
         private void OnProcessExited(object? sender, EventArgs e) => Exited?.Invoke(this, EventArgs.Empty);
 
         public void Dispose()
@@ -162,6 +243,16 @@ public sealed class Win32RcloneProcessLauncher : IRcloneProcessLauncher
             }
 
             _process.Exited -= OnProcessExited;
+
+            // Exited can fire before the pipes are fully read. Closing them now would discard the
+            // child's final lines. Only wait for a child that has really exited (its pipes are
+            // then at EOF, or about to be); a still-running one is being abandoned, so closing is
+            // what ends the pump. The pump task never faults, so Wait cannot throw.
+            if (HasExitedSafe())
+            {
+                _pumpTask.Wait(PumpDrainGrace);
+            }
+
             _process.Dispose();
         }
     }
