@@ -55,6 +55,7 @@ public sealed class DevelopmentAreaGuard
         "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
         "COM\u00B9", "COM\u00B2", "COM\u00B3", "LPT\u00B9", "LPT\u00B2", "LPT\u00B3",
     };
+
     /// <summary>
     /// Creates a guard for <paramref name="developmentAreaRoot"/>, an already-expanded absolute path
     /// (the caller expands <c>%VAR%</c> tokens; ADR-024 "Configuration"). Trailing separators and
