@@ -106,7 +106,9 @@ development_area = "%USERPROFILE%\\Development"  # required when enabled; must e
 Off when the table is absent. When `enabled = true`, a missing `development_area`, or one that does
 not exist, refuses the tools rather than guessing a folder. `%VAR%` tokens are kept literal and
 expanded at use, as `rclone_config_path` is. Kept separate from `[claude_sessions]`: restore acts only
-on the machine, these tools open a way in from outside. Not implemented yet.
+on the machine, these tools open a way in from outside. The table is bound, validated and written back
+by `HostConfigTomlWriter` (bs-4xw.6); nothing uses it yet. Expansion happens in one place,
+`RemoteSessionsConfig.ResolveDevelopmentArea`.
 
 ## Field semantics
 
@@ -191,6 +193,12 @@ Reject the whole config, keep the previous one, and surface the error if any of:
 - `session.tmux = true` with a null, absent or empty `session.tmux_session` — otherwise
   `FragmentProfileGenerator` silently falls back to a shared default session name
   (`"main"`), which is defence-in-depth, not something authors should rely on.
+- `remote_sessions.enabled = true` with a null, absent or blank `remote_sessions.development_area`
+  (rule `remote-sessions-development-area-required`, bs-4xw.6). There is no default folder.
+- `remote_sessions.enabled = true` with a `development_area` that, after `%VAR%` expansion, is not
+  an existing directory (rule `remote-sessions-development-area-not-found`). Nothing in
+  `[remote_sessions]` is checked while `enabled` is `false`, so a stale path in a disabled table
+  does not stop Bosun starting.
 
 **Note on "duplicate host key":** this cannot actually reach `ConfigValidator`.
 Tomlyn rejects a TOML document that redefines a table (`[hosts.jump]` appearing

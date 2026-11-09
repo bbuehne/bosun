@@ -63,14 +63,29 @@ public static class ConfigValidator
     /// current user's profile when null — production callers may omit it, but no test should:
     /// pass a fake so tests never depend on the developer's real <c>~/.ssh</c> contents.
     /// </param>
-    public static ConfigValidationResult Validate(BosunConfig config, Func<string, bool>? identityFileExists = null)
+    /// <param name="directoryExists">
+    /// Injected existence check for <c>remote_sessions.development_area</c>, called with the path
+    /// after <c>%VAR%</c> expansion. Defaults to a real <see cref="Directory.Exists(string)"/>.
+    /// Only consulted when <c>remote_sessions.enabled</c> is true.
+    /// </param>
+    /// <param name="expandEnvironmentVariables">
+    /// Injected expander handed to <see cref="RemoteSessionsConfig.ResolveDevelopmentArea"/>.
+    /// Defaults to <see cref="Environment.ExpandEnvironmentVariables(string)"/>.
+    /// </param>
+    public static ConfigValidationResult Validate(
+        BosunConfig config,
+        Func<string, bool>? identityFileExists = null,
+        Func<string, bool>? directoryExists = null,
+        Func<string, string>? expandEnvironmentVariables = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         identityFileExists ??= DefaultIdentityFileExists;
+        directoryExists ??= DefaultDirectoryExists;
 
         var errors = new List<ConfigValidationError>();
 
         ValidateGlobal(config.Global, errors);
+        ValidateRemoteSessions(config.RemoteSessions, directoryExists, expandEnvironmentVariables, errors);
         ValidateDuplicateDisplayNames(config.Hosts, errors);
         ValidateDriveCollisions(config.Hosts, errors);
 
@@ -80,6 +95,37 @@ public static class ConfigValidator
         }
 
         return errors.Count == 0 ? ConfigValidationResult.Valid : new ConfigValidationResult(errors);
+    }
+
+    // ADR-024 / docs/CONFIG-SCHEMA.md "Remote sessions": off means nothing is checked (a stale path in
+    // a disabled table must not stop Bosun starting). On means development_area is required and must
+    // exist -- there is no default, because guessing a folder is exactly what the tools must not do.
+    private static void ValidateRemoteSessions(
+        RemoteSessionsConfig remoteSessions,
+        Func<string, bool> directoryExists,
+        Func<string, string>? expandEnvironmentVariables,
+        List<ConfigValidationError> errors)
+    {
+        if (!remoteSessions.Enabled)
+        {
+            return;
+        }
+
+        var expanded = remoteSessions.ResolveDevelopmentArea(expandEnvironmentVariables);
+        if (expanded is null)
+        {
+            errors.Add(new ConfigValidationError(
+                "remote-sessions-development-area-required",
+                "remote_sessions.development_area is required when remote_sessions.enabled is true"));
+            return;
+        }
+
+        if (!directoryExists(expanded))
+        {
+            errors.Add(new ConfigValidationError(
+                "remote-sessions-development-area-not-found",
+                $"remote_sessions.development_area '{remoteSessions.DevelopmentArea}' does not resolve to an existing directory"));
+        }
     }
 
     private static void ValidateGlobal(GlobalConfig global, List<ConfigValidationError> errors)
@@ -325,4 +371,6 @@ public static class ConfigValidator
     }
 
     private static bool DefaultIdentityFileExists(string path) => File.Exists(path);
+
+    private static bool DefaultDirectoryExists(string path) => Directory.Exists(path);
 }

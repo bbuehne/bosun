@@ -43,6 +43,7 @@ internal static class HostConfigTomlWriter
         var sb = new StringBuilder();
         WriteGlobal(sb, config.Global);
         WriteClaudeSessions(sb, config.ClaudeSessions);
+        WriteRemoteSessions(sb, config.RemoteSessions);
 
         foreach (var (key, host) in config.Hosts.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
@@ -80,6 +81,17 @@ internal static class HostConfigTomlWriter
     {
         sb.Append("\n[claude_sessions]\n");
         AppendBool(sb, "enabled", claudeSessions.Enabled);
+    }
+
+    // Same reasoning as WriteClaudeSessions: always write the table with an explicit `enabled`, so a
+    // host edit can never drop `enabled = true` (ADR-019: Bosun is the sole writer). development_area
+    // is written only when set, and literally (any %VAR% token unexpanded), so what the user wrote
+    // survives the round trip rather than being baked in with this machine's expansion.
+    private static void WriteRemoteSessions(StringBuilder sb, RemoteSessionsConfig remoteSessions)
+    {
+        sb.Append("\n[remote_sessions]\n");
+        AppendBool(sb, "enabled", remoteSessions.Enabled);
+        AppendStringIfNotNull(sb, "development_area", remoteSessions.DevelopmentArea);
     }
 
     private static void WriteHost(StringBuilder sb, string key, HostConfig host)

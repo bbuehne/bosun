@@ -19,6 +19,9 @@ internal sealed class BosunConfigRaw
     [TomlPropertyName("claude_sessions")]
     public ClaudeSessionsConfigRaw? ClaudeSessions { get; set; }
 
+    [TomlPropertyName("remote_sessions")]
+    public RemoteSessionsConfigRaw? RemoteSessions { get; set; }
+
     [TomlPropertyName("hosts")]
     public Dictionary<string, HostConfigRaw>? Hosts { get; set; }
 }
@@ -27,6 +30,15 @@ internal sealed class ClaudeSessionsConfigRaw
 {
     [TomlPropertyName("enabled")]
     public bool? Enabled { get; set; }
+}
+
+internal sealed class RemoteSessionsConfigRaw
+{
+    [TomlPropertyName("enabled")]
+    public bool? Enabled { get; set; }
+
+    [TomlPropertyName("development_area")]
+    public string? DevelopmentArea { get; set; }
 }
 
 internal sealed class GlobalConfigRaw
