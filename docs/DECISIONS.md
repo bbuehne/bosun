@@ -2500,6 +2500,9 @@ record what has been decided since, and they win where the two differ.
 - The way in: shape B, a connector in regular Claude chats through a Cloudflare Tunnel (addendum
   "the way in is shape B").
 - Settled during implementation planning, not a decision: how this shares code with ADR-021.
+- Changed on 2026-11-09 after a design review: Bosun never hands a brief to a session as a prompt
+  (addendum `bs-4xw.19`), and a missing development folder switches off only the tools (addendum
+  `bs-4xw.16`).
 
 **Assumptions (unverified at acceptance).** Each names the issue that checks it and what happens if
 it fails.
@@ -2738,3 +2741,51 @@ suspected cause is a missing RFC 8707 `resource` parameter; no fix was found. Th
 is a Cloudflare Worker running `@cloudflare/workers-oauth-provider` that does the sign-in itself,
 admits only the maintainer, and forwards to the tunnel. Whether the Access route works today can only
 be settled by trying it.
+
+### Addendum (2026-11-09): Bosun never submits the brief, maintainer decision (`bs-4xw.19`)
+
+Found by the 2026-11-09 design review. Decision 3's "Create project" row says Claude Code is "started
+with the brief". The caller is a Claude conversation, which may have read mail, documents or web
+pages, and the maintainer's Claude Code runs in `auto` permission mode. A brief handed to the session
+as its first prompt would therefore be a command supplied by the caller, acted on with no human
+step. Sign-in does not help: the caller is properly signed in. That contradicts "none of them runs a
+command passed in by the caller".
+
+Decided:
+
+- **Create project writes the brief to a file in the new project and starts the session idle.**
+  Bosun never types, pastes or passes the brief, or any other caller-supplied text, to a session as
+  a prompt. The maintainer sends the first prompt through Remote Control (for example "read
+  BRIEF.md and start").
+- This holds for every tool, not only Create project: no tool parameter is ever delivered to a
+  session as a prompt or as a command-line argument that Claude Code reads as a prompt. A new tool
+  that needs to is a new decision.
+- The file's name is fixed by Bosun (`BRIEF.md`), not chosen by the caller. It must never be a file
+  Claude Code reads on its own (`CLAUDE.md`, anything under `.claude\`, `.mcp.json`), or the brief
+  would reach the session without the maintainer's prompt. The wider rule for tools that write files
+  is `bs-4xw.18`.
+- **Not changed:** sessions still use the maintainer's normal permission settings, and Bosun passes
+  no permission-mode flag. The review also proposed starting Bosun's sessions in ask-first mode; the
+  maintainer declined that.
+
+Supersedes "Claude Code started with the brief" in Decision 3. Built in `bs-4xw.11`.
+
+### Addendum (2026-11-09): a missing development folder switches off only the tools, maintainer decision (`bs-4xw.16`)
+
+The configuration addendum says Bosun "refuses to start the tools" when `development_area` is
+missing or does not exist. As first built (`bs-4xw.6`), both cases were configuration errors, and a
+configuration error rejects the whole file: with the folder renamed or deleted, Bosun would not
+start, reloads were rejected and host edits could not be saved.
+
+Decided:
+
+- `enabled = true` with no `development_area` value stays a configuration error (rule
+  `remote-sessions-development-area-required`). There is still no default folder.
+- Whether the folder exists is **not** a configuration error. It is checked each time a remote tool
+  runs. While the folder is missing, the tools refuse and say so, and the rest of Bosun (mounts,
+  profiles, session restore) runs as normal. When the folder comes back, the tools work again
+  without a restart.
+
+Following from that, not a separate maintainer decision: a value the path guard refuses as an area (a
+relative path, a network path, a whole drive) is treated the same way. The tools stay off and Bosun
+reports why; it is not a configuration error.
