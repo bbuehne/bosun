@@ -168,10 +168,7 @@ public sealed class ToolRegistryAdversarialTests
     /// back to a list and append a tool. The appended tool would then be advertised (if the MCP layer
     /// lists <c>Tools</c>) while lookup, which uses a separate dictionary, does not know it.
     /// </summary>
-    [Fact(Skip = "BUG (low, in-process only): ToolRegistry.Tools returns the internal List<IRemoteTool>. " +
-                 "Repro: var r = new ToolRegistry([t]); ((List<IRemoteTool>)r.Tools).Add(evil); " +
-                 "r.Tools now lists 'evil' but r.TryGet(\"evil\") is false. Fix: expose ordered.AsReadOnly() " +
-                 "or an ImmutableArray. Unskip when fixed.")]
+    [Fact]
     public void The_listed_tools_cannot_be_mutated_through_a_cast()
     {
         var registry = new ToolRegistry([new CountingTool("a")]);

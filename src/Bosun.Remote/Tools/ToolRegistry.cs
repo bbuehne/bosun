@@ -43,7 +43,9 @@ public sealed class ToolRegistry
             ordered.Add(tool);
         }
 
-        Tools = ordered;
+        // Read-only wrapper, not the list itself: a caller must not be able to cast Tools back to a
+        // List and add a tool that lookup does not know.
+        Tools = ordered.AsReadOnly();
     }
 
     /// <summary>The tools in registration order.</summary>
