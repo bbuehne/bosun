@@ -2789,3 +2789,50 @@ Decided:
 Following from that, not a separate maintainer decision: a value the path guard refuses as an area (a
 relative path, a network path, a whole drive) is treated the same way. The tools stay off and Bosun
 reports why; it is not a configuration error.
+
+### Addendum (2026-11-09): the clone tool takes repositories from an owner allow-list, maintainer decision (`bs-4xw.20`)
+
+The design review (`bs-4xw.20`) found that Clone and open can run someone else's code. A repository's
+`.claude/` hooks run as the maintainer once Claude Code starts in a trusted folder, and
+`C:/Users/Barry/Development` is marked trusted in `~/.claude.json`. If the Claude conversation that
+drives the tools reads hostile text and is talked into cloning an attacker's repository, the
+attacker's hooks could run on the workstation in one tool call.
+
+The first proposal (no trust approval through a tool; clone only the maintainer's own repositories;
+refuse to open a clone that contains `.claude/` or `.mcp.json`) was rejected by the maintainer: nearly
+all the maintainer's own repositories contain `.claude/`, so it would have refused the work the
+feature exists for.
+
+Decided: **one rule, on the clone tool only.** Clone and open clones a repository only when its owner
+is on an allow-list.
+
+- The list is the signed-in `gh` account, plus any owners or organisations named in
+  `[remote_sessions] clone_owners` (optional, default empty).
+- The tool takes a GitHub repository as `owner/name`. It does not take a URL, and it clones from
+  github.com only.
+- The owner that is checked is the one GitHub reports for the repository, not the text the caller
+  sent, so a renamed or transferred repository is judged by where it lives now. Owner names compare
+  without regard to case.
+- A refused owner is a tool error that names the owner and says how to allow it. Nothing is cloned.
+
+Everything else is unrestricted by this decision:
+
+- No tool checks a project for `.claude/` or `.mcp.json`.
+- Open or resume project opens any existing folder in the development area.
+- The trust-prompt relay stays as designed in decision A.
+
+Still to be checked, in the `bs-4xw.3` spike (step 4): whether trust on a parent folder covers a new
+folder beneath it. If it does, new projects and clones start with no trust prompt. If it does not,
+who answers the prompt for a new folder comes back to the maintainer as its own question.
+
+Accepted by the maintainer as residual risk:
+
+- A fork under the maintainer's account passes the owner check and carries someone else's content.
+  It exists only because the maintainer forked it.
+- A third-party repository can still be reached in two steps: a running session clones it with
+  `git clone`, then Open project opens it. This is the exposure the maintainer already has at the
+  desk. The phone-side approval of connector tool calls is the only human step in that chain, and
+  only while it is left on "ask". How claude.ai applies that setting to this connector is not
+  verified.
+- A project's `.mcp.json` servers are believed to need their own approval in Claude Code before they
+  start, which would leave hooks as the main exposure. Not verified on this machine.
