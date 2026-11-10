@@ -2872,3 +2872,37 @@ Because names may contain spaces, every program Bosun starts with a project name
 started with an argument list quoted by Bosun, never through a shell, and with `--` before positional
 arguments where the program supports it. That is a build rule for `bs-4xw.8`, `bs-4xw.11` and
 `bs-4xw.13`, not a new decision.
+
+### Addendum (2026-11-09): no tool takes a path to write to, maintainer decision (`bs-4xw.18`)
+
+The path guard (`bs-4xw.7`) limits where a tool writes, not what. Inside a project there are files
+that make other programs run commands: `.claude\settings.json` (Claude Code hooks), `.git\hooks\`
+and `.git\config` (`core.hooksPath`, `core.fsmonitor`). A tool that wrote caller-supplied content to
+a caller-chosen path would be a way to run a command passed in by the caller, against Decision 3.
+
+Decided:
+
+- **No tool takes a path to write to.** A tool that writes a file uses a name fixed in Bosun's code.
+- **The only caller-supplied content any tool writes is the brief**, into `BRIEF.md` in a new
+  project (`bs-4xw.19`).
+- Everything else a new project contains is written by Bosun's own templates or by the fixed setup
+  programs (`git init`, `gh repo create`, Beads, Graphify), never from caller text.
+- A tool that needs to write anything else, or to take a path inside a project for any purpose, is a
+  new decision. That decision also settles which characters such a path may contain (left open by
+  the `bs-4xw.17` addendum, which covers project names only).
+
+What this costs, accepted by the maintainer:
+
+- Content cannot be sent from the phone conversation into an existing project through the tools.
+  Files (including images and large documents) reach a project without a model in between: the
+  maintainer uploads them to a drop folder in the repository (from GitHub in the phone's browser) or
+  to a synced cloud folder, and tells the running session to use them. That is the maintainer's own
+  practice and needs no Bosun code. A file the maintainer commits is no more exposure than a commit
+  made at the desk.
+- A project whose session will not start (for example a broken hook) cannot be repaired through the
+  tools. The remote desktop safety net (decision A, `bs-4xw.2`) covers it, by design.
+- New-project setup cannot take caller text for `CLAUDE.md` or other files Claude Code reads on its
+  own, since that text would reach the session as a prompt with no step by the maintainer.
+
+Not verified: whether Remote Control on the phone accepts attachments directly (a check for the
+`bs-4xw.3` spike).
