@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ADR-024: the remote-session tool framework and the development-area path guard.
+
+    Hard rules for this project (ADR-024 "Consequences"):
+      * It must NOT reference WPF (UseWPF stays false) or the Bosun project. The service and MCP
+        layer that will grow here have to be buildable and testable without a UI.
+      * No PublishTrimmed (CLAUDE.md section 4).
+      * No tool here runs a command supplied by the caller.
+
+    net10.0-windows rather than plain net10.0: the path guard encodes Windows path semantics
+    (drive letters, device names, junctions, case-insensitivity) and the sibling work in this
+    project (pseudo console, bs-4xw.8) needs Windows APIs. The -windows moniker does not pull in
+    WPF; that needs UseWPF.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Bosun.Remote</RootNamespace>
+    <AssemblyName>Bosun.Remote</AssemblyName>
+    <UseWPF>false</UseWPF>
+    <UseWindowsForms>false</UseWindowsForms>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Bosun.Remote.Tests" />
+  </ItemGroup>
+
+</Project>
