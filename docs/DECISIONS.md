@@ -2836,3 +2836,39 @@ Accepted by the maintainer as residual risk:
   verified.
 - A project's `.mcp.json` servers are believed to need their own approval in Claude Code before they
   start, which would leave hooks as the main exposure. Not verified on this machine.
+
+### Addendum (2026-11-09): which characters a project name may contain, maintainer decision (`bs-4xw.17`)
+
+The path guard (`bs-4xw.7`) stops a name from leaving the development area. A project name is also
+handed on to other programs (`git`, `gh`, `claude`), and there some characters take on meaning: shell
+characters (`& ; % ! $ ^` and the backtick), a leading `-` (read as an option), and Unicode
+lookalikes that Windows best-fit conversion turns into `\`, `:`, `.` or `"` for a program that reads
+its arguments through an ANSI entry point (confirmed on this machine with code page 1252).
+
+The design review proposed letters, digits, `.`, `_` and `-` only. Checked against the maintainer's
+development folder on 2026-11-09, that would have refused 10 of 59 projects, whose names contain
+spaces.
+
+Decided. A project name is accepted only when all of these hold:
+
+- every character is an ASCII letter, an ASCII digit, a space (U+0020), `.`, `_` or `-`;
+- the first character is a letter or a digit;
+- the last character is not a space or a dot (Windows strips them);
+- it is 1 to 64 characters long.
+
+The rule applies to every project name a tool accepts: an existing project, a new one, and the folder
+a clone lands in. The path guard's existing checks (reserved device names, links, the area boundary)
+still apply as well.
+
+Known and accepted: folders whose names start with a dot (worktree holders such as
+`.holdfast-worktrees`) and folders with non-ASCII names cannot be opened through the tools. On
+2026-11-09 the development folder had three of the first kind and none of the second.
+
+Not decided here: which characters a path *inside* a project may contain (the guard's multi-segment
+`Resolve`). No tool takes such a path from a caller yet; it is settled with the rule for tools that
+write files (`bs-4xw.18`).
+
+Because names may contain spaces, every program Bosun starts with a project name in its arguments is
+started with an argument list quoted by Bosun, never through a shell, and with `--` before positional
+arguments where the program supports it. That is a build rule for `bs-4xw.8`, `bs-4xw.11` and
+`bs-4xw.13`, not a new decision.
