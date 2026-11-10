@@ -80,6 +80,13 @@ internal static class FirstRunConfigTemplate
             # [claude_sessions]
             # enabled = false
 
+            # Start and resume Claude Code sessions remotely, from a Claude chat (ADR-024). Off unless
+            # you set it. When enabled, development_area is required. If the folder goes missing the
+            # remote tools stop working, but Bosun itself keeps running.
+            # [remote_sessions]
+            # enabled          = false
+            # development_area = "%USERPROFILE%\\Development"
+
 
             # An always-on box on the LAN. Persistent mount, quiet session.
             # [hosts.example-nas]

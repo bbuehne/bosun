@@ -20,6 +20,11 @@ public sealed record BosunConfig
     /// every existing construction site keeps meaning "feature off".</summary>
     public ClaudeSessionsConfig ClaudeSessions { get; init; } = new();
 
+    /// <summary>The top-level <c>[remote_sessions]</c> table (ADR-024, bs-4xw.6). Not per host.
+    /// Absent table and absent field both mean disabled; deliberately not <c>required</c> so every
+    /// existing construction site keeps meaning "feature off". Nothing consumes it yet.</summary>
+    public RemoteSessionsConfig RemoteSessions { get; init; } = new();
+
     /// <summary>
     /// Keyed by the host's stable TOML identity (the <c>[hosts.&lt;key&gt;]</c> key itself,
     /// e.g. <c>example-nas</c>) — not by <see cref="HostConfig.DisplayName"/>, which is
@@ -100,6 +105,45 @@ public sealed record ClaudeSessionsConfig
     /// records, and restore sessions lost to a reboot or Terminal exit. Never on by default: it
     /// leads to a plugin the user installs into their own Claude Code configuration.</summary>
     public bool Enabled { get; init; } = DefaultEnabled;
+}
+
+/// <summary>The <c>[remote_sessions]</c> block (ADR-024, docs/CONFIG-SCHEMA.md "Remote sessions").</summary>
+public sealed record RemoteSessionsConfig
+{
+    public const bool DefaultEnabled = false;
+
+    /// <summary><see langword="true"/> lets Bosun start and resume Claude Code sessions on request
+    /// from a remote caller. Never on by default.</summary>
+    public bool Enabled { get; init; } = DefaultEnabled;
+
+    /// <summary>The development area exactly as written in TOML, unexpanded: it may contain
+    /// <c>%VAR%</c> tokens such as <c>%USERPROFILE%</c>. Kept literal so a config rewrite
+    /// (<c>HostConfigTomlWriter</c>) round-trips what the user wrote. There is deliberately no
+    /// default: when <see cref="Enabled"/> is true a missing value is a validation error rather than
+    /// a guessed folder (docs/CONFIG-SCHEMA.md). Consumers wanting a usable path call
+    /// <see cref="ResolveDevelopmentArea"/> -- the one place environment variables in this field are
+    /// expanded.</summary>
+    public string? DevelopmentArea { get; init; }
+
+    /// <summary><see cref="DevelopmentArea"/> with <c>%VAR%</c> environment-variable tokens
+    /// expanded, or <see langword="null"/> when no usable area is configured: the literal is null or
+    /// blank, or it expands to a blank string (an unset variable can do that). Never returns an
+    /// empty or whitespace path, so a consumer is never handed a blank one. Does not check that the
+    /// folder exists. The single point of environment expansion for this field; do not call
+    /// <see cref="Environment.ExpandEnvironmentVariables(string)"/> on it elsewhere.</summary>
+    /// <param name="expandEnvironmentVariables">Injected expander; defaults to
+    /// <see cref="Environment.ExpandEnvironmentVariables(string)"/>. Tests pass a fake so no result
+    /// depends on the machine's real environment.</param>
+    public string? ResolveDevelopmentArea(Func<string, string>? expandEnvironmentVariables = null)
+    {
+        if (string.IsNullOrWhiteSpace(DevelopmentArea))
+        {
+            return null;
+        }
+
+        var expanded = (expandEnvironmentVariables ?? Environment.ExpandEnvironmentVariables)(DevelopmentArea);
+        return string.IsNullOrWhiteSpace(expanded) ? null : expanded;
+    }
 }
 
 /// <summary>One <c>[hosts.&lt;key&gt;]</c> entry.</summary>

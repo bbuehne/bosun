@@ -57,6 +57,11 @@ public static class ConfigParser
             {
                 Enabled = raw.ClaudeSessions?.Enabled ?? ClaudeSessionsConfig.DefaultEnabled,
             },
+            RemoteSessions = new RemoteSessionsConfig
+            {
+                Enabled = raw.RemoteSessions?.Enabled ?? RemoteSessionsConfig.DefaultEnabled,
+                DevelopmentArea = raw.RemoteSessions?.DevelopmentArea,
+            },
             Hosts = hosts,
         };
     }

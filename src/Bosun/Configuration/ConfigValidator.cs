@@ -63,7 +63,9 @@ public static class ConfigValidator
     /// current user's profile when null — production callers may omit it, but no test should:
     /// pass a fake so tests never depend on the developer's real <c>~/.ssh</c> contents.
     /// </param>
-    public static ConfigValidationResult Validate(BosunConfig config, Func<string, bool>? identityFileExists = null)
+    public static ConfigValidationResult Validate(
+        BosunConfig config,
+        Func<string, bool>? identityFileExists = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         identityFileExists ??= DefaultIdentityFileExists;
@@ -71,6 +73,7 @@ public static class ConfigValidator
         var errors = new List<ConfigValidationError>();
 
         ValidateGlobal(config.Global, errors);
+        ValidateRemoteSessions(config.RemoteSessions, errors);
         ValidateDuplicateDisplayNames(config.Hosts, errors);
         ValidateDriveCollisions(config.Hosts, errors);
 
@@ -80,6 +83,26 @@ public static class ConfigValidator
         }
 
         return errors.Count == 0 ? ConfigValidationResult.Valid : new ConfigValidationResult(errors);
+    }
+
+    // ADR-024 / docs/CONFIG-SCHEMA.md "Remote sessions": off means nothing is checked (a stale path in
+    // a disabled table must not stop Bosun starting). On means development_area must be written down --
+    // there is no default, because guessing a folder is exactly what the tools must not do.
+    //
+    // Whether the folder EXISTS is deliberately not checked here (bs-4xw.16). Bosun rejects a whole
+    // config on any validation error, so an existence rule would make a renamed or deleted development
+    // folder refuse startup (no mounts, no Terminal profiles), reject every reload, and refuse every
+    // host save. A folder that goes missing must switch off only the remote tools; each remote tool
+    // checks the folder when it runs. So this reads the literal value only: no %VAR% expansion and no
+    // file-system access.
+    private static void ValidateRemoteSessions(RemoteSessionsConfig remoteSessions, List<ConfigValidationError> errors)
+    {
+        if (remoteSessions.Enabled && string.IsNullOrWhiteSpace(remoteSessions.DevelopmentArea))
+        {
+            errors.Add(new ConfigValidationError(
+                "remote-sessions-development-area-required",
+                "remote_sessions.development_area is required when remote_sessions.enabled is true"));
+        }
     }
 
     private static void ValidateGlobal(GlobalConfig global, List<ConfigValidationError> errors)
