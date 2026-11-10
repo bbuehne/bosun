@@ -125,12 +125,12 @@ public sealed class PathGuardAdversarialTests : IDisposable
     /// <c>WideCharToMultiByte(1252, 0, ...)</c>, <c>C:\Dev\．．＼x∕y：＂＆</c> becomes
     /// <c>C:\Dev\..\x/y:"&amp;</c>. Any program that receives an allowed FullPath
     /// through an ANSI API (a <c>main</c> rather than <c>wmain</c> entry point, <c>GetCommandLineA</c>)
-    /// would see a traversal or a quote break-out. Unskip when bs-4xw.18 decides the characters
-    /// allowed in paths inside a project. Project names are already refused:
+    /// would see a traversal or a quote break-out. Per the ADR-024 addendum for bs-4xw.18 no tool takes
+    /// a path inside a project from a caller; unskip when a tool that does is decided. Project names are refused:
     /// <see cref="Names_that_best_fit_to_metacharacters_are_refused_as_project_names"/>.
     /// </summary>
-    [Theory(Skip = "Waits on bs-4xw.18 (rule for tools that write files), which settles the characters " +
-                   "allowed in paths inside a project. Resolve accepts names that become " +
+    [Theory(Skip = "No tool takes a caller path inside a project (ADR-024 addendum, bs-4xw.18); a tool that does " +
+                   "is a new decision, which also settles these characters. Resolve accepts names that become " +
                    "'..', '\\', '/', ':' or '\"' after ANSI best-fit conversion. Repro: new DevelopmentAreaGuard(area)" +
                    ".Resolve(\"\\uFF0E\\uFF0E\\uFF3C\\uFF0E\\uFF0E\\uFF3CWindows\") is allowed; WideCharToMultiByte(1252, 0) " +
                    "of its FullPath yields '<area>\\..\\..\\Windows'.")]
