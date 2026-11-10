@@ -2906,3 +2906,45 @@ What this costs, accepted by the maintainer:
 
 Not verified: whether Remote Control on the phone accepts attachments directly (a check for the
 `bs-4xw.3` spike).
+
+---
+
+## ADR-025 — Mounts verify the SSH host key against the user's `known_hosts`
+
+**Status:** Accepted (2026-11-09, maintainer decision, `bs-k9x`). The real-rclone check in
+Consequences is still to be run.
+
+**Context.** Found by the 2026-11-09 whole-project review. `RcloneRemoteProvisioner` gave each
+`bosun-<key>` sftp remote `host`, `port`, `user`, `key_file` and `ask_password = false`, and no
+`known_hosts_file`. Per rclone's documentation (not tested here), without that option the sftp
+backend accepts any host key. Anything that answers at a host's address (a spoofed DNS answer, a
+reused IP) would get a persistent drive mounted at login, could serve altered files, and would
+receive the maintainer's writes. The Terminal profiles connect through `ssh.exe`, which does check
+the key, so the two paths to the same host disagreed.
+
+On the maintainer's machine (checked 2026-11-09, no host names recorded): `~\.ssh\known_hosts` has
+22 entries, none hashed, using ed25519, ecdsa and rsa keys; `~\.ssh\config` sets
+`StrictHostKeyChecking accept-new`, so connecting once through a Terminal profile adds an unknown
+host's key and refuses a changed one.
+
+**Decision.**
+
+1. Every sftp remote Bosun provisions sets `known_hosts_file` to the user's
+   `%USERPROFILE%\.ssh\known_hosts`, the file `ssh.exe` uses. Bosun writes the expanded absolute path
+   (the provisioner is a point of use for path expansion). It is not a `hosts.toml` setting.
+2. A host whose key is unknown, or does not match, is not mounted (I1). It gets its own visible
+   failure reason, which tells the maintainer what to do: connect once through this host's Terminal
+   profile (for an unknown key), or check the server and remove the old line (for a changed key).
+   It is never reported as "unreachable".
+3. If the `known_hosts` file does not exist, no host mounts, and the reason says so.
+4. Bosun never writes to `known_hosts`. Adding a key stays a human act, through `ssh.exe`.
+
+**Consequences.**
+
+- A host that has never been reached through `ssh.exe` stops mounting until the maintainer connects
+  to it once. That is the intended cost.
+- Existing remotes are re-provisioned on the next start, because their parameters no longer match.
+- *To be checked against real rclone, by the maintainer:* that every configured host still mounts,
+  and that a wrong key is refused with the new reason. rclone uses Go's SSH library, which may treat
+  a host with several key types in `known_hosts` differently from `ssh.exe`. If that check fails, this
+  decision is reopened.
