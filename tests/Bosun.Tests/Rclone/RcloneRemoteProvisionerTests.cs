@@ -15,7 +15,7 @@ public sealed class RcloneRemoteProvisionerTests
     public async Task EnsureRemoteAsync_creates_the_remote_with_host_port_user_and_key_file_mapped()
     {
         var client = new FakeRcloneClient();
-        var provisioner = new RcloneRemoteProvisioner(client, NullLogger<RcloneRemoteProvisioner>.Instance);
+        var provisioner = NewProvisioner(client);
 
         await provisioner.EnsureRemoteAsync(Host("example-nas", "nas.example.internal", 22, "barry", "/home/barry/.ssh/id_ed25519"), CancellationToken.None);
 
@@ -33,7 +33,7 @@ public sealed class RcloneRemoteProvisionerTests
     {
         // Invariant I10 / ADR-007: key-based auth only.
         var client = new FakeRcloneClient();
-        var provisioner = new RcloneRemoteProvisioner(client, NullLogger<RcloneRemoteProvisioner>.Instance);
+        var provisioner = NewProvisioner(client);
 
         await provisioner.EnsureRemoteAsync(Host("example-nas"), CancellationToken.None);
 
@@ -45,7 +45,7 @@ public sealed class RcloneRemoteProvisionerTests
     public async Task EnsureRemoteAsync_expands_a_leading_tilde_in_identity_file_the_same_way_ConfigValidator_does()
     {
         var client = new FakeRcloneClient();
-        var provisioner = new RcloneRemoteProvisioner(client, NullLogger<RcloneRemoteProvisioner>.Instance);
+        var provisioner = NewProvisioner(client);
         var host = Host("example-nas", identityFile: "~/.ssh/id_ed25519");
 
         await provisioner.EnsureRemoteAsync(host, CancellationToken.None);
@@ -66,10 +66,11 @@ public sealed class RcloneRemoteProvisionerTests
             ["port"] = "22",
             ["user"] = "barry",
             ["key_file"] = "/home/barry/.ssh/id_ed25519",
+            ["known_hosts_file"] = FakeKnownHostsPath,
             ["ask_password"] = "false",
             ["type"] = "sftp", // extra key rclone would echo back -- must not force a rewrite
         });
-        var provisioner = new RcloneRemoteProvisioner(client, NullLogger<RcloneRemoteProvisioner>.Instance);
+        var provisioner = NewProvisioner(client);
 
         await provisioner.EnsureRemoteAsync(host, CancellationToken.None);
 
@@ -87,9 +88,10 @@ public sealed class RcloneRemoteProvisionerTests
             ["port"] = "22", // stale -- host now uses 2222
             ["user"] = "barry",
             ["key_file"] = "/home/barry/.ssh/id_ed25519",
+            ["known_hosts_file"] = FakeKnownHostsPath,
             ["ask_password"] = "false",
         });
-        var provisioner = new RcloneRemoteProvisioner(client, NullLogger<RcloneRemoteProvisioner>.Instance);
+        var provisioner = NewProvisioner(client);
 
         await provisioner.EnsureRemoteAsync(host, CancellationToken.None);
 
@@ -104,7 +106,7 @@ public sealed class RcloneRemoteProvisionerTests
         // about, let alone writes, any name other than this host's own bosun-<key> remote.
         var client = new FakeRcloneClient();
         client.SeedConfig("some-other-users-remote", new Dictionary<string, string> { ["host"] = "unrelated" });
-        var provisioner = new RcloneRemoteProvisioner(client, NullLogger<RcloneRemoteProvisioner>.Instance);
+        var provisioner = NewProvisioner(client);
 
         await provisioner.EnsureRemoteAsync(Host("example-nas"), CancellationToken.None);
 
@@ -113,10 +115,91 @@ public sealed class RcloneRemoteProvisionerTests
     }
 
     [Fact]
+    public async Task EnsureRemoteAsync_sets_known_hosts_file_to_the_path_the_locator_supplies()
+    {
+        // ADR-025 Decision 1. Without this parameter rclone's sftp backend accepts any host key.
+        var client = new FakeRcloneClient();
+
+        await NewProvisioner(client).EnsureRemoteAsync(Host("example-nas"), CancellationToken.None);
+
+        Assert.Equal(FakeKnownHostsPath, Assert.Single(client.CreateConfigCalls).Parameters["known_hosts_file"]);
+    }
+
+    [Fact]
+    public async Task EnsureRemoteAsync_reprovisions_a_remote_that_exists_without_known_hosts_file()
+    {
+        // ADR-025 Consequences: remotes written before this change must pick the option up. They do
+        // because Matches compares every desired parameter against what rclone reports.
+        var client = new FakeRcloneClient();
+        client.SeedConfig("bosun-example-nas", new Dictionary<string, string>
+        {
+            ["host"] = "example.internal",
+            ["port"] = "22",
+            ["user"] = "someuser",
+            ["key_file"] = "/home/someuser/.ssh/id_ed25519",
+            ["ask_password"] = "false",
+            ["type"] = "sftp",
+        });
+
+        await NewProvisioner(client).EnsureRemoteAsync(Host("example-nas"), CancellationToken.None);
+
+        var call = Assert.Single(client.CreateConfigCalls);
+        Assert.Equal(FakeKnownHostsPath, call.Parameters["known_hosts_file"]);
+    }
+
+    [Fact]
+    public async Task EnsureRemoteAsync_reprovisions_a_remote_whose_known_hosts_file_points_elsewhere()
+    {
+        var client = new FakeRcloneClient();
+        client.SeedConfig("bosun-example-nas", new Dictionary<string, string>
+        {
+            ["host"] = "example.internal",
+            ["port"] = "22",
+            ["user"] = "someuser",
+            ["key_file"] = "/home/someuser/.ssh/id_ed25519",
+            ["known_hosts_file"] = "none", // rclone's value for "do not verify"; must never survive
+            ["ask_password"] = "false",
+        });
+
+        await NewProvisioner(client).EnsureRemoteAsync(Host("example-nas"), CancellationToken.None);
+
+        Assert.Equal(FakeKnownHostsPath, Assert.Single(client.CreateConfigCalls).Parameters["known_hosts_file"]);
+    }
+
+    [Fact]
+    public async Task EnsureRemoteAsync_leaves_alone_a_remote_that_already_has_known_hosts_file()
+    {
+        var client = new FakeRcloneClient();
+        client.SeedConfig("bosun-example-nas", new Dictionary<string, string>
+        {
+            ["host"] = "example.internal",
+            ["port"] = "22",
+            ["user"] = "someuser",
+            ["key_file"] = "/home/someuser/.ssh/id_ed25519",
+            ["known_hosts_file"] = FakeKnownHostsPath,
+            ["ask_password"] = "false",
+        });
+
+        await NewProvisioner(client).EnsureRemoteAsync(Host("example-nas"), CancellationToken.None);
+
+        Assert.Empty(client.CreateConfigCalls);
+    }
+
+    [Fact]
+    public void The_real_locator_points_at_dot_ssh_known_hosts_under_the_profile_it_is_given()
+    {
+        // The Func seam is what keeps this off the real profile.
+        var locator = new UserProfileKnownHostsFileLocator(() => @"C:\Fake\Profile");
+
+        Assert.Equal(System.IO.Path.Combine(@"C:\Fake\Profile", ".ssh", "known_hosts"), locator.Path);
+        Assert.True(System.IO.Path.IsPathRooted(locator.Path));
+    }
+
+    [Fact]
     public async Task EnsureAllRemotesAsync_provisions_every_host_in_the_config()
     {
         var client = new FakeRcloneClient();
-        var provisioner = new RcloneRemoteProvisioner(client, NullLogger<RcloneRemoteProvisioner>.Instance);
+        var provisioner = NewProvisioner(client);
         var config = new BosunConfig
         {
             Global = new GlobalConfig(),
@@ -132,6 +215,17 @@ public sealed class RcloneRemoteProvisionerTests
         Assert.Equal(2, client.CreateConfigCalls.Count);
         Assert.Contains(client.CreateConfigCalls, c => c.RemoteName == "bosun-example-nas");
         Assert.Contains(client.CreateConfigCalls, c => c.RemoteName == "bosun-example-jump");
+    }
+
+    /// <summary>A fictional path: nothing here resolves or reads the real user profile.</summary>
+    private const string FakeKnownHostsPath = @"C:\Fake\Profile\.ssh\known_hosts";
+
+    private static RcloneRemoteProvisioner NewProvisioner(FakeRcloneClient client) =>
+        new(client, new FakeKnownHostsFileLocator(FakeKnownHostsPath), NullLogger<RcloneRemoteProvisioner>.Instance);
+
+    private sealed class FakeKnownHostsFileLocator(string path) : IKnownHostsFileLocator
+    {
+        public string Path { get; } = path;
     }
 
     private static HostConfig Host(

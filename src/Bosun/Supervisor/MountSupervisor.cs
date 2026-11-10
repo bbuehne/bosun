@@ -308,6 +308,12 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         /// <see cref="HostMountSnapshot.LastMountFailureReason"/>.</summary>
         public string? LastMountFailureReason;
 
+        /// <summary>Set alongside <see cref="LastMountFailureReason"/> when that failure was rclone
+        /// refusing the host's SSH key (ADR-025, bs-k9x); <see langword="null"/> for every other
+        /// failure and cleared at the same successful-mount reset. In that case
+        /// <see cref="LastMountFailureReason"/> holds the user-facing sentence, not rclone's text.</summary>
+        public HostKeyFailureKind? LastMountFailureHostKey;
+
         /// <summary>True once an explicit user unmount (<see cref="RequestUnmountAsync"/>) has
         /// completed its drain. Suppresses the persistent tier's auto-mount-on-Ready
         /// (<see cref="OnEnteredReadyAsync"/>) until an explicit user act clears it: a mount request
@@ -522,6 +528,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
                 MountUnavailableCause = mountingAvailability.IsAvailable ? null : mountingAvailability.Cause,
                 ConsecutiveMountFailures = h.ConsecutiveMountFailures,
                 LastMountFailureReason = h.LastMountFailureReason,
+                LastMountFailureHostKey = h.LastMountFailureHostKey,
                 UploadFailureCount = h.State == MountState.Mounted ? (int)Math.Min(h.UploadFailureCount, int.MaxValue) : 0,
             })
             .ToList();
@@ -2130,8 +2137,19 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             var deepProbeFailureReason = string.IsNullOrWhiteSpace(deep.Detail)
                 ? $"deep probe failed entering Mounting: {deep.Outcome}"
                 : $"deep probe failed entering Mounting: {deep.Detail}";
+
+            // ADR-025 / bs-k9x: rclone refusing the host's key is a mount failure like any other --
+            // same counter, same drain, same paced retry, never Mounted (I1) -- but it gets its own
+            // reason, written for the maintainer. rclone's raw text stays in the log line above.
+            var deepHostKeyFailure = HostKeyFailure.Classify(deep.Detail);
+            if (deepHostKeyFailure is { } deepHostKeyKind)
+            {
+                deepProbeFailureReason = HostKeyFailure.Describe(deepHostKeyKind);
+            }
+
             host.ConsecutiveMountFailures++;
             host.LastMountFailureReason = deepProbeFailureReason;
+            host.LastMountFailureHostKey = deepHostKeyFailure;
             await BeginDrainAsync(host, deepProbeFailureReason, DrainCause.MountFailure, ct)
                 .ConfigureAwait(false);
             return;
@@ -2187,8 +2205,19 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             logger.LogError(ex, "mount/mount failed for {HostKey} at {Drive}", host.Key, drive);
             host.MountRetryBackoff = host.MountRetryBackoff.RecordFailure();
             var mountFailureReason = $"mount/mount failed: {ex.Message}";
+
+            // ADR-025 / bs-k9x: as at the deep-probe failure site above. The deep probe passed a
+            // moment ago, so this is rare (the key file changed in between), but mount/mount makes
+            // its own connection and is not exempt.
+            var mountHostKeyFailure = HostKeyFailure.Classify(ex.Message);
+            if (mountHostKeyFailure is { } mountHostKeyKind)
+            {
+                mountFailureReason = HostKeyFailure.Describe(mountHostKeyKind);
+            }
+
             host.ConsecutiveMountFailures++;
             host.LastMountFailureReason = mountFailureReason;
+            host.LastMountFailureHostKey = mountHostKeyFailure;
             await BeginDrainAsync(host, mountFailureReason, DrainCause.MountFailure, ct).ConfigureAwait(false);
             return;
         }
@@ -2207,6 +2236,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
             host.MountRetryBackoff = host.MountRetryBackoff.RecordFailure();
             host.ConsecutiveMountFailures++;
             host.LastMountFailureReason = driveTypeProblem;
+            host.LastMountFailureHostKey = null;
             await BeginDrainAsync(host, driveTypeProblem, DrainCause.MountFailure, ct).ConfigureAwait(false);
             return;
         }
@@ -2216,6 +2246,7 @@ public sealed class MountSupervisor : IMountSupervisor, ISupervisorLiveness, IAs
         host.MountRetryBackoff = BackoffState.Initial;
         host.ConsecutiveMountFailures = 0;
         host.LastMountFailureReason = null;
+        host.LastMountFailureHostKey = null;
         SetState(host, MountState.Mounted, "mount/mount succeeded");
         ResetVfsActivityTracking(host);
         ArmMountedProbeTimer(host);

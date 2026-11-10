@@ -188,6 +188,7 @@ public static class BosunHostFactory
             return client;
         });
 
+        builder.Services.AddSingleton<IKnownHostsFileLocator>(_ => new UserProfileKnownHostsFileLocator());
         builder.Services.AddSingleton<IRcloneRemoteProvisioner, RcloneRemoteProvisioner>();
         builder.Services.AddSingleton<IWinFspDetector, WinFspDetector>();
 

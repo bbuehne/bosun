@@ -380,6 +380,17 @@ right before building any UI.
     ...", and a persistent host puts the tray icon in the error state. The retry
     is paced on the mount-retry ladder (see Backoff), not immediate.
 
+    **Host-key refusals (ADR-025, `bs-k9x`) take the same edge.** Every sftp
+    remote carries `known_hosts_file`, so rclone refuses a key that is unknown, that
+    does not match, or whose `known_hosts` file is missing. Such a refusal arrives as
+    a deep-probe failure entering `Mounting` (or, rarely, a `mount/mount` failure) and
+    is handled exactly like any other: `Mounting -> Draining`, counted, retried on the
+    mount-retry ladder, never `Mounted`. `HostKeyFailure.Classify` recognises it in the
+    error text; `LastMountFailureReason` then holds the user-facing sentence and
+    `LastMountFailureHostKey` says which case, so the window row shows that sentence
+    instead of "mount failed N times; last error: ...", and never "unreachable" (the
+    host answered). No new state and no new route into `Mounting`.
+
     The check **fails closed**: a read that throws, or `NoRootDirectory` straight
     after a successful `mount/mount`, cannot be shown to satisfy I7, so it drains
     like any other mismatch, with a distinct reason ("could not verify ...",

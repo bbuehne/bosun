@@ -22,7 +22,8 @@ public interface IRcloneRemoteProvisioner
 {
     /// <summary>
     /// Ensures the rclone remote for <paramref name="host"/> exists with the correct
-    /// <c>host</c>/<c>port</c>/<c>user</c>/<c>key_file</c> parameters, creating or correcting it
+    /// <c>host</c>/<c>port</c>/<c>user</c>/<c>key_file</c>/<c>known_hosts_file</c> parameters
+    /// (the last makes rclone verify the host's SSH key, ADR-025), creating or correcting it
     /// if necessary. Idempotent and safe to call repeatedly.
     /// </summary>
     Task EnsureRemoteAsync(HostConfig host, CancellationToken cancellationToken);
