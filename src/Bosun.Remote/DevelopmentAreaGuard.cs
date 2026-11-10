@@ -38,12 +38,21 @@ namespace Bosun.Remote;
 /// short names are not special-cased: they can only alias entries that are already inside the
 /// area.</para>
 ///
+/// <para><b>Project names (ADR-024 addendum, bs-4xw.17).</b> <see cref="ResolveProject"/> applies a
+/// fixed alphabet on top of the segment checks. A name is accepted only when every character is an
+/// ASCII letter, an ASCII digit, a space (U+0020 only), <c>.</c>, <c>_</c> or <c>-</c>, the first
+/// character is an ASCII letter or digit, the last is not a space or a dot, and it is 1 to 64
+/// characters long. The input is never trimmed, normalised or case-folded. The characters allowed in
+/// a multi-segment path (<see cref="Resolve"/>) are not covered by that rule.</para>
+///
 /// <para>Comparisons are case-insensitive, as on Windows. Instances are immutable and thread-safe.
 /// The type exposes no member that executes anything.</para>
 /// </summary>
 public sealed class DevelopmentAreaGuard
 {
     private const int MaxSegmentLength = 255;
+
+    private const int MaxProjectNameLength = 64;
 
     private static readonly char[] Separators = ['\\', '/'];
 
@@ -214,7 +223,14 @@ public sealed class DevelopmentAreaGuard
 
     /// <summary>
     /// Resolves a project name: exactly one segment, so a project always sits directly in the
-    /// area. Everything <see cref="Resolve"/> checks applies.
+    /// area. Everything <see cref="Resolve"/> checks applies, and so does the project-name rule
+    /// (ADR-024 addendum, bs-4xw.17): every character is an ASCII letter, an ASCII digit, a space
+    /// (U+0020 only), <c>.</c>, <c>_</c> or <c>-</c>; the first character is an ASCII letter or digit;
+    /// the last is not a space or a dot; and the name is 1 to 64 characters long. A name that passes
+    /// the checks shared with <see cref="Resolve"/> but breaks that rule is
+    /// <see cref="PathRejection.NameNotAllowed"/>. The rule runs before the area is touched, so a
+    /// malformed name is reported as malformed even when the area is unavailable. The input is not
+    /// trimmed, normalised or case-folded.
     /// </summary>
     public PathResolution ResolveProject(string? projectName) => ResolveCore(projectName, singleSegment: true);
 
@@ -257,6 +273,17 @@ public sealed class DevelopmentAreaGuard
             }
         }
 
+        // The project-name alphabet (bs-4xw.17). After the segment checks so their specific reasons
+        // win, and before any file-system access so a bad name never reaches the area checks.
+        if (singleSegment)
+        {
+            var nameProblem = ValidateProjectName(segments[0]);
+            if (nameProblem is not null)
+            {
+                return nameProblem;
+            }
+        }
+
         // Defence in depth: segment validation should already make an escape impossible.
         string full;
         try
@@ -295,6 +322,37 @@ public sealed class DevelopmentAreaGuard
         => candidate.Length > root.Length + 1
            && candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase)
            && candidate[root.Length] == Path.DirectorySeparatorChar;
+
+    /// <summary>
+    /// The project-name rule (ADR-024 addendum, bs-4xw.17). ASCII only, by explicit comparison: no
+    /// culture-sensitive or Unicode-aware character class, no trimming, no normalisation. The detail
+    /// states the rule and does not repeat the name, which may carry control or lookalike characters.
+    /// </summary>
+    private static PathResolution? ValidateProjectName(string name)
+    {
+        if (name.Length is < 1 or > MaxProjectNameLength
+            || !char.IsAsciiLetterOrDigit(name[0])
+            || name[^1] is '.' or ' ')
+        {
+            return RejectName();
+        }
+
+        foreach (var c in name)
+        {
+            if (!(char.IsAsciiLetterOrDigit(c) || c is ' ' or '.' or '_' or '-'))
+            {
+                return RejectName();
+            }
+        }
+
+        return null;
+
+        static PathResolution RejectName() => Reject(
+            PathRejection.NameNotAllowed,
+            "A project name may use only the letters A to Z (no accents), the digits 0 to 9, spaces, "
+            + "'.', '_' and '-'. It must start with a letter or digit, must not end with a space or a "
+            + "dot, and must be 1 to 64 characters long.");
+    }
 
     private static PathResolution? ValidateSegment(string segment)
     {

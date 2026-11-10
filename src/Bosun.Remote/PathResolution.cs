@@ -53,6 +53,13 @@ public enum PathRejection
     /// file, or unreachable). The guard fails closed.
     /// </summary>
     AreaUnavailable,
+
+    /// <summary>
+    /// A project name that is a single, otherwise valid segment but breaks the project-name rule
+    /// (ASCII letters, digits, space, <c>.</c>, <c>_</c>, <c>-</c>; starts with a letter or digit;
+    /// 1 to 64 characters). ADR-024 addendum, bs-4xw.17.
+    /// </summary>
+    NameNotAllowed,
 }
 
 /// <summary>

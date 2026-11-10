@@ -118,16 +118,19 @@ public sealed class PathGuardAdversarialTests : IDisposable
     }
 
     /// <summary>
-    /// Proposed hardening, not current behaviour. The guard accepts these as literal names, which is
-    /// correct for every wide (UTF-16) Windows API. But Windows "best-fit" conversion to the ANSI
-    /// code page maps them to real metacharacters: verified on this machine (ACP 1252) with
+    /// Proposed hardening, not current behaviour. <see cref="DevelopmentAreaGuard.Resolve"/> accepts
+    /// these as literal names, which is correct for every wide (UTF-16) Windows API. But Windows
+    /// "best-fit" conversion to the ANSI code page maps them to real metacharacters: verified on this
+    /// machine (ACP 1252) with
     /// <c>WideCharToMultiByte(1252, 0, ...)</c>, <c>C:\Dev\．．＼x∕y：＂＆</c> becomes
-    /// <c>C:\Dev\..\x/y:"&amp;</c>. Any program that receives an allowed FullPath (or a project name)
+    /// <c>C:\Dev\..\x/y:"&amp;</c>. Any program that receives an allowed FullPath
     /// through an ANSI API (a <c>main</c> rather than <c>wmain</c> entry point, <c>GetCommandLineA</c>)
-    /// would see a traversal or a quote break-out. Unskip if the decision is to refuse non-ASCII
-    /// lookalikes of path and quoting metacharacters.
+    /// would see a traversal or a quote break-out. Unskip when bs-4xw.18 decides the characters
+    /// allowed in paths inside a project. Project names are already refused:
+    /// <see cref="Names_that_best_fit_to_metacharacters_are_refused_as_project_names"/>.
     /// </summary>
-    [Theory(Skip = "NEEDS-DECISION (hardening, 'WorstFit' best-fit mapping): guard accepts names that become " +
+    [Theory(Skip = "Waits on bs-4xw.18 (rule for tools that write files), which settles the characters " +
+                   "allowed in paths inside a project. Resolve accepts names that become " +
                    "'..', '\\', '/', ':' or '\"' after ANSI best-fit conversion. Repro: new DevelopmentAreaGuard(area)" +
                    ".Resolve(\"\\uFF0E\\uFF0E\\uFF3C\\uFF0E\\uFF0E\\uFF3CWindows\") is allowed; WideCharToMultiByte(1252, 0) " +
                    "of its FullPath yields '<area>\\..\\..\\Windows'.")]
@@ -136,21 +139,39 @@ public sealed class PathGuardAdversarialTests : IDisposable
     [InlineData("a\u2215b")]
     [InlineData("a\uFF1Ab")]
     [InlineData("a\uFF02 --flag \uFF02b")]
-    public void Proposed_names_that_best_fit_to_metacharacters_are_refused(string input)
+    public void Proposed_paths_that_best_fit_to_metacharacters_are_refused(string input)
     {
         Assert.False(_guard.Resolve(input).IsAllowed);
-        Assert.False(_guard.ResolveProject(input).IsAllowed);
     }
 
     /// <summary>
-    /// Proposed hardening, not current behaviour. A project name ends up in a session name
+    /// The project-name rule (ADR-024 addendum, bs-4xw.17) is ASCII only, so the lookalikes that
+    /// Windows best-fit conversion turns into <c>..</c>, a separator, a colon or a quote are refused
+    /// as project names, with the name-rule reason rather than a path-shape reason.
+    /// </summary>
+    [Theory]
+    [InlineData("\uFF0E\uFF0E\uFF3C\uFF0E\uFF0E\uFF3CWindows")]
+    [InlineData("\uFF0E\uFF0E")]
+    [InlineData("a\u2215b")]
+    [InlineData("a\uFF1Ab")]
+    [InlineData("a\uFF02 --flag \uFF02b")]
+    public void Names_that_best_fit_to_metacharacters_are_refused_as_project_names(string input)
+    {
+        var result = _guard.ResolveProject(input);
+
+        Assert.Equal(PathRejection.NameNotAllowed, result.Rejection);
+        AssertRejectionIsSafe(_guard, result);
+    }
+
+    /// <summary>
+    /// A project name ends up in a session name
     /// (<c>bosun · &lt;project&gt;</c>) and, in later tools, near command lines. Windows allows these
     /// characters in names; cmd.exe, PowerShell and <c>wt.exe</c> (which splits on <c>;</c>) give them
-    /// meaning. Tools must never build a shell command line from them (IRemoteTool contract), but a
-    /// conservative project-name alphabet would make that mistake harmless.
+    /// meaning. Tools must never build a shell command line from them (IRemoteTool contract), but
+    /// the project-name alphabet (ADR-024 addendum, bs-4xw.17) makes that mistake harmless: none of
+    /// these characters is in it.
     /// </summary>
-    [Theory(Skip = "NEEDS-DECISION (hardening): ResolveProject accepts shell metacharacters. Repro: " +
-                   "guard.ResolveProject(\"x&calc\") and guard.ResolveProject(\"x;new-tab cmd\") are allowed.")]
+    [Theory]
     [InlineData("x&calc")]
     [InlineData("x;new-tab cmd")]
     [InlineData("x^y")]
@@ -158,9 +179,12 @@ public sealed class PathGuardAdversarialTests : IDisposable
     [InlineData("x!PATH!")]
     [InlineData("x`whoami`")]
     [InlineData("x$(whoami)")]
-    public void Proposed_project_names_with_shell_metacharacters_are_refused(string input)
+    public void Project_names_with_shell_metacharacters_are_refused(string input)
     {
-        Assert.False(_guard.ResolveProject(input).IsAllowed);
+        var result = _guard.ResolveProject(input);
+
+        Assert.Equal(PathRejection.NameNotAllowed, result.Rejection);
+        AssertRejectionIsSafe(_guard, result);
     }
 
     // ---- Whitespace tricks ------------------------------------------------------------------
