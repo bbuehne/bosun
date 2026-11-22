@@ -1,4 +1,5 @@
 using Bosun.Configuration;
+using Bosun.Rclone;
 using Bosun.Supervisor;
 
 namespace Bosun.Status;
@@ -162,6 +163,16 @@ public static class StatusDerivation
         // nothing more than an ordinary in-progress retry, forever.
         if (snapshot.ConsecutiveMountFailures > 0)
         {
+            // ADR-025 (bs-k9x): rclone refused the host's SSH key. The host IS reachable, so this stays
+            // here rather than above at "unreachable", and the sentence is the instruction, not
+            // "mount failed N times; last error: ..." wrapped around it. It is still a mount failure,
+            // so a persistent host reads as Error (it will not resolve until the maintainer acts) and
+            // an on-demand one does not escalate the icon -- both through ContributionOf unchanged.
+            if (snapshot.LastMountFailureHostKey is { } hostKeyFailure)
+            {
+                return (StatusCategory.MountFailing, $"{drive} is not mounted -- {HostKeyFailure.Describe(hostKeyFailure)}");
+            }
+
             var count = snapshot.ConsecutiveMountFailures;
             var times = count == 1 ? "1 time" : $"{count} times";
             var lastError = string.IsNullOrEmpty(snapshot.LastMountFailureReason) ? "unknown error" : snapshot.LastMountFailureReason;

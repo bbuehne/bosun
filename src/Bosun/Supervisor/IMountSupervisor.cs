@@ -360,6 +360,17 @@ public sealed record HostMountSnapshot
     public string? LastMountFailureReason { get; init; }
 
     /// <summary>
+    /// Set when the most recent mount attempt failed because rclone refused the host's SSH key
+    /// (ADR-025, bs-k9x): the key is not in <c>known_hosts</c>, does not match it, or the file does
+    /// not exist. <see cref="LastMountFailureReason"/> then holds the user-facing sentence for that
+    /// case instead of rclone's raw text. <see langword="null"/> for any other failure, after a
+    /// successful mount, and if no mount attempt has failed. Lets the status derivation say "host key"
+    /// without matching on the reason text, and keeps it from ever reading as "unreachable": the host
+    /// answered and Bosun declined to trust it.
+    /// </summary>
+    public Rclone.HostKeyFailureKind? LastMountFailureHostKey { get; init; }
+
+    /// <summary>
     /// How many files rclone's VFS reports as having failed to upload (<c>vfs/stats</c>
     /// <c>diskCache.erroredFiles</c>, bs-obf), as of the latest successful poll of this host's mount.
     /// Only ever non-zero for a <see cref="MountState.Mounted"/> on-demand host with
